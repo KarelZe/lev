@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools >= 65.5.1"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "lev"
@@ -9,8 +9,14 @@ authors = [
 ]
 description = "A extremely fast Python library for the Levenshtein distance, written in Rust 🦀."
 readme = "README.md"
-license = {file = "LICENSE.txt"}
+license = {file = "LICENSE"}
+version = "0.1.0"
 requires-python = ">=3.10"
+keywords = [
+    "distance",
+    "levenshtein",
+    "strings",
+]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Programming Language :: Python :: 3 :: Only",
@@ -26,18 +32,24 @@ classifiers = [
 
 dependencies = [
 ]
-dynamic = ["version"]
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
-    "pre-commit",
-    "ruff",
     "commitizen",
+    "pre-commit",
+    "pytest",
+    "ruff",
 ]
 
-[tool.setuptools.dynamic]
-version = {file = "version"}
+benchmark = [
+    "editdistance",
+    "Levenshtein",
+    "matplotlib",
+    "pylev",
+    "rapidfuzz",
+    # "pyxdameraulevenshtein",
+]
+
 
 [project.urls]
 "Homepage" = "https://github.com/KarelZe/lev"
@@ -71,7 +83,7 @@ show_missing = true
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "0.0.1"
+version = "0.1.0"
 tag_format = "$version"
 version_files = [
     "pyproject.toml:version",
@@ -81,6 +93,11 @@ bump_message = "bump: version $current_version → $new_version"
 update_changelog_on_bump = true
 annotated_tag = true
 
+[tool.maturin]
+# bindings = "bin"
+# module-name = "lev"
+# python-source = "python"
+strip = true
 
 [tool.ruff]
 
@@ -88,26 +105,8 @@ annotated_tag = true
 
 # See rules: https://beta.ruff.rs/docs/rules/
 select = [
-    "C",    # flake8-comprehensions
-    "D",    # pydocstyle
-    "E",    # pycodestyle errors
-    "F",    # pyflakes
-    "FURB", # refurb
     "I",    # isort
-    "N",    # pep8-naming
-    "PIE",  # misc lints
-    "PT",   # pytest
-    "PTH",  # flake8-use-pathlib
-    "PGH",  # pygrep
-    "RET",  # return
     "RUF",  # ruff-specific rules
-    "UP",   # pyupgrade
-    "SIM",  # flake8-simplify
-    "W",    # pycodestyle warnings
-]
-
-ignore = [
-    "E501",  # line too long, handled by black
 ]
 
 preview = true
@@ -118,7 +117,3 @@ preview = true
 [tool.ruff.lint.isort]
 known-first-party = ["lev"]
 section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
-
-
-[tool.ruff.lint.pydocstyle]
-convention = "google"
