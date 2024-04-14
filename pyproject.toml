@@ -106,6 +106,9 @@ select = [
     "W",    # pycodestyle warnings
 ]
 
+ignore = [
+    "E501",  # line too long, handled by black
+]
 
 preview = true
 
