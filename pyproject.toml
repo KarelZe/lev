@@ -1,0 +1,121 @@
+[build-system]
+requires = ["setuptools >= 65.5.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lev"
+authors = [
+  { name="Markus Bilz", email="github@markusbilz.com" },
+]
+description = "A extremely fast Python library for the Levenshtein distance, written in Rust 🦀."
+readme = "README.md"
+license = {file = "LICENSE.txt"}
+requires-python = ">=3.10"
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Information Technology",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pre-commit",
+    "ruff",
+    "commitizen",
+]
+
+[tool.setuptools.dynamic]
+version = {file = "version"}
+
+[project.urls]
+"Homepage" = "https://github.com/KarelZe/lev"
+"Bug Tracker" = "https://github.com/KarelZe/lev/issues"
+
+[tool.pytest.ini_options]
+minversion = 8.0
+addopts = "-ra -p no:warnings -v --cov --cov-report term-missing --doctest-modules"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+omit = [
+    "debug_*.py",
+    "tclf/tests/*",
+]
+branch = true
+
+[tool.coverage.report]
+exclude_also = [
+    "def __repr__",
+    "if self\\.debug",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "@(abc\\.)?abstractmethod",
+    "if self.verbose:"
+    ]
+show_missing = true
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+version = "0.0.1"
+tag_format = "$version"
+version_files = [
+    "pyproject.toml:version",
+    "version",
+]
+bump_message = "bump: version $current_version → $new_version"
+update_changelog_on_bump = true
+annotated_tag = true
+
+
+[tool.ruff]
+
+[tool.ruff.lint]
+
+# See rules: https://beta.ruff.rs/docs/rules/
+select = [
+    "C",    # flake8-comprehensions
+    "D",    # pydocstyle
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "FURB", # refurb
+    "I",    # isort
+    "N",    # pep8-naming
+    "PIE",  # misc lints
+    "PT",   # pytest
+    "PTH",  # flake8-use-pathlib
+    "PGH",  # pygrep
+    "RET",  # return
+    "RUF",  # ruff-specific rules
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+    "W",    # pycodestyle warnings
+]
+
+
+preview = true
+
+[tool.ruff.format]
+preview = true
+
+[tool.ruff.lint.isort]
+known-first-party = ["lev"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
