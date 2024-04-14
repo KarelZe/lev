@@ -1,0 +1,119 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "lev"
+authors = [
+  { name="Markus Bilz", email="github@markusbilz.com" },
+]
+description = "A extremely fast Python library for the Levenshtein distance, written in Rust 🦀."
+readme = "README.md"
+license = {file = "LICENSE"}
+version = "0.1.0"
+requires-python = ">=3.10"
+keywords = [
+    "distance",
+    "levenshtein",
+    "strings",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Information Technology",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+]
+
+[project.optional-dependencies]
+dev = [
+    "commitizen",
+    "pre-commit",
+    "pytest",
+    "ruff",
+]
+
+benchmark = [
+    "editdistance",
+    "Levenshtein",
+    "matplotlib",
+    "pylev",
+    "rapidfuzz",
+    # "pyxdameraulevenshtein",
+]
+
+
+[project.urls]
+"Homepage" = "https://github.com/KarelZe/lev"
+"Bug Tracker" = "https://github.com/KarelZe/lev/issues"
+
+[tool.pytest.ini_options]
+minversion = 8.0
+addopts = "-ra -p no:warnings -v --cov --cov-report term-missing --doctest-modules"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+omit = [
+    "debug_*.py",
+    "tclf/tests/*",
+]
+branch = true
+
+[tool.coverage.report]
+exclude_also = [
+    "def __repr__",
+    "if self\\.debug",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "@(abc\\.)?abstractmethod",
+    "if self.verbose:"
+    ]
+show_missing = true
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+version = "0.1.0"
+tag_format = "$version"
+version_files = [
+    "pyproject.toml:version",
+    "version",
+]
+bump_message = "bump: version $current_version → $new_version"
+update_changelog_on_bump = true
+annotated_tag = true
+
+[tool.maturin]
+# bindings = "bin"
+# module-name = "lev"
+# python-source = "python"
+strip = true
+
+[tool.ruff]
+
+[tool.ruff.lint]
+
+# See rules: https://beta.ruff.rs/docs/rules/
+select = [
+    "I",    # isort
+    "RUF",  # ruff-specific rules
+]
+
+preview = true
+
+[tool.ruff.format]
+preview = true
+
+[tool.ruff.lint.isort]
+known-first-party = ["lev"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]

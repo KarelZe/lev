@@ -1,0 +1,13 @@
+[package]
+name = "lev"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# The name of the native library.
+name = "lev"
+# "cdylib" is necessary to produce a shared library for Python to import from.
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.21.1", features = ["extension-module"] }
