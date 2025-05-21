@@ -51,7 +51,7 @@ def plot(measures: dict[str, float]) -> None:
     Args:
         measures (dict[str, float]): dict with library name and measure
     """
-    fig, ax = plt.subplots()
+    _fig, ax = plt.subplots()
     ax.bar(measures.keys(), measures.values())
     ax.set_xlabel(f"Time in ms for n={n:,}")
     ax.set_title("Levenshtein distance w/o cut-off")
