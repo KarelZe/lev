@@ -42,7 +42,6 @@ def measure() -> dict[str, float]:
         number=n,
     )
 
-
     return {
         "editdistance": editdistance_time,
         "levenshtein": levenshtein_time,
