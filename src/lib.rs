@@ -51,6 +51,7 @@ use pyo3::prelude::*;
 /// 2
 /// ```
 #[pyfunction]
+#[pyo3(signature = (s1, s2, /))]
 fn distance(py: Python<'_>, s1: &str, s2: &str) -> usize {
     py.detach(|| levenshtein(s1, s2))
 }
@@ -71,6 +72,7 @@ fn distance(py: Python<'_>, s1: &str, s2: &str) -> usize {
 /// 1.0
 /// ```
 #[pyfunction]
+#[pyo3(signature = (s1, s2, /))]
 fn ratio(py: Python<'_>, s1: &str, s2: &str) -> f64 {
     py.detach(|| {
         if s1.is_ascii() && s2.is_ascii() {
