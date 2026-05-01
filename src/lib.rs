@@ -134,25 +134,24 @@ unsafe fn ucs4_words<'a>(s: &Bound<'a, PyString>) -> Option<&'a [u32]> {
 /// ```
 #[pyfunction]
 #[pyo3(signature = (s1, s2, /))]
-fn distance(py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> usize {
+fn distance(py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> PyResult<usize> {
     // Access CPython's packed buffer directly — no UTF-8 encode, no char
     // decode.  Short inputs (≤ 64 code units) run Hyyrö while holding the
     // GIL; long inputs copy the data then release the GIL for Wagner-Fischer.
     unsafe {
         if let (Some(b1), Some(b2)) = (ucs1_bytes(s1), ucs1_bytes(s2)) {
-            return apply(py, prep_bytes(b1, b2));
+            return Ok(apply(py, prep_bytes(b1, b2)));
         }
         if let (Some(h1), Some(h2)) = (ucs2_shorts(s1), ucs2_shorts(s2)) {
-            return apply(py, prep_fixed(h1, h2));
+            return Ok(apply(py, prep_fixed(h1, h2)));
         }
         if let (Some(w1), Some(w2)) = (ucs4_words(s1), ucs4_words(s2)) {
-            return apply(py, prep_fixed(w1, w2));
+            return Ok(apply(py, prep_fixed(w1, w2)));
         }
     }
     // Mixed-kind fallback (e.g. UCS-1 vs UCS-2).  Rare in practice.
-    let s1 = s1.to_str().expect("valid Python string");
-    let s2 = s2.to_str().expect("valid Python string");
-    levenshtein_unicode_full(s1, s2)
+    // to_str() can fail for strings containing lone surrogates.
+    Ok(levenshtein_unicode_full(s1.to_str()?, s2.to_str()?))
 }
 
 /// Normalized Levenshtein similarity ratio in `[0.0, 1.0]`.
@@ -172,27 +171,26 @@ fn distance(py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) 
 /// ```
 #[pyfunction]
 #[pyo3(signature = (s1, s2, /))]
-fn ratio(py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> f64 {
+fn ratio(py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> PyResult<f64> {
     unsafe {
         if let (Some(b1), Some(b2)) = (ucs1_bytes(s1), ucs1_bytes(s2)) {
             let total = b1.len() + b2.len();
-            if total == 0 { return 1.0; }
-            return 1.0 - apply(py, prep_bytes(b1, b2)) as f64 / total as f64;
+            if total == 0 { return Ok(1.0); }
+            return Ok(1.0 - apply(py, prep_bytes(b1, b2)) as f64 / total as f64);
         }
         if let (Some(h1), Some(h2)) = (ucs2_shorts(s1), ucs2_shorts(s2)) {
             let total = h1.len() + h2.len();
-            if total == 0 { return 1.0; }
-            return 1.0 - apply(py, prep_fixed(h1, h2)) as f64 / total as f64;
+            if total == 0 { return Ok(1.0); }
+            return Ok(1.0 - apply(py, prep_fixed(h1, h2)) as f64 / total as f64);
         }
         if let (Some(w1), Some(w2)) = (ucs4_words(s1), ucs4_words(s2)) {
             let total = w1.len() + w2.len();
-            if total == 0 { return 1.0; }
-            return 1.0 - apply(py, prep_fixed(w1, w2)) as f64 / total as f64;
+            if total == 0 { return Ok(1.0); }
+            return Ok(1.0 - apply(py, prep_fixed(w1, w2)) as f64 / total as f64);
         }
     }
-    let s1 = s1.to_str().expect("valid Python string");
-    let s2 = s2.to_str().expect("valid Python string");
-    ratio_unicode_full(s1, s2)
+    // to_str() can fail for strings containing lone surrogates.
+    Ok(ratio_unicode_full(s1.to_str()?, s2.to_str()?))
 }
 
 /// A Python module implemented in Rust for the Levenshtein distance.
