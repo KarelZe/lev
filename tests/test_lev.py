@@ -1,4 +1,5 @@
-"""Integration tests for the `lev` extension module.
+"""
+Integration tests for the `lev` extension module.
 
 Run after building the extension with `maturin develop` (see README).
 """
@@ -40,11 +41,21 @@ import lev
     ],
 )
 def test_distance(s1: str, s2: str, expected: int) -> None:
+    """
+    Test levenshtein distance.
+
+    Args:
+        s1 (str): left string
+        s2 (str): right string
+        expected (int): expected distance
+
+    """
     assert lev.distance(s1, s2) == expected
     assert lev.distance(s2, s1) == expected  # symmetric
 
 
 def test_distance_long_inputs() -> None:
+    """Test levenshtein distance."""
     # > 64 chars on the shorter side exercises the Wagner-Fischer fallback.
     a = "abc" * 40  # 120 chars
     b = "x" + a
@@ -53,6 +64,7 @@ def test_distance_long_inputs() -> None:
 
 
 def test_distance_64_boundary() -> None:
+    """Test levenshtein distance at 64 char boundary."""
     a64 = "a" * 64
     a65 = "a" * 65
     assert lev.distance(a64, a64) == 0
@@ -77,9 +89,19 @@ def test_distance_64_boundary() -> None:
     ],
 )
 def test_ratio(s1: str, s2: str, expected: float) -> None:
+    """
+    Test ratio implementation.
+
+    Args:
+        s1 (str): left string
+        s2 (str): right string
+        expected (float): expected ratio
+
+    """
     assert math.isclose(lev.ratio(s1, s2), expected, abs_tol=1e-12)
 
 
 def test_ratio_unicode_uses_code_points() -> None:
+    """Test ratio implementation with unicode strings."""
     # 6 + 6 code points; distance 2 => 1 - 2/12.
     assert math.isclose(lev.ratio("résumé", "resume"), 1.0 - 2.0 / 12.0, abs_tol=1e-12)

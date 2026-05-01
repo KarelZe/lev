@@ -49,7 +49,6 @@ benchmark = [
     "matplotlib",
     "pylev",
     "rapidfuzz",
-    # "pyxdameraulevenshtein",
 ]
 
 
@@ -103,13 +102,38 @@ strip = true
 
 [tool.ruff]
 
+line-length = 120
+
 [tool.ruff.lint]
 
 # See rules: https://beta.ruff.rs/docs/rules/
 select = [
+    "A",    # shadow builtins
+    "C4",   # Catch incorrect use of comprehensions, dict, list, etc
+    "D",    # pydocstyle
+    "DOC",  # pydoclint
+    "E",    # PyCodeStyle errors
+    "F",    # Pyflakes rules
+    "FA",   # Enforce from __future__ import annotations
     "I",    # isort
+    "ICN",  # Use common import conventions
+    "ISC",  # Good use of string concatenation
+    "N",    # enforce naming conventions, e.g. ClassName vs function_name
+    "RET",  # Good return practices
     "RUF",  # ruff-specific rules
+    "SIM",  # Common simplification rules
+    "TC",   # Enforce importing certain types in a TYPE_CHECKING block
+    "TD",   # Be diligent with TODO comments
+    "TID",  # Some good import practices
+    "UP",   # Warn if certain things can changed due to newer Python versions
+    "W",    # PyCodeStyle warnings
 ]
+
+ignore = [
+    "D203",
+    "D212",
+    "E501"
+    ]
 
 preview = true
 
