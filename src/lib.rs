@@ -18,11 +18,11 @@
 //!    read the raw buffer directly via the CPython C API, paying zero
 //!    UTF-8 decode cost.  For UCS-1 (`u8`, ≤ U+00FF) the peq table is a
 //!    flat `[u64; 256]` array (O(1) lookup).  For UCS-2 (`u16`) and
-//!    UCS-4 (`u32`) a unified generic implementation uses a
-//!    stack-allocated sorted `(T, u64)` peq array (O(log m) lookup, zero
-//!    heap allocation).  Mixed-kind pairs (e.g. UCS-1 vs UCS-2) decode
-//!    via a reusable thread-local `Vec<char>` buffer and share the same
-//!    generic path via `char`.
+//!    UCS-4 (`u32`) — and for mixed-kind pairs — a unified generic
+//!    implementation uses a stack-allocated sorted `(T, u64)` peq array
+//!    (O(log m) lookup, zero heap allocation).  Mixed-kind pairs upcast
+//!    both buffers to `u32` via `to_u32_buf`; no UTF-8 round-trip, no
+//!    `to_str()`, lone surrogates handled correctly.
 //! 4. **Hyyrö's bit-parallel algorithm** (Hyyrö, 2003) – runs in
 //!    `O(⌈m / w⌉ · n)` time with `w = 64`.  The single-word variant is
 //!    used whenever the shorter input is ≤ 64 code units, which covers
@@ -32,24 +32,12 @@
 //!    stripping.  The GIL is released before this path runs so that other
 //!    Python threads can make progress during long computations.
 
-use std::cell::RefCell;
-
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::PyString;
 
 // ---------------------------------------------------------------------------
-// Thread-local reusable char buffers for the mixed-kind Unicode fallback.
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    static CHAR_BUFS: RefCell<(Vec<char>, Vec<char>)> = const {
-        RefCell::new((Vec::new(), Vec::new()))
-    };
-}
-
-// ---------------------------------------------------------------------------
-// Sealed trait unifying UCS-2 (u16), UCS-4 (u32), and char as peq-key types.
+// Sealed trait unifying UCS-2 (u16) and UCS-4 (u32) as peq-key types.
 // ---------------------------------------------------------------------------
 
 /// Implemented by every code-unit type that can be used in the sorted peq
@@ -57,9 +45,8 @@ thread_local! {
 trait CodeUnit: Ord + Copy + Eq + Send + 'static {
     const SENTINEL: Self;
 }
-impl CodeUnit for u16  { const SENTINEL: Self = u16::MAX;  }
-impl CodeUnit for u32  { const SENTINEL: Self = u32::MAX;  }
-impl CodeUnit for char { const SENTINEL: Self = char::MAX; }
+impl CodeUnit for u16 { const SENTINEL: Self = u16::MAX; }
+impl CodeUnit for u32 { const SENTINEL: Self = u32::MAX; }
 
 // ---------------------------------------------------------------------------
 // Deferred computation result — avoids passing `py` into pure helper fns.
@@ -113,6 +100,27 @@ unsafe fn ucs4_words<'a>(s: &Bound<'a, PyString>) -> Option<&'a [u32]> {
     Some(std::slice::from_raw_parts(data, len))
 }
 
+/// Reads any Python string into an owned `Vec<u32>`, regardless of internal
+/// kind.  Lone surrogates in UCS-2 strings are preserved as-is — no UTF-8
+/// round-trip, so this never fails.  Used for mixed-kind pairs where the two
+/// strings have different CPython encodings.
+unsafe fn to_u32_buf(s: &Bound<'_, PyString>) -> Vec<u32> {
+    let ptr  = s.as_ptr();
+    let len  = ffi::PyUnicode_GET_LENGTH(ptr) as usize;
+    let data = ffi::PyUnicode_DATA(ptr);
+    let kind = ffi::PyUnicode_KIND(ptr);
+    if kind == ffi::PyUnicode_1BYTE_KIND {
+        let p = data as *const u8;
+        (0..len).map(|i| *p.add(i) as u32).collect()
+    } else if kind == ffi::PyUnicode_2BYTE_KIND {
+        let p = data as *const u16;
+        (0..len).map(|i| *p.add(i) as u32).collect()
+    } else {
+        // PyUnicode_4BYTE_KIND
+        std::slice::from_raw_parts(data as *const u32, len).to_vec()
+    }
+}
+
 /// Levenshtein edit distance between two strings.
 ///
 /// The distance is the minimum number of single-character insertions,
@@ -135,9 +143,8 @@ unsafe fn ucs4_words<'a>(s: &Bound<'a, PyString>) -> Option<&'a [u32]> {
 #[pyfunction]
 #[pyo3(signature = (s1, s2, /))]
 fn distance(py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> PyResult<usize> {
-    // Access CPython's packed buffer directly — no UTF-8 encode, no char
-    // decode.  Short inputs (≤ 64 code units) run Hyyrö while holding the
-    // GIL; long inputs copy the data then release the GIL for Wagner-Fischer.
+    // All paths access CPython's packed buffer directly — no UTF-8 encode,
+    // no char decode, no failure modes.  GIL released for Wagner-Fischer.
     unsafe {
         if let (Some(b1), Some(b2)) = (ucs1_bytes(s1), ucs1_bytes(s2)) {
             return Ok(apply(py, prep_bytes(b1, b2)));
@@ -148,10 +155,10 @@ fn distance(py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) 
         if let (Some(w1), Some(w2)) = (ucs4_words(s1), ucs4_words(s2)) {
             return Ok(apply(py, prep_fixed(w1, w2)));
         }
+        // Mixed-kind (e.g. UCS-1 vs UCS-2): upcast both to u32.
+        // Consistent with same-kind paths; lone surrogates preserved.
+        Ok(apply(py, prep_fixed(&to_u32_buf(s1), &to_u32_buf(s2))))
     }
-    // Mixed-kind fallback (e.g. UCS-1 vs UCS-2).  Rare in practice.
-    // to_str() can fail for strings containing lone surrogates.
-    Ok(levenshtein_unicode_full(s1.to_str()?, s2.to_str()?))
 }
 
 /// Normalized Levenshtein similarity ratio in `[0.0, 1.0]`.
@@ -188,9 +195,13 @@ fn ratio(py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> 
             if total == 0 { return Ok(1.0); }
             return Ok(1.0 - apply(py, prep_fixed(w1, w2)) as f64 / total as f64);
         }
+        // Mixed-kind: upcast both to u32.
+        let a = to_u32_buf(s1);
+        let b = to_u32_buf(s2);
+        let total = a.len() + b.len();
+        if total == 0 { return Ok(1.0); }
+        Ok(1.0 - apply(py, prep_fixed(&a, &b)) as f64 / total as f64)
     }
-    // to_str() can fail for strings containing lone surrogates.
-    Ok(ratio_unicode_full(s1.to_str()?, s2.to_str()?))
 }
 
 /// A Python module implemented in Rust for the Levenshtein distance.
@@ -242,7 +253,7 @@ fn hyrro_64_bytes(pattern: &[u8], text: &[u8]) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Generic pipeline for UCS-2 (u16), UCS-4 (u32), and char
+// Generic pipeline for UCS-2 (u16), UCS-4 (u32), and mixed-kind (u32)
 // ---------------------------------------------------------------------------
 
 /// Strip affixes and run Hyyrö, or package slices for deferred WF.
@@ -298,48 +309,9 @@ fn hyrro_64_sorted<T: CodeUnit>(pattern: &[T], text: impl Iterator<Item = T>) ->
 #[inline]
 fn apply<T: Eq + Send + 'static>(py: Python<'_>, prep: Prep<T>) -> usize {
     match prep {
-        Prep::Done(d)    => d,
-        Prep::Wf(s, l)   => py.detach(move || wagner_fischer(&s, &l)),
+        Prep::Done(d)  => d,
+        Prep::Wf(s, l) => py.detach(move || wagner_fischer(&s, &l)),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Mixed-kind fallback (e.g. UCS-1 vs UCS-2)
-// ---------------------------------------------------------------------------
-
-fn levenshtein_unicode_full(s1: &str, s2: &str) -> usize {
-    if s1 == s2 { return 0; }
-    CHAR_BUFS.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let (a, b) = &mut *guard;
-        a.clear(); a.extend(s1.chars());
-        b.clear(); b.extend(s2.chars());
-        // prep_fixed clones into owned Vecs for Wf, so drop of `guard` is safe.
-        let prep = prep_fixed(a.as_slice(), b.as_slice());
-        drop(guard);
-        match prep {
-            Prep::Done(d)  => d,
-            Prep::Wf(s, l) => wagner_fischer(&s, &l),
-        }
-    })
-}
-
-fn ratio_unicode_full(s1: &str, s2: &str) -> f64 {
-    CHAR_BUFS.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let (a, b) = &mut *guard;
-        a.clear(); a.extend(s1.chars());
-        b.clear(); b.extend(s2.chars());
-        let total = a.len() + b.len();
-        if total == 0 { return 1.0; }
-        let prep = prep_fixed(a.as_slice(), b.as_slice());
-        drop(guard);
-        let dist = match prep {
-            Prep::Done(d)  => d,
-            Prep::Wf(s, l) => wagner_fischer(&s, &l),
-        };
-        1.0 - dist as f64 / total as f64
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -416,7 +388,11 @@ fn levenshtein(s1: &str, s2: &str) -> usize {
     if s1.is_ascii() && s2.is_ascii() {
         finish(prep_bytes(s1.as_bytes(), s2.as_bytes()))
     } else {
-        levenshtein_unicode_full(s1, s2)
+        // No Python interpreter in unit tests; cast chars to u32 directly.
+        if s1 == s2 { return 0; }
+        let a: Vec<u32> = s1.chars().map(|c| c as u32).collect();
+        let b: Vec<u32> = s2.chars().map(|c| c as u32).collect();
+        finish(prep_fixed(&a, &b))
     }
 }
 
@@ -537,7 +513,7 @@ mod tests {
             let au: Vec<u16> = a.encode_utf16().collect();
             let bu: Vec<u16> = b.encode_utf16().collect();
             assert_eq!(finish(prep_fixed(&au, &bu)), expected, "u16 ({a:?}, {b:?})");
-            assert_eq!(levenshtein(a, b), expected, "char ({a:?}, {b:?})");
+            assert_eq!(levenshtein(a, b), expected, "u32 ({a:?}, {b:?})");
         }
     }
 
@@ -552,7 +528,7 @@ mod tests {
             let au: Vec<u32> = a.chars().map(|c| c as u32).collect();
             let bu: Vec<u32> = b.chars().map(|c| c as u32).collect();
             assert_eq!(finish(prep_fixed(&au, &bu)), expected, "u32 ({a:?}, {b:?})");
-            assert_eq!(levenshtein(a, b), expected, "char ({a:?}, {b:?})");
+            assert_eq!(levenshtein(a, b), expected, "u32 ({a:?}, {b:?})");
         }
     }
 

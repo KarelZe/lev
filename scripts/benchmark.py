@@ -144,7 +144,7 @@ def plot_by_kind(by_kind: dict[str, dict[str, float]]) -> None:
         ax.set_xticks(x)
         ax.set_xticklabels(kinds)
         ax.legend()
-        ax.set_title(f"lev vs rapidfuzz by string-encoding kind ($n={N_KINDS:,}$ repeats)")
+        ax.set_title(f"runtime by string-encoding kind ($n={N_KINDS:,}$ repeats)")
         matplotx.ylabel_top("time [μs]")
         fig.savefig("benchmark_results_by_kind.png", bbox_inches="tight")
         plt.close(fig)
@@ -158,13 +158,13 @@ def print_kind_table(by_kind: dict[str, dict[str, float]]) -> None:
         by_kind: Kind to library-to-time mapping in seconds.
 
     """
-    header = f"{'Kind':8s}  {'lev [ours]':>12s}  {'rapidfuzz':>12s}  {'ratio':>7s}"
+    header = f"{'Kind':8s}  {'lev [ours]':>12s}  {'rapidfuzz':>12s}  {'speedup':>8s}"
     print(header)
     print("-" * len(header))
     for kind, times in by_kind.items():
         lev_us = times["lev [ours]"] / N_KINDS * 1e6
         rf_us = times["rapidfuzz"] / N_KINDS * 1e6
-        print(f"{kind:8s}  {lev_us:>11.3f}μs  {rf_us:>11.3f}μs  {lev_us / rf_us:>6.2f}x")
+        print(f"{kind:8s}  {lev_us:>11.3f}μs  {rf_us:>11.3f}μs  {rf_us / lev_us:>7.2f}x")
 
 
 if __name__ == "__main__":
