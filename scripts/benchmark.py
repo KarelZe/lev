@@ -36,12 +36,18 @@ def measure() -> dict[str, float]:
         "import Levenshtein",
         number=n,
     )
+    lev_time = timeit(
+        "lev.distance('Lets pretend Marshall Mathers never picked up a pen', 'Lets pretend things woulda been no different')",
+        "import lev",
+        number=n,
+    )
 
     return {
         "editdistance": editdistance_time,
         "levenshtein": levenshtein_time,
         "pylev": pylev_time,
         "rapidfuzz": rapidfuzz_time,
+        "lev": lev_time,
     }
 
 
@@ -54,9 +60,9 @@ def plot(measures: dict[str, float]) -> None:
     _fig, ax = plt.subplots()
     ax.bar(measures.keys(), measures.values())
     ax.set_xlabel(f"Time in ms for n={n:,}")
-    ax.set_title("Levenshtein distance w/o cut-off")
+    ax.set_title("Levenshtein distance (ascii)")
     plt.yscale("log")
-    plt.savefig("bechmark_results.png")
+    plt.savefig("benchmark_results.png")
 
 
 if __name__ == "__main__":
