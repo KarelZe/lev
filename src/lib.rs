@@ -13,23 +13,113 @@
 //! 1. **Identity short-circuit** – equal strings return immediately.
 //! 2. **Common-affix stripping** – matching leading and trailing code
 //!    units are removed before the main computation.
-//! 3. **ASCII fast path** – when both inputs are pure ASCII the
-//!    algorithm operates directly on `&[u8]`, avoiding `char` decoding.
-//!    Pattern bitmasks live in a `[u64; 256]` array indexed by byte
-//!    value.
+//! 3. **Zero-copy CPython buffer access** – Python stores strings in one
+//!    of three packed internal encodings (UCS-1 / UCS-2 / UCS-4).  We
+//!    read the raw buffer directly via the CPython C API, paying zero
+//!    UTF-8 decode cost.  For UCS-1 (`u8`, ≤ U+00FF) the peq table is a
+//!    flat `[u64; 256]` array (O(1) lookup).  For UCS-2 (`u16`) and
+//!    UCS-4 (`u32`) — and for mixed-kind pairs — a unified generic
+//!    implementation uses a stack-allocated sorted `(T, u64)` peq array
+//!    (O(log m) lookup, zero heap allocation).  Mixed-kind pairs upcast
+//!    both buffers to `u32` via `to_u32_buf`; no UTF-8 round-trip, no
+//!    `to_str()`, lone surrogates handled correctly.
 //! 4. **Hyyrö's bit-parallel algorithm** (Hyyrö, 2003) – runs in
-//!    `O(⌈m / w⌉ · n)` time, where `w = 64`. The single-word variant is
-//!    used whenever the shorter input fits in a 64-bit register, which
-//!    covers the overwhelming majority of real-world inputs.
+//!    `O(⌈m / w⌉ · n)` time with `w = 64`.  The single-word variant is
+//!    used whenever the shorter input is ≤ 64 code units, which covers
+//!    the overwhelming majority of real-world inputs.
 //! 5. **Two-row Wagner-Fischer** – a cache-friendly `O(m · n)` fallback
-//!    for the rare case where the shorter input exceeds 64 code units.
-//!
-//! Computation runs with the Python GIL released so other Python
-//! threads make progress while a long call is in flight.
+//!    for inputs whose shorter half exceeds 64 code units after affix
+//!    stripping.  The GIL is released before this path runs so that other
+//!    Python threads can make progress during long computations.
 
-use std::collections::HashMap;
-
+use pyo3::ffi;
 use pyo3::prelude::*;
+use pyo3::types::PyString;
+
+// ---------------------------------------------------------------------------
+// Sealed trait unifying UCS-2 (u16) and UCS-4 (u32) as peq-key types.
+// ---------------------------------------------------------------------------
+
+/// Implemented by every code-unit type that can be used in the sorted peq
+/// array.  `SENTINEL` fills unused array slots and is never searched.
+trait CodeUnit: Ord + Copy + Eq + Send + 'static {
+    const SENTINEL: Self;
+}
+impl CodeUnit for u16 { const SENTINEL: Self = u16::MAX; }
+impl CodeUnit for u32 { const SENTINEL: Self = u32::MAX; }
+
+// ---------------------------------------------------------------------------
+// Deferred computation result — avoids passing `py` into pure helper fns.
+// ---------------------------------------------------------------------------
+
+/// Either a finished distance or owned slices ready for Wagner-Fischer.
+/// The `Wf` variant is produced when the shorter input exceeds 64 code units;
+/// the caller can then release the GIL before dispatching `wagner_fischer`.
+enum Prep<T> {
+    Done(usize),
+    Wf(Vec<T>, Vec<T>),
+}
+
+// ---------------------------------------------------------------------------
+// CPython internal-buffer accessors
+// ---------------------------------------------------------------------------
+
+/// Returns Python's internal UCS-1 buffer (1 byte / code point, ≤ U+00FF).
+#[inline]
+unsafe fn ucs1_bytes<'a>(s: &Bound<'a, PyString>) -> Option<&'a [u8]> {
+    let ptr = s.as_ptr();
+    if ffi::PyUnicode_KIND(ptr) != ffi::PyUnicode_1BYTE_KIND {
+        return None;
+    }
+    let len  = ffi::PyUnicode_GET_LENGTH(ptr) as usize;
+    let data = ffi::PyUnicode_DATA(ptr) as *const u8;
+    Some(std::slice::from_raw_parts(data, len))
+}
+
+/// Returns Python's internal UCS-2 buffer (2 bytes / code point, ≤ U+FFFF).
+#[inline]
+unsafe fn ucs2_shorts<'a>(s: &Bound<'a, PyString>) -> Option<&'a [u16]> {
+    let ptr = s.as_ptr();
+    if ffi::PyUnicode_KIND(ptr) != ffi::PyUnicode_2BYTE_KIND {
+        return None;
+    }
+    let len  = ffi::PyUnicode_GET_LENGTH(ptr) as usize;
+    let data = ffi::PyUnicode_DATA(ptr) as *const u16;
+    Some(std::slice::from_raw_parts(data, len))
+}
+
+/// Returns Python's internal UCS-4 buffer (4 bytes / code point, > U+FFFF).
+#[inline]
+unsafe fn ucs4_words<'a>(s: &Bound<'a, PyString>) -> Option<&'a [u32]> {
+    let ptr = s.as_ptr();
+    if ffi::PyUnicode_KIND(ptr) != ffi::PyUnicode_4BYTE_KIND {
+        return None;
+    }
+    let len  = ffi::PyUnicode_GET_LENGTH(ptr) as usize;
+    let data = ffi::PyUnicode_DATA(ptr) as *const u32;
+    Some(std::slice::from_raw_parts(data, len))
+}
+
+/// Reads any Python string into an owned `Vec<u32>`, regardless of internal
+/// kind.  Lone surrogates in UCS-2 strings are preserved as-is — no UTF-8
+/// round-trip, so this never fails.  Used for mixed-kind pairs where the two
+/// strings have different CPython encodings.
+unsafe fn to_u32_buf(s: &Bound<'_, PyString>) -> Vec<u32> {
+    let ptr  = s.as_ptr();
+    let len  = ffi::PyUnicode_GET_LENGTH(ptr) as usize;
+    let data = ffi::PyUnicode_DATA(ptr);
+    let kind = ffi::PyUnicode_KIND(ptr);
+    if kind == ffi::PyUnicode_1BYTE_KIND {
+        let p = data as *const u8;
+        (0..len).map(|i| *p.add(i) as u32).collect()
+    } else if kind == ffi::PyUnicode_2BYTE_KIND {
+        let p = data as *const u16;
+        (0..len).map(|i| *p.add(i) as u32).collect()
+    } else {
+        // PyUnicode_4BYTE_KIND
+        std::slice::from_raw_parts(data as *const u32, len).to_vec()
+    }
+}
 
 /// Levenshtein edit distance between two strings.
 ///
@@ -52,8 +142,23 @@ use pyo3::prelude::*;
 /// ```
 #[pyfunction]
 #[pyo3(signature = (s1, s2, /))]
-fn distance(py: Python<'_>, s1: &str, s2: &str) -> usize {
-    py.detach(|| levenshtein(s1, s2))
+fn distance(py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> PyResult<usize> {
+    // All paths access CPython's packed buffer directly — no UTF-8 encode,
+    // no char decode, no failure modes.  GIL released for Wagner-Fischer.
+    unsafe {
+        if let (Some(b1), Some(b2)) = (ucs1_bytes(s1), ucs1_bytes(s2)) {
+            return Ok(apply(py, prep_bytes(b1, b2)));
+        }
+        if let (Some(h1), Some(h2)) = (ucs2_shorts(s1), ucs2_shorts(s2)) {
+            return Ok(apply(py, prep_fixed(h1, h2)));
+        }
+        if let (Some(w1), Some(w2)) = (ucs4_words(s1), ucs4_words(s2)) {
+            return Ok(apply(py, prep_fixed(w1, w2)));
+        }
+        // Mixed-kind (e.g. UCS-1 vs UCS-2): upcast both to u32.
+        // Consistent with same-kind paths; lone surrogates preserved.
+        Ok(apply(py, prep_fixed(&to_u32_buf(s1), &to_u32_buf(s2))))
+    }
 }
 
 /// Normalized Levenshtein similarity ratio in `[0.0, 1.0]`.
@@ -73,26 +178,30 @@ fn distance(py: Python<'_>, s1: &str, s2: &str) -> usize {
 /// ```
 #[pyfunction]
 #[pyo3(signature = (s1, s2, /))]
-fn ratio(py: Python<'_>, s1: &str, s2: &str) -> f64 {
-    py.detach(|| {
-        if s1.is_ascii() && s2.is_ascii() {
-            let total = s1.len() + s2.len();
-            if total == 0 {
-                return 1.0;
-            }
-            let dist = levenshtein_bytes(s1.as_bytes(), s2.as_bytes());
-            1.0 - (dist as f64) / (total as f64)
-        } else {
-            let a: Vec<char> = s1.chars().collect();
-            let b: Vec<char> = s2.chars().collect();
-            let total = a.len() + b.len();
-            if total == 0 {
-                return 1.0;
-            }
-            let dist = levenshtein_chars(&a, &b);
-            1.0 - (dist as f64) / (total as f64)
+fn ratio(py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> PyResult<f64> {
+    unsafe {
+        if let (Some(b1), Some(b2)) = (ucs1_bytes(s1), ucs1_bytes(s2)) {
+            let total = b1.len() + b2.len();
+            if total == 0 { return Ok(1.0); }
+            return Ok(1.0 - apply(py, prep_bytes(b1, b2)) as f64 / total as f64);
         }
-    })
+        if let (Some(h1), Some(h2)) = (ucs2_shorts(s1), ucs2_shorts(s2)) {
+            let total = h1.len() + h2.len();
+            if total == 0 { return Ok(1.0); }
+            return Ok(1.0 - apply(py, prep_fixed(h1, h2)) as f64 / total as f64);
+        }
+        if let (Some(w1), Some(w2)) = (ucs4_words(s1), ucs4_words(s2)) {
+            let total = w1.len() + w2.len();
+            if total == 0 { return Ok(1.0); }
+            return Ok(1.0 - apply(py, prep_fixed(w1, w2)) as f64 / total as f64);
+        }
+        // Mixed-kind: upcast both to u32.
+        let a = to_u32_buf(s1);
+        let b = to_u32_buf(s2);
+        let total = a.len() + b.len();
+        if total == 0 { return Ok(1.0); }
+        Ok(1.0 - apply(py, prep_fixed(&a, &b)) as f64 / total as f64)
+    }
 }
 
 /// A Python module implemented in Rust for the Levenshtein distance.
@@ -104,59 +213,35 @@ fn lev(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Core dispatch
+// Affix stripping
 // ---------------------------------------------------------------------------
 
-/// Top-level dispatch into the ASCII or Unicode pipeline.
-fn levenshtein(s1: &str, s2: &str) -> usize {
-    if s1.is_ascii() && s2.is_ascii() {
-        levenshtein_bytes(s1.as_bytes(), s2.as_bytes())
-    } else {
-        let a: Vec<char> = s1.chars().collect();
-        let b: Vec<char> = s2.chars().collect();
-        levenshtein_chars(&a, &b)
-    }
-}
-
-/// Strip the longest common prefix and suffix from two slices.
 fn strip_affix<'a, T: Eq>(a: &'a [T], b: &'a [T]) -> (&'a [T], &'a [T]) {
     let prefix = a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count();
     let (a, b) = (&a[prefix..], &b[prefix..]);
-    let suffix = a
-        .iter()
-        .rev()
-        .zip(b.iter().rev())
-        .take_while(|(x, y)| x == y)
-        .count();
+    let suffix = a.iter().rev().zip(b.iter().rev()).take_while(|(x, y)| x == y).count();
     (&a[..a.len() - suffix], &b[..b.len() - suffix])
 }
 
 // ---------------------------------------------------------------------------
-// ASCII pipeline
+// UCS-1 pipeline  (dedicated O(1) [u64; 256] peq table)
 // ---------------------------------------------------------------------------
 
-fn levenshtein_bytes(a: &[u8], b: &[u8]) -> usize {
-    if a == b {
-        return 0;
-    }
+/// Strip affixes and run Hyyrö, or package slices for deferred WF.
+fn prep_bytes(a: &[u8], b: &[u8]) -> Prep<u8> {
+    if a == b { return Prep::Done(0); }
     let (a, b) = strip_affix(a, b);
-    if a.is_empty() {
-        return b.len();
-    }
-    if b.is_empty() {
-        return a.len();
-    }
+    if a.is_empty() { return Prep::Done(b.len()); }
+    if b.is_empty() { return Prep::Done(a.len()); }
     let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     if short.len() <= 64 {
-        hyrro_64_bytes(short, long)
+        Prep::Done(hyrro_64_bytes(short, long))
     } else {
-        wagner_fischer(short, long)
+        Prep::Wf(short.to_vec(), long.to_vec())
     }
 }
 
-/// Hyyrö's single-word bit-parallel Levenshtein for ASCII patterns.
-///
-/// `pattern` must satisfy `1 ≤ pattern.len() ≤ 64`.
+/// Hyyrö single-word variant for byte patterns.  `pattern.len()` in `1..=64`.
 fn hyrro_64_bytes(pattern: &[u8], text: &[u8]) -> usize {
     debug_assert!((1..=64).contains(&pattern.len()));
     let m = pattern.len();
@@ -168,93 +253,107 @@ fn hyrro_64_bytes(pattern: &[u8], text: &[u8]) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Unicode pipeline
+// Generic pipeline for UCS-2 (u16), UCS-4 (u32), and mixed-kind (u32)
 // ---------------------------------------------------------------------------
 
-fn levenshtein_chars(a: &[char], b: &[char]) -> usize {
-    if a == b {
-        return 0;
-    }
+/// Strip affixes and run Hyyrö, or package slices for deferred WF.
+fn prep_fixed<T: CodeUnit>(a: &[T], b: &[T]) -> Prep<T> {
+    if a == b { return Prep::Done(0); }
     let (a, b) = strip_affix(a, b);
-    if a.is_empty() {
-        return b.len();
-    }
-    if b.is_empty() {
-        return a.len();
-    }
+    if a.is_empty() { return Prep::Done(b.len()); }
+    if b.is_empty() { return Prep::Done(a.len()); }
     let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     if short.len() <= 64 {
-        hyrro_64_chars(short, long)
+        Prep::Done(hyrro_64_sorted(short, long.iter().copied()))
     } else {
-        wagner_fischer(short, long)
+        Prep::Wf(short.to_vec(), long.to_vec())
     }
 }
 
-/// Hyyrö's single-word bit-parallel Levenshtein for Unicode patterns.
-///
-/// `pattern` must satisfy `1 ≤ pattern.len() ≤ 64`.
-fn hyrro_64_chars(pattern: &[char], text: &[char]) -> usize {
+/// Hyyrö single-word variant with a stack-allocated sorted `(T, u64)` peq
+/// array.  No heap allocation; O(log m) peq lookup per text character.
+/// `pattern.len()` must be in `1..=64`.
+fn hyrro_64_sorted<T: CodeUnit>(pattern: &[T], text: impl Iterator<Item = T>) -> usize {
     debug_assert!((1..=64).contains(&pattern.len()));
     let m = pattern.len();
-    let mut peq: HashMap<char, u64> = HashMap::with_capacity(m);
+
+    let mut peq: [(T, u64); 64] = [(T::SENTINEL, 0); 64];
+    let mut peq_len = 0usize;
+
     for (i, &c) in pattern.iter().enumerate() {
-        *peq.entry(c).or_insert(0) |= 1u64 << i;
+        let bit = 1u64 << i;
+        match peq[..peq_len].binary_search_by_key(&c, |p| p.0) {
+            Ok(idx)  => peq[idx].1 |= bit,
+            Err(idx) => {
+                peq.copy_within(idx..peq_len, idx + 1);
+                peq[idx] = (c, bit);
+                peq_len += 1;
+            }
+        }
     }
-    hyrro_inner(m, text.iter().map(|c| peq.get(c).copied().unwrap_or(0)))
+    let peq = &peq[..peq_len];
+
+    hyrro_inner(m, text.map(|c| match peq.binary_search_by_key(&c, |p| p.0) {
+        Ok(idx) => peq[idx].1,
+        Err(_)  => 0,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// GIL-aware dispatch
+// ---------------------------------------------------------------------------
+
+/// Finalise a [`Prep`] result.  `Done` returns immediately.  `Wf` releases
+/// the GIL before running Wagner-Fischer so other threads can make progress
+/// during long O(m·n) computations.
+#[inline]
+fn apply<T: Eq + Send + 'static>(py: Python<'_>, prep: Prep<T>) -> usize {
+    match prep {
+        Prep::Done(d)  => d,
+        Prep::Wf(s, l) => py.detach(move || wagner_fischer(&s, &l)),
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Hyyrö's bit-parallel inner loop (single 64-bit word)
 // ---------------------------------------------------------------------------
 
-/// Core Hyyrö loop. `pm_iter` yields the pattern-match bitmask for each
-/// successive text element.
+/// Core Hyyrö loop shared by all pipelines.  `pm_iter` yields the
+/// pattern-match bitmask for each successive text element.
 ///
 /// Reference: H. Hyyrö, *A bit-vector algorithm for computing
 /// Levenshtein and Damerau edit distances*, Nordic Journal of Computing,
 /// 2003.
 #[inline(always)]
 fn hyrro_inner(m: usize, pm_iter: impl Iterator<Item = u64>) -> usize {
-    // Initial vertical-positive vector: ones in the m low bits.
-    let mut vp: u64 = if m == 64 { !0u64 } else { (1u64 << m) - 1 };
-    let mut vn: u64 = 0;
-    let last_bit = 1u64 << (m - 1);
-    let mut score = m;
+    let mut vp    = if m == 64 { !0u64 } else { (1u64 << m) - 1 };
+    let mut vn    = 0u64;
+    let shift     = (m - 1) as u32;   // bit position of the score cell; hoisted out of the loop
+    let mut score = m as isize;
 
     for pm in pm_iter {
-        let x = pm | vn;
+        let x  = pm | vn;
         let d0 = (((x & vp).wrapping_add(vp)) ^ vp) | x;
-        let hp_pre = vn | !(d0 | vp);
-        let hn_pre = vp & d0;
+        let hp = vn | !(d0 | vp);
+        let hn = vp & d0;
 
-        // Update score from the horizontal delta at the bottom row.
-        if hp_pre & last_bit != 0 {
-            score += 1;
-        }
-        if hn_pre & last_bit != 0 {
-            score -= 1;
-        }
+        // Extract the top bit of hp/hn without branching: shift it to bit 0,
+        // mask, and cast.  Avoids branch mispredictions on random text.
+        score += ((hp >> shift) & 1) as isize - ((hn >> shift) & 1) as isize;
 
-        // Shift in the implicit `+1` horizontal delta at the top row.
-        let hp = (hp_pre << 1) | 1;
-        let hn = hn_pre << 1;
-
-        vp = hn | !(d0 | hp);
-        vn = hp & d0;
+        let hp_s = (hp << 1) | 1;
+        let hn_s = hn << 1;
+        vp = hn_s | !(d0 | hp_s);
+        vn = hp_s & d0;
     }
 
-    score
+    score as usize
 }
 
 // ---------------------------------------------------------------------------
-// Wagner-Fischer fallback (two-row, generic)
+// Wagner-Fischer fallback (two-row, generic over any Eq type)
 // ---------------------------------------------------------------------------
 
-/// Two-row Wagner-Fischer dynamic programming.
-///
-/// `short` should be the shorter of the two inputs to minimize working
-/// memory; runtime is `O(short.len() · long.len())` with a single
-/// `Vec<usize>` allocation of length `short.len() + 1`.
 fn wagner_fischer<T: Eq>(short: &[T], long: &[T]) -> usize {
     let m = short.len();
     let mut row: Vec<usize> = (0..=m).collect();
@@ -262,15 +361,40 @@ fn wagner_fischer<T: Eq>(short: &[T], long: &[T]) -> usize {
         let mut diag = row[0];
         row[0] = j + 1;
         for (i, si) in short.iter().enumerate() {
-            let cost = (si != lj) as usize;
+            let cost  = (si != lj) as usize;
             let above = row[i + 1];
-            let left = row[i];
-            let new_val = (above + 1).min(left + 1).min(diag + cost);
-            diag = above;
-            row[i + 1] = new_val;
+            let left  = row[i];
+            let new   = (above + 1).min(left + 1).min(diag + cost);
+            diag      = above;
+            row[i + 1] = new;
         }
     }
     row[m]
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers (bypass the PyO3 layer; no GIL release)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+fn finish<T: Eq>(prep: Prep<T>) -> usize {
+    match prep {
+        Prep::Done(d)  => d,
+        Prep::Wf(s, l) => wagner_fischer(&s, &l),
+    }
+}
+
+#[cfg(test)]
+fn levenshtein(s1: &str, s2: &str) -> usize {
+    if s1.is_ascii() && s2.is_ascii() {
+        finish(prep_bytes(s1.as_bytes(), s2.as_bytes()))
+    } else {
+        // No Python interpreter in unit tests; cast chars to u32 directly.
+        if s1 == s2 { return 0; }
+        let a: Vec<u32> = s1.chars().map(|c| c as u32).collect();
+        let b: Vec<u32> = s2.chars().map(|c| c as u32).collect();
+        finish(prep_fixed(&a, &b))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -285,12 +409,8 @@ mod tests {
     fn naive(a: &[char], b: &[char]) -> usize {
         let (m, n) = (a.len(), b.len());
         let mut dp = vec![vec![0usize; n + 1]; m + 1];
-        for i in 0..=m {
-            dp[i][0] = i;
-        }
-        for j in 0..=n {
-            dp[0][j] = j;
-        }
+        for i in 0..=m { dp[i][0] = i; }
+        for j in 0..=n { dp[0][j] = j; }
         for i in 1..=m {
             for j in 1..=n {
                 let cost = (a[i - 1] != b[j - 1]) as usize;
@@ -360,7 +480,6 @@ mod tests {
         let a65: String = "a".repeat(65);
         check(&a64, &a64, 0);
         check(&a64, &a65, 1);
-        // Pattern length exactly 64 hits the `m == 64` branch in `hyrro_inner`.
         let mut shifted = String::from("b");
         shifted.push_str(&"a".repeat(63));
         check(&a64, &shifted, 1);
@@ -368,7 +487,6 @@ mod tests {
 
     #[test]
     fn long_inputs_use_wagner_fischer() {
-        // > 64 chars on the shorter side forces the WF path.
         let a: String = "abc".repeat(40); // 120 chars
         let mut b = a.clone();
         b.insert(0, 'x');
@@ -382,6 +500,37 @@ mod tests {
         check("xxx_kitten_yyy", "xxx_sitting_yyy", 3);
         check("prefix-foo", "prefix-bar", 3);
         check("foo-suffix", "bar-suffix", 3);
+    }
+
+    #[test]
+    fn ucs2_pipeline_matches_oracle() {
+        let cases: &[(&str, &str, usize)] = &[
+            ("日本語", "日本", 1),
+            ("日本語のテスト", "日本語のテスツ", 1),
+            ("한국어", "한국", 1),
+            ("中文", "中英文", 1),
+        ];
+        for &(a, b, expected) in cases {
+            let au: Vec<u16> = a.encode_utf16().collect();
+            let bu: Vec<u16> = b.encode_utf16().collect();
+            assert_eq!(finish(prep_fixed(&au, &bu)), expected, "u16 ({a:?}, {b:?})");
+            assert_eq!(levenshtein(a, b), expected, "u32 ({a:?}, {b:?})");
+        }
+    }
+
+    #[test]
+    fn ucs4_pipeline_matches_oracle() {
+        let cases: &[(&str, &str, usize)] = &[
+            ("🦀🐍", "🐍🦀", 2),
+            ("🎉🎊🎈", "🎊🎈", 1),
+            ("😀😁😂", "😀😂", 1),
+        ];
+        for &(a, b, expected) in cases {
+            let au: Vec<u32> = a.chars().map(|c| c as u32).collect();
+            let bu: Vec<u32> = b.chars().map(|c| c as u32).collect();
+            assert_eq!(finish(prep_fixed(&au, &bu)), expected, "u32 ({a:?}, {b:?})");
+            assert_eq!(levenshtein(a, b), expected, "u32 ({a:?}, {b:?})");
+        }
     }
 
     #[test]
@@ -403,7 +552,6 @@ mod tests {
             ("the quick brown fox", "the quik brwn fx"),
             ("résumé", "résume"),
             ("日本語のテスト", "日本語のテスツ"),
-            // Cross the 64-char boundary on at least one side.
             (&long_a, &long_b),
             (&long_c, &long_d),
         ];
@@ -416,14 +564,9 @@ mod tests {
 
     #[test]
     fn ratio_basic() {
-        // Replicate the public formula directly.
         let r = |a: &str, b: &str| -> f64 {
             let total = a.chars().count() + b.chars().count();
-            if total == 0 {
-                1.0
-            } else {
-                1.0 - levenshtein(a, b) as f64 / total as f64
-            }
+            if total == 0 { 1.0 } else { 1.0 - levenshtein(a, b) as f64 / total as f64 }
         };
         assert!((r("", "") - 1.0).abs() < 1e-12);
         assert!((r("abc", "abc") - 1.0).abs() < 1e-12);
