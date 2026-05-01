@@ -43,15 +43,6 @@ dev = [
     "ruff",
 ]
 
-benchmark = [
-    "editdistance",
-    "Levenshtein",
-    "matplotlib",
-    "pylev",
-    "rapidfuzz",
-]
-
-
 [project.urls]
 "Homepage" = "https://github.com/KarelZe/lev"
 "Bug Tracker" = "https://github.com/KarelZe/lev/issues"
