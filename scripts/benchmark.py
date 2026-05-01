@@ -75,7 +75,7 @@ def plot(measures: dict[str, float]) -> None:
         fig, ax = plt.subplots()
 
         # Plotting logic on the Axes object
-        ax.bar(list(measures.keys()), list(measures.values()))
+        ax.bar(measures.keys(), measures.values())
 
         # Formatting using Axes methods
         ax.tick_params(axis="x", labelrotation=90)
