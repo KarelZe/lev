@@ -85,7 +85,7 @@ def plot(measures: dict[str, float]) -> None:
         matplotx.ylabel_top("time [ms]")
 
         # Save and close using the Figure object
-        fig.savefig("benchmark_results.png", transparent=True, bbox_inches="tight")
+        fig.savefig("benchmark_results.png", bbox_inches="tight")
         plt.close(fig)
 
 
