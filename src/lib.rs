@@ -326,19 +326,20 @@ fn apply<T: Eq + Send + 'static>(py: Python<'_>, prep: Prep<T>) -> usize {
 /// 2003.
 #[inline(always)]
 fn hyrro_inner(m: usize, pm_iter: impl Iterator<Item = u64>) -> usize {
-    let mut vp = if m == 64 { !0u64 } else { (1u64 << m) - 1 };
-    let mut vn = 0u64;
-    let last   = 1u64 << (m - 1);
-    let mut score = m;
+    let mut vp    = if m == 64 { !0u64 } else { (1u64 << m) - 1 };
+    let mut vn    = 0u64;
+    let shift     = (m - 1) as u32;   // bit position of the score cell; hoisted out of the loop
+    let mut score = m as isize;
 
     for pm in pm_iter {
-        let x    = pm | vn;
-        let d0   = (((x & vp).wrapping_add(vp)) ^ vp) | x;
-        let hp   = vn | !(d0 | vp);
-        let hn   = vp & d0;
+        let x  = pm | vn;
+        let d0 = (((x & vp).wrapping_add(vp)) ^ vp) | x;
+        let hp = vn | !(d0 | vp);
+        let hn = vp & d0;
 
-        if hp & last != 0 { score += 1; }
-        if hn & last != 0 { score -= 1; }
+        // Extract the top bit of hp/hn without branching: shift it to bit 0,
+        // mask, and cast.  Avoids branch mispredictions on random text.
+        score += ((hp >> shift) & 1) as isize - ((hn >> shift) & 1) as isize;
 
         let hp_s = (hp << 1) | 1;
         let hn_s = hn << 1;
@@ -346,7 +347,7 @@ fn hyrro_inner(m: usize, pm_iter: impl Iterator<Item = u64>) -> usize {
         vn = hp_s & d0;
     }
 
-    score
+    score as usize
 }
 
 // ---------------------------------------------------------------------------
