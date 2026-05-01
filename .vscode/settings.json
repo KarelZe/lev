@@ -7,6 +7,7 @@
         "Mathers",
         "matplotlib",
         "maturin",
+        "prek",
         "rapidfuzz",
         "woulda"
     ]

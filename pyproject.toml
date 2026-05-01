@@ -37,9 +37,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "commitizen",
-    "pre-commit",
-    "pytest",
+    "prek",
     "pytest-cov",
+    "pytest",
     "ruff",
 ]
 
