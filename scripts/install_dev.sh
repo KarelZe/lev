@@ -9,6 +9,10 @@ uv run maturin build --release
 SO_SRC=$(uv run python -c "
 import zipfile, glob
 wheels = glob.glob('target/wheels/lev-*.whl')
+wheels = glob.glob('target/wheels/lev-*.whl')
+if not wheels:
+    print('Error: No wheels found in target/wheels/')
+    exit(1)
 w = max(wheels, key=__import__('os').path.getmtime)
 with zipfile.ZipFile(w) as z:
     names = [n for n in z.namelist() if n.endswith('.so')]
