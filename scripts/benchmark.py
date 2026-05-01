@@ -1,4 +1,5 @@
 """Simple benchmarking script for popular levenshtein implementations."""
+
 from timeit import timeit
 
 import matplotlib.pyplot as plt
