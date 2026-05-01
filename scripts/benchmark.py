@@ -1,8 +1,20 @@
+# /// script
+# requires-python = ">=3.13"
+# dependencies = [
+#     "editdistance>=0.8.1",
+#     "levenshtein>=0.27.3",
+#     "matplotlib>=3.10.9",
+#     "matplotx>=0.3.10",
+#     "pylev>=1.4.0",
+#     "rapidfuzz>=3.14.5",
+# ]
+# ///
 """Simple benchmarking script for popular levenshtein implementations."""
 
 from timeit import timeit
 
 import matplotlib.pyplot as plt
+import matplotx
 
 n = 1_000
 
@@ -46,7 +58,7 @@ def measure() -> dict[str, float]:
         "levenshtein": levenshtein_time,
         "pylev": pylev_time,
         "rapidfuzz": rapidfuzz_time,
-        "lev": lev_time,
+        "lev [ours]": lev_time,
     }
 
 
@@ -55,15 +67,26 @@ def plot(measures: dict[str, float]) -> None:
     Plot measures.
 
     Args:
-        measures (dict[str, float]): dict with library name and measure
+        measures (dict[str, float]): Dictionary with library name and measure.
 
     """
-    _fig, ax = plt.subplots()
-    ax.bar(measures.keys(), measures.values())
-    ax.set_xlabel(f"Time in ms for n={n:,}")
-    ax.set_title("Levenshtein distance (ascii)")
-    plt.yscale("log")
-    plt.savefig("benchmark_results.png")
+    with plt.style.context(matplotx.styles.duftify(matplotx.styles.github["dark"])):
+        # Generate Figure and Axes objects
+        fig, ax = plt.subplots()
+
+        # Plotting logic on the Axes object
+        ax.bar(measures.keys(), measures.values())
+
+        # Formatting using Axes methods
+        ax.tick_params(axis="x", labelrotation=90)
+        ax.set_yscale("log")
+        ax.set_title(f"Average runtime for Levenshtein distance on ASCII strings with $n={n:,}$ repeats")
+
+        matplotx.ylabel_top("time [ms]")
+
+        # Save and close using the Figure object
+        fig.savefig("benchmark_results.png", bbox_inches="tight")
+        plt.close(fig)
 
 
 if __name__ == "__main__":
