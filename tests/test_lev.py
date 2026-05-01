@@ -40,7 +40,6 @@ import lev
         ("🦀🐍", "🐍🦀", 2),
         # pylev (duplicates from above removed)
         # https://github.com/toastdriven/pylev/blob/700700ec1b3f637ef1a59bb46f1b2176def2886d/tests.py#L7
-        ("kitten", "sitting", 3),
         ("meilenstein", "levenshtein", 4),
         ("levenshtein", "frankenstein", 6),
         ("confide", "deceit", 6),
