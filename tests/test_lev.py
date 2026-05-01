@@ -38,6 +38,12 @@ import lev
         ("café", "cafe", 1),
         ("日本語", "日本", 1),
         ("🦀🐍", "🐍🦀", 2),
+        # pylev (duplicates from above removed)
+        # https://github.com/toastdriven/pylev/blob/700700ec1b3f637ef1a59bb46f1b2176def2886d/tests.py#L7
+        ("meilenstein", "levenshtein", 4),
+        ("levenshtein", "frankenstein", 6),
+        ("confide", "deceit", 6),
+        ("CUNsperrICY", "conspiracy", 8),
     ],
 )
 def test_distance(s1: str, s2: str, expected: int) -> None:
