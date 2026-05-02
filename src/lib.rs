@@ -343,14 +343,15 @@ fn hyrro_64_sorted<T: CodeUnit>(pattern: &[T], text: &[T]) -> usize {
         bit <<= 1;
     }
 
-    // SAFETY: j < text.len() from the iteration count passed to hyrro_inner.
+    // SAFETY: j < text.len() (hyrro_inner bounds); slot ∈ [0, MASK] by & MASK invariant,
+    // so slot < SLOTS = vals.len() = keys.len().
     hyrro_inner(pattern.len(), text.len(), |j| {
         let c = unsafe { *text.get_unchecked(j) };
         let mut slot = hslot(c.as_u64(), MASK);
         loop {
-            let v = vals[slot];
+            let v = unsafe { *vals.get_unchecked(slot) };
             if v == 0 { return 0; } // empty → not in pattern
-            if keys[slot] == c { return v; }
+            if unsafe { *keys.get_unchecked(slot) } == c { return v; }
             slot = (slot + 1) & MASK;
         }
     })
@@ -626,9 +627,11 @@ fn hyrro_multiword_sorted<T: CodeUnit>(short: &[T], long: &[T]) -> usize {
                 let base = {
                     let mut slot = hslot(tj.as_u64(), hash_mask);
                     loop {
-                        let ki = hash_idx[slot];
+                        // SAFETY: slot ∈ [0, hash_mask] ⊂ [0, hash_idx.len()).
+                        let ki = unsafe { *hash_idx.get_unchecked(slot) };
                         if ki == u32::MAX { break zero_base; }
-                        if keys[ki as usize] == tj { break ki as usize * w; }
+                        // SAFETY: ki was stored as a valid index into keys (0..n_keys).
+                        if unsafe { *keys.get_unchecked(ki as usize) } == tj { break ki as usize * w; }
                         slot = (slot + 1) & hash_mask;
                     }
                 };
