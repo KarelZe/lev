@@ -37,6 +37,18 @@ Run the test suite:
 cargo test
 ```
 
+## Docs
+
+Build and serve the documentation locally (requires the extension to be compiled first):
+
+```bash
+uv sync
+bash scripts/install_dev.sh
+uv run --with zensical --with "mkdocstrings[python]" zensical serve
+```
+
+Open <http://localhost:8000> in your browser. The server reloads automatically on changes to `docs/` or `zensical.toml`.
+
 ## Benchmarks
 
 ```bash
