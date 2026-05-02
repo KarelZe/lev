@@ -7,33 +7,31 @@
 //!
 //! # Algorithm
 //!
-//! Several well-known optimizations are combined to keep the constant
-//! factor small:
+//! See <https://en.wikipedia.org/wiki/Levenshtein_distance> for the distance
+//! definition.  Several optimizations are layered to minimise the constant factor:
 //!
 //! 1. **Identity short-circuit** – equal strings return immediately.
-//! 2. **Common-affix stripping** – matching leading and trailing code
-//!    units are removed before the main computation.
-//! 3. **Zero-copy CPython buffer access** – Python stores strings in one
-//!    of three packed internal encodings (UCS-1 / UCS-2 / UCS-4).  Kind,
-//!    ascii flag, data pointer, and length are read into a single
-//!    [`UniView`] per string — subsequent dispatch uses locals only, no
-//!    further FFI.  For UCS-1 (`u8`, ≤ U+00FF) the single-word peq table
-//!    is a flat `[u64; 128]` stack array when both strings are ASCII-flagged
-//!    (half-size memset), or `[u64; 256]` otherwise; the multi-word peq is
-//!    always `[u64; 256 × W]` on the stack (no heap allocation, all u8
-//!    values are valid indices).  For UCS-2 (`u16`) and UCS-4 (`u32`) — and
-//!    for mixed-kind pairs — a stack-allocated sorted `(T, u64)` peq array
-//!    is used (O(log m) lookup, zero heap allocation).  Mixed-kind pairs
-//!    upcast both buffers to `u32` via `to_u32_buf`; no UTF-8 round-trip,
-//!    no `to_str()`, lone surrogates handled correctly.
-//! 4. **Hyyrö's bit-parallel algorithm** (Hyyrö, 2003) – runs in
-//!    `O(⌈m / w⌉ · n)` time with `w = 64`.  Two variants are used:
+//! 2. **Common-affix stripping** – shared leading and trailing code units are
+//!    removed before the main computation.
+//! 3. **Zero-copy CPython buffer access** – Python stores strings in one of
+//!    three compact internal encodings (UCS-1 / UCS-2 / UCS-4); see
+//!    [PEP 393](https://peps.python.org/pep-0393/).  Kind, ascii flag, data
+//!    pointer, and length are read from the object header into a [`UniView`]
+//!    without any copy; subsequent dispatch operates on those locals only.
+//!    - *UCS-1* (`u8`, ≤ U+00FF): peq is a flat `[u64; 128]` (pure ASCII) or
+//!      `[u64; 256]` (Latin-1) stack array — O(1) direct-index lookup.
+//!    - *UCS-2* (`u16`) and *UCS-4* (`u32`): peq is a 128-slot stack-allocated
+//!      open-addressing hash table with Fibonacci hashing — O(1) amortized
+//!      lookup at ≤ 50 % load.  Mixed-kind pairs upcast both sides to `u32`;
+//!      no UTF-8 round-trip, lone surrogates preserved.
+//! 4. **Hyyrö's bit-parallel algorithm** – O(⌈m/w⌉ · n) time with w = 64;
+//!    see H. Hyyrö, "A Bit-Vector Algorithm for Computing Levenshtein and
+//!    Damerau Edit Distances", *Nordic Journal of Computing*, 2003.
 //!    - *Single-word* (`m ≤ 64`): one 64-bit word covers the whole pattern.
-//!      UCS-1 uses a flat `[u64; 128/256]` peq table (O(1) lookup); UCS-2/4
-//!      use a sorted `(T, u64)` peq array (O(log m) lookup).
-//!    - *Multi-word* (`m > 64`): `⌈m/64⌉` words with carry propagation.
-//!      UCS-1 keeps the flat peq table (O(1) lookup per text byte); UCS-2/4
-//!      use a sorted flat peq layout with one binary search per text unit.
+//!    - *Multi-word* (`m > 64`): ⌈m/64⌉ words with carry propagation.
+//!      UCS-1 uses a flat `[u64; 256 × W]` stack peq (O(1) lookup, no heap).
+//!      UCS-2/4 use a heap-allocated peq data array addressed through the
+//!      same open-addressing hash index.
 
 use std::os::raw::c_uint;
 
@@ -45,13 +43,35 @@ use pyo3::types::PyString;
 // Sealed trait unifying UCS-2 (u16) and UCS-4 (u32) as peq-key types.
 // ---------------------------------------------------------------------------
 
-/// Implemented by every code-unit type that can be used in the sorted peq
-/// array.  `SENTINEL` fills unused array slots and is never searched.
+/// Implemented by every code-unit type that can be used in the hash-based peq
+/// table.  `SENTINEL` is used to initialize the keys array; occupancy is
+/// tracked separately via the values array (where 0 indicates an empty slot).
 trait CodeUnit: Ord + Copy + Eq + Send + 'static {
     const SENTINEL: Self;
+    fn as_u64(self) -> u64;
 }
-impl CodeUnit for u16 { const SENTINEL: Self = u16::MAX; }
-impl CodeUnit for u32 { const SENTINEL: Self = u32::MAX; }
+impl CodeUnit for u16 {
+    const SENTINEL: Self = u16::MAX;
+    #[inline(always)] fn as_u64(self) -> u64 { self as u64 }
+}
+impl CodeUnit for u32 {
+    const SENTINEL: Self = u32::MAX;
+    #[inline(always)] fn as_u64(self) -> u64 { self as u64 }
+}
+
+/// Fibonacci hash slot: maps a 64-bit key into `[0, mask]` where `mask = 2^k - 1`.
+///
+/// Shifts by `64 - k` to extract the top k bits of the product.  The high bits
+/// of a multiplicative hash have the best avalanche properties — they mix
+/// contributions from all input bits via carry propagation — so this gives
+/// better distribution than extracting middle or low bits.  The result is
+/// already in `[0, mask]`, so no masking step is needed.
+///
+/// See <https://en.wikipedia.org/wiki/Hash_function#Fibonacci_hashing>.
+#[inline(always)]
+fn hslot(key: u64, mask: usize) -> usize {
+    (key.wrapping_mul(0x9e3779b9_7f4a7c15_u64) >> (64 - mask.count_ones())) as usize
+}
 
 // ---------------------------------------------------------------------------
 // CPython internal-buffer accessors
@@ -294,37 +314,52 @@ fn compute_sorted<T: CodeUnit>(a: &[T], b: &[T]) -> usize {
     }
 }
 
-/// Hyyrö single-word variant with a stack-allocated sorted `(T, u64)` peq
-/// array.  No heap allocation; O(log m) peq lookup per text character.
+/// Hyyrö single-word variant with a stack-allocated open-addressing hash table
+/// for the peq lookup.  128 slots for ≤64 distinct pattern chars gives a load
+/// factor of ≤ 0.5, meaning ~1–2 probes on average.
+///
+/// `vals[slot] == 0` is a reliable empty-slot indicator: `bit` starts at 1
+/// and only shifts left, so every written value is non-zero.  No separate
+/// occupancy bitmap is needed, which also sidesteps the U+FFFF sentinel issue.
+///
 /// `pattern.len()` must be in `1..=64`.
 #[inline(always)]
 fn hyrro_64_sorted<T: CodeUnit>(pattern: &[T], text: &[T]) -> usize {
     debug_assert!((1..=64).contains(&pattern.len()));
 
-    let mut peq: [(T, u64); 64] = [(T::SENTINEL, 0); 64];
-    let mut peq_len = 0usize;
+    const SLOTS: usize = 128;
+    const MASK: usize = SLOTS - 1;
+    let mut keys = [T::SENTINEL; SLOTS];
+    let mut vals = [0u64; SLOTS];
 
     let mut bit = 1u64;
     for &c in pattern {
-        match peq[..peq_len].binary_search_by_key(&c, |p| p.0) {
-            Ok(idx)  => peq[idx].1 |= bit,
-            Err(idx) => {
-                peq.copy_within(idx..peq_len, idx + 1);
-                peq[idx] = (c, bit);
-                peq_len += 1;
+        let mut slot = hslot(c.as_u64(), MASK);
+        loop {
+            if vals[slot] == 0 {
+                keys[slot] = c;
+                vals[slot] = bit;
+                break;
             }
+            if keys[slot] == c {
+                vals[slot] |= bit;
+                break;
+            }
+            slot = (slot + 1) & MASK;
         }
         bit <<= 1;
     }
-    let peq = &peq[..peq_len];
 
-    // SAFETY: index `j` is bounded by `text.len()`, the iteration count
-    // passed to hyrro_inner.
+    // SAFETY: j < text.len() (hyrro_inner bounds); slot ∈ [0, MASK] by & MASK invariant,
+    // so slot < SLOTS = vals.len() = keys.len().
     hyrro_inner(pattern.len(), text.len(), |j| {
         let c = unsafe { *text.get_unchecked(j) };
-        match peq.binary_search_by_key(&c, |p| p.0) {
-            Ok(idx) => peq[idx].1,
-            Err(_)  => 0,
+        let mut slot = hslot(c.as_u64(), MASK);
+        loop {
+            let v = unsafe { *vals.get_unchecked(slot) };
+            if v == 0 { return 0; } // empty → not in pattern
+            if unsafe { *keys.get_unchecked(slot) } == c { return v; }
+            slot = (slot + 1) & MASK;
         }
     })
 }
@@ -515,8 +550,9 @@ fn hyrro_multiword_bytes(short: &[u8], long: &[u8]) -> usize {
 }
 
 /// Multi-word Hyyrö for UCS-2 (u16), UCS-4 (u32), and mixed-kind (u32) slices.
-/// Peq is a sorted `keys / data` layout; each text lookup is one
-/// `binary_search` (O(log k)).  Same const-generic dispatch as the u8 path.
+/// Peq is a sorted `keys / data` layout indexed by an open-addressing hash
+/// table; each text lookup is O(1) amortized (replaces the previous O(log k)
+/// binary search).  Same const-generic dispatch as the u8 path.
 fn hyrro_multiword_sorted<T: CodeUnit>(short: &[T], long: &[T]) -> usize {
     debug_assert!(short.len() > 64);
     let m = short.len();
@@ -533,16 +569,41 @@ fn hyrro_multiword_sorted<T: CodeUnit>(short: &[T], long: &[T]) -> usize {
         data[ki * w + i / 64] |= 1u64 << (i % 64);
     }
 
+    // Build an open-addressing hash index: slot → key index (u32::MAX = empty).
+    // Load factor ≤ 0.5 keeps average probe length near 1.5.
+    let hash_size = (n_keys * 2 + 2).next_power_of_two();
+    let hash_mask = hash_size - 1;
+    let mut hash_idx: Vec<u32> = vec![u32::MAX; hash_size];
+    for (ki, &key) in keys.iter().enumerate() {
+        let mut slot = hslot(key.as_u64(), hash_mask);
+        loop {
+            if hash_idx[slot] == u32::MAX { hash_idx[slot] = ki as u32; break; }
+            slot = (slot + 1) & hash_mask;
+        }
+    }
+
     macro_rules! run {
         ($W:literal) => {{
-            let k_ref = &keys;
-            let d_ref = &data;
-            let nk = n_keys;
+            let k_ref  = &keys;
+            let d_ref  = &data;
+            let h_ref  = &hash_idx;
+            let nk     = n_keys;
+            let hmask  = hash_mask;
             multiword_kernel::<$W, _>(m, long.len(), |j| {
                 let c = unsafe { *long.get_unchecked(j) };
-                let base = match k_ref.binary_search(&c) {
-                    Ok(ki) => ki * $W,
-                    Err(_)  => nk * $W, // zero row
+                // O(1) hash lookup replacing binary_search.
+                let base = {
+                    let mut slot = hslot(c.as_u64(), hmask);
+                    loop {
+                        // SAFETY: slot is always < hash_size = h_ref.len().
+                        let ki = unsafe { *h_ref.get_unchecked(slot) };
+                        if ki == u32::MAX { break nk * $W; } // not in pattern → zero row
+                        // SAFETY: ki < n_keys = k_ref.len().
+                        if unsafe { *k_ref.get_unchecked(ki as usize) } == c {
+                            break ki as usize * $W;
+                        }
+                        slot = (slot + 1) & hmask;
+                    }
                 };
                 let mut row = [0u64; $W];
                 for k in 0..$W {
@@ -570,9 +631,16 @@ fn hyrro_multiword_sorted<T: CodeUnit>(short: &[T], long: &[T]) -> usize {
             if last_bits < 64 { vp[w - 1] = (1u64 << last_bits) - 1; }
             let mut score = m as isize;
             for &tj in long {
-                let base = match keys.binary_search(&tj) {
-                    Ok(ki) => ki * w,
-                    Err(_)  => zero_base,
+                let base = {
+                    let mut slot = hslot(tj.as_u64(), hash_mask);
+                    loop {
+                        // SAFETY: slot ∈ [0, hash_mask] ⊂ [0, hash_idx.len()).
+                        let ki = unsafe { *hash_idx.get_unchecked(slot) };
+                        if ki == u32::MAX { break zero_base; }
+                        // SAFETY: ki was stored as a valid index into keys (0..n_keys).
+                        if unsafe { *keys.get_unchecked(ki as usize) } == tj { break ki as usize * w; }
+                        slot = (slot + 1) & hash_mask;
+                    }
                 };
                 let mut carry = false;
                 let mut prev_hp = 1u64;
