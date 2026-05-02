@@ -61,9 +61,17 @@ impl CodeUnit for u32 {
 }
 
 /// Fibonacci hash slot: maps a 64-bit key into `[0, mask]` where `mask = 2^k - 1`.
+///
+/// Shifts by `64 - k` to extract the top k bits of the product.  The high bits
+/// of a multiplicative hash have the best avalanche properties — they mix
+/// contributions from all input bits via carry propagation — so this gives
+/// better distribution than extracting middle or low bits.  The result is
+/// already in `[0, mask]`, so no masking step is needed.
+///
+/// See <https://en.wikipedia.org/wiki/Hash_function#Fibonacci_hashing>.
 #[inline(always)]
 fn hslot(key: u64, mask: usize) -> usize {
-    (key.wrapping_mul(0x9e3779b9_7f4a7c15_u64) >> 32) as usize & mask
+    (key.wrapping_mul(0x9e3779b9_7f4a7c15_u64) >> (64 - mask.count_ones())) as usize
 }
 
 // ---------------------------------------------------------------------------
