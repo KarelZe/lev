@@ -44,9 +44,8 @@ use pyo3::types::PyString;
 // ---------------------------------------------------------------------------
 
 /// Implemented by every code-unit type that can be used in the hash-based peq
-/// table.  `SENTINEL` marks unused slots (must not alias a real code unit —
-/// u32::MAX is safe since Unicode tops out at U+10FFFF; u16::MAX = U+FFFF is
-/// a non-character, handled correctly by the occupancy bitmap).
+/// table.  `SENTINEL` is used to initialize the keys array; occupancy is
+/// tracked separately via the values array (where 0 indicates an empty slot).
 trait CodeUnit: Ord + Copy + Eq + Send + 'static {
     const SENTINEL: Self;
     fn as_u64(self) -> u64;
