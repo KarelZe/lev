@@ -309,11 +309,11 @@ fn compute_sorted<T: CodeUnit>(a: &[T], b: &[T]) -> usize {
 
 /// Hyyrö single-word variant with a stack-allocated open-addressing hash table
 /// for the peq lookup.  128 slots for ≤64 distinct pattern chars gives a load
-/// factor of ≤ 0.5, meaning ~1–2 probes on average — much faster than the
-/// O(log m) binary search on the old sorted array.
+/// factor of ≤ 0.5, meaning ~1–2 probes on average.
 ///
-/// A u128 occupancy bitmap distinguishes empty slots from occupied ones,
-/// which is necessary for u16 where SENTINEL = U+FFFF is a valid code point.
+/// `vals[slot] == 0` is a reliable empty-slot indicator: `bit` starts at 1
+/// and only shifts left, so every written value is non-zero.  No separate
+/// occupancy bitmap is needed, which also sidesteps the U+FFFF sentinel issue.
 ///
 /// `pattern.len()` must be in `1..=64`.
 #[inline(always)]
@@ -322,8 +322,6 @@ fn hyrro_64_sorted<T: CodeUnit>(pattern: &[T], text: &[T]) -> usize {
 
     const SLOTS: usize = 128;
     const MASK: usize = SLOTS - 1;
-    // Bit i is set iff slot i is occupied.  128 bits = two u64s on the stack.
-    let mut occ: u128  = 0;
     let mut keys = [T::SENTINEL; SLOTS];
     let mut vals = [0u64; SLOTS];
 
@@ -331,9 +329,7 @@ fn hyrro_64_sorted<T: CodeUnit>(pattern: &[T], text: &[T]) -> usize {
     for &c in pattern {
         let mut slot = hslot(c.as_u64(), MASK);
         loop {
-            if occ & (1u128 << slot) == 0 {
-                // Empty slot: claim it.
-                occ  |= 1u128 << slot;
+            if vals[slot] == 0 {
                 keys[slot] = c;
                 vals[slot] = bit;
                 break;
@@ -352,8 +348,9 @@ fn hyrro_64_sorted<T: CodeUnit>(pattern: &[T], text: &[T]) -> usize {
         let c = unsafe { *text.get_unchecked(j) };
         let mut slot = hslot(c.as_u64(), MASK);
         loop {
-            if occ & (1u128 << slot) == 0 { return 0; } // empty → not in pattern
-            if keys[slot] == c { return vals[slot]; }
+            let v = vals[slot];
+            if v == 0 { return 0; } // empty → not in pattern
+            if keys[slot] == c { return v; }
             slot = (slot + 1) & MASK;
         }
     })
