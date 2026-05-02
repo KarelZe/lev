@@ -107,17 +107,21 @@ unsafe fn to_u32_buf(v: &UniView) -> Vec<u32> {
 /// multi-byte characters count as a single edit regardless of their
 /// UTF-8 encoded length.
 ///
-/// # Examples
+/// Args:
+///     s1 (str): First input string.
+///     s2 (str): Second input string.
 ///
-/// ```python
-/// >>> import lev
-/// >>> lev.distance("kitten", "sitting")
-/// 3
-/// >>> lev.distance("flaw", "lawn")
-/// 2
-/// >>> lev.distance("résumé", "resume")
-/// 2
-/// ```
+/// Returns:
+///     int: Non-negative integer edit distance.
+///
+/// Examples:
+///     >>> import lev
+///     >>> lev.distance("kitten", "sitting")
+///     3
+///     >>> lev.distance("flaw", "lawn")
+///     2
+///     >>> lev.distance("résumé", "resume")
+///     2
 #[pyfunction]
 #[pyo3(signature = (s1, s2, /))]
 fn distance(_py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> PyResult<usize> {
@@ -128,21 +132,26 @@ fn distance(_py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>)
     }
 }
 
-/// Normalized Levenshtein similarity ratio in `[0.0, 1.0]`.
+/// Calculate normalized Levenshtein similarity ratio in [0.0, 1.0].
 ///
-/// Defined as `1 - distance(s1, s2) / (len(s1) + len(s2))`, where the
+/// Defined as `1 - distance(s1, s2) / (len(s1) + len(s2))`, where
 /// lengths are measured in Unicode scalar values. Two empty strings
 /// return `1.0` by convention.
 ///
-/// # Examples
+/// Args:
+///     s1 (str): First input string.
+///     s2 (str): Second input string.
 ///
-/// ```python
-/// >>> import lev
-/// >>> lev.ratio("kitten", "sitting")
-/// 0.7692307692307693
-/// >>> lev.ratio("", "")
-/// 1.0
-/// ```
+/// Returns:
+///     float: Similarity score between `0.0` (completely different) and
+///     `1.0` (identical).
+///
+/// Examples:
+///     >>> import lev
+///     >>> lev.ratio("kitten", "sitting")
+///     0.7692307692307693
+///     >>> lev.ratio("", "")
+///     1.0
 #[pyfunction]
 #[pyo3(signature = (s1, s2, /))]
 fn ratio(_py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> PyResult<f64> {
