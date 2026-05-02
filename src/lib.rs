@@ -34,8 +34,6 @@
 //!    - *Multi-word* (`m > 64`): `⌈m/64⌉` words with carry propagation.
 //!      UCS-1 keeps the flat peq table (O(1) lookup per text byte); UCS-2/4
 //!      use a sorted flat peq layout with one binary search per text unit.
-//!      The GIL is released before the multi-word u32 path so other Python
-//!      threads can make progress during long computations.
 
 use std::os::raw::c_uint;
 
@@ -54,18 +52,6 @@ trait CodeUnit: Ord + Copy + Eq + Send + 'static {
 }
 impl CodeUnit for u16 { const SENTINEL: Self = u16::MAX; }
 impl CodeUnit for u32 { const SENTINEL: Self = u32::MAX; }
-
-// ---------------------------------------------------------------------------
-// Deferred computation result — avoids passing `py` into pure helper fns.
-// ---------------------------------------------------------------------------
-
-/// Either a finished distance or owned slices ready for Wagner-Fischer.
-/// The `Wf` variant is produced when the shorter input exceeds 64 code units;
-/// the caller can then release the GIL before dispatching `wagner_fischer`.
-enum Prep<T> {
-    Done(usize),
-    Wf(Vec<T>, Vec<T>),
-}
 
 // ---------------------------------------------------------------------------
 // CPython internal-buffer accessors
@@ -134,13 +120,11 @@ unsafe fn to_u32_buf(v: &UniView) -> Vec<u32> {
 /// ```
 #[pyfunction]
 #[pyo3(signature = (s1, s2, /))]
-fn distance(py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> PyResult<usize> {
-    // All paths access CPython's packed buffer directly — no UTF-8 encode,
-    // no char decode, no failure modes.  GIL released for Wagner-Fischer.
+fn distance(_py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> PyResult<usize> {
     unsafe {
         let v1 = view(s1);
         let v2 = view(s2);
-        Ok(apply(py, prep_dispatch(&v1, &v2)))
+        Ok(compute(&v1, &v2))
     }
 }
 
@@ -161,13 +145,13 @@ fn distance(py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) 
 /// ```
 #[pyfunction]
 #[pyo3(signature = (s1, s2, /))]
-fn ratio(py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> PyResult<f64> {
+fn ratio(_py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> PyResult<f64> {
     unsafe {
         let v1 = view(s1);
         let v2 = view(s2);
         let total = v1.len + v2.len;
         if total == 0 { return Ok(1.0); }
-        Ok(1.0 - apply(py, prep_dispatch(&v1, &v2)) as f64 / total as f64)
+        Ok(1.0 - compute(&v1, &v2) as f64 / total as f64)
     }
 }
 
@@ -183,65 +167,32 @@ fn lev(m: &Bound<'_, PyModule>) -> PyResult<()> {
 // Top-level dispatch: read both views' kinds, branch once, run the right path.
 // ---------------------------------------------------------------------------
 
-/// Dispatch on `(kind, ascii)` tuples and select the cheapest pipeline.
-/// Returns either a finished distance or owned slices ready for Wagner-Fischer.
+/// Dispatch on `(kind, ascii)` tuples and return the edit distance directly.
 ///
-/// Same-kind UCS-1 has a dedicated 128-entry peq fast-path when both strings
-/// are ASCII (saves 1 KB of memset vs. the generic 256-entry path).  UCS-2 and
-/// UCS-4 use the sorted-peq generic pipeline.  Mixed-kind pairs upcast both
-/// buffers to `u32`.
+/// UCS-1 with both ASCII flags set uses a half-size 128-entry peq table.
+/// UCS-2 and UCS-4 use the sorted-peq generic pipeline.  Mixed-kind pairs
+/// upcast both buffers to `u32`.
 #[inline(always)]
-unsafe fn prep_dispatch(v1: &UniView, v2: &UniView) -> Prep<u32> {
+unsafe fn compute(v1: &UniView, v2: &UniView) -> usize {
     use ffi::{PyUnicode_1BYTE_KIND as K1, PyUnicode_2BYTE_KIND as K2, PyUnicode_4BYTE_KIND as K4};
     match (v1.kind, v2.kind) {
         (K1, K1) => {
-            let b1 = as_u8(v1);
-            let b2 = as_u8(v2);
-            // Pure ASCII fast-path: half-size (1 KB) peq table.  Both flags
-            // must be set since pattern bytes index into peq during fill and
-            // text bytes index into it during the inner loop; either flank
-            // having a byte >= 128 would overflow the 128-entry array.
+            let (b1, b2) = (as_u8(v1), as_u8(v2));
+            // Both ASCII flags must be set: any byte ≥ 128 would index past
+            // the 128-entry table used by hyrro_64_ascii.
             if v1.ascii && v2.ascii {
-                box_u8(prep_bytes::<true>(b1, b2))
+                compute_u8::<true>(b1, b2)
             } else {
-                box_u8(prep_bytes::<false>(b1, b2))
+                compute_u8::<false>(b1, b2)
             }
         }
-        (K2, K2) => box_fixed(prep_fixed(as_u16(v1), as_u16(v2))),
-        (K4, K4) => prep_fixed(as_u32(v1), as_u32(v2)),
-        // Mixed-kind: upcast both to u32 and run the generic pipeline.
-        // Consistent with same-kind paths; lone surrogates preserved.
+        (K2, K2) => compute_sorted(as_u16(v1), as_u16(v2)),
+        (K4, K4) => compute_sorted(as_u32(v1), as_u32(v2)),
         _ => {
             let a = to_u32_buf(v1);
             let b = to_u32_buf(v2);
-            prep_fixed(&a, &b)
+            compute_sorted(&a, &b)
         }
-    }
-}
-
-/// Convert `Prep<u8>` to `Prep<u32>` so `prep_dispatch` returns a single type.
-/// `Done` requires no copy.  `Wf(u8)` widens lazily after the GIL is released
-/// (cheap: this branch is only hit when `short > 64`, where O(m·n) dominates).
-#[inline]
-fn box_u8(p: Prep<u8>) -> Prep<u32> {
-    match p {
-        Prep::Done(d)  => Prep::Done(d),
-        Prep::Wf(s, l) => Prep::Wf(
-            s.into_iter().map(|b| b as u32).collect(),
-            l.into_iter().map(|b| b as u32).collect(),
-        ),
-    }
-}
-
-/// Convert `Prep<u16>` to `Prep<u32>` (same rationale as `box_u8`).
-#[inline]
-fn box_fixed(p: Prep<u16>) -> Prep<u32> {
-    match p {
-        Prep::Done(d)  => Prep::Done(d),
-        Prep::Wf(s, l) => Prep::Wf(
-            s.into_iter().map(|c| c as u32).collect(),
-            l.into_iter().map(|c| c as u32).collect(),
-        ),
     }
 }
 
@@ -261,21 +212,18 @@ fn strip_affix<'a, T: Eq>(a: &'a [T], b: &'a [T]) -> (&'a [T], &'a [T]) {
 // UCS-1 pipeline  (dedicated O(1) [u64; N] peq table; N = 128 for ASCII)
 // ---------------------------------------------------------------------------
 
-/// Strip affixes and run Hyyrö, or package slices for deferred WF.
-/// `ASCII = true` enables the 128-entry peq fast path.
+/// Strip affixes and run Hyyrö.  `ASCII = true` enables the 128-entry peq fast path.
 #[inline(always)]
-fn prep_bytes<const ASCII: bool>(a: &[u8], b: &[u8]) -> Prep<u8> {
-    if a == b { return Prep::Done(0); }
+fn compute_u8<const ASCII: bool>(a: &[u8], b: &[u8]) -> usize {
+    if a == b { return 0; }
     let (a, b) = strip_affix(a, b);
-    if a.is_empty() { return Prep::Done(b.len()); }
-    if b.is_empty() { return Prep::Done(a.len()); }
+    if a.is_empty() { return b.len(); }
+    if b.is_empty() { return a.len(); }
     let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     if short.len() <= 64 {
-        Prep::Done(if ASCII { hyrro_64_ascii(short, long) } else { hyrro_64_bytes(short, long) })
+        if ASCII { hyrro_64_ascii(short, long) } else { hyrro_64_bytes(short, long) }
     } else {
-        // Multi-word Hyyrö: stack-allocated peq, no heap allocation.
-        // The GIL is held; u8 peq lookup is O(1) and fast enough.
-        Prep::Done(hyrro_multiword_bytes(short, long))
+        hyrro_multiword_bytes(short, long)
     }
 }
 
@@ -312,9 +260,7 @@ fn hyrro_64_bytes(pattern: &[u8], text: &[u8]) -> usize {
         peq[c as usize] |= bit;
         bit <<= 1;
     }
-    // SAFETY: indices come from text bytes; peq is 256 entries.  We use
-    // get_unchecked for both lookups to suppress bounds checks the compiler
-    // can already prove redundant.
+    // SAFETY: j < n from the for-loop in hyrro_inner; u8 < 256 = peq.len().
     hyrro_inner(pattern.len(), text.len(), |j| unsafe {
         *peq.get_unchecked(*text.get_unchecked(j) as usize)
     })
@@ -324,18 +270,18 @@ fn hyrro_64_bytes(pattern: &[u8], text: &[u8]) -> usize {
 // Generic pipeline for UCS-2 (u16), UCS-4 (u32), and mixed-kind (u32)
 // ---------------------------------------------------------------------------
 
-/// Strip affixes and run Hyyrö, or package slices for deferred WF.
+/// Strip affixes and run Hyyrö.
 #[inline(always)]
-fn prep_fixed<T: CodeUnit>(a: &[T], b: &[T]) -> Prep<T> {
-    if a == b { return Prep::Done(0); }
+fn compute_sorted<T: CodeUnit>(a: &[T], b: &[T]) -> usize {
+    if a == b { return 0; }
     let (a, b) = strip_affix(a, b);
-    if a.is_empty() { return Prep::Done(b.len()); }
-    if b.is_empty() { return Prep::Done(a.len()); }
+    if a.is_empty() { return b.len(); }
+    if b.is_empty() { return a.len(); }
     let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     if short.len() <= 64 {
-        Prep::Done(hyrro_64_sorted(short, long))
+        hyrro_64_sorted(short, long)
     } else {
-        Prep::Wf(short.to_vec(), long.to_vec())
+        hyrro_multiword_sorted(short, long)
     }
 }
 
@@ -372,21 +318,6 @@ fn hyrro_64_sorted<T: CodeUnit>(pattern: &[T], text: &[T]) -> usize {
             Err(_)  => 0,
         }
     })
-}
-
-// ---------------------------------------------------------------------------
-// GIL-aware dispatch
-// ---------------------------------------------------------------------------
-
-/// Finalise a [`Prep`] result.  `Done` returns immediately.  `Wf` releases
-/// the GIL before running Wagner-Fischer so other threads can make progress
-/// during long O(m·n) computations.
-#[inline]
-fn apply(py: Python<'_>, prep: Prep<u32>) -> usize {
-    match prep {
-        Prep::Done(d)  => d,
-        Prep::Wf(s, l) => py.detach(move || hyrro_multiword(&s, &l)),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -431,7 +362,7 @@ fn hyrro_inner<F: FnMut(usize) -> u64>(m: usize, n: usize, mut pm_of: F) -> usiz
 }
 
 // ---------------------------------------------------------------------------
-// Multi-word Hyyrö (m > 64): replaces the WF fallback for long inputs.
+// Multi-word Hyyrö (m > 64)
 // ---------------------------------------------------------------------------
 
 /// Add two u64 values with a carry-in bit; return (sum, carry-out).
@@ -508,7 +439,7 @@ fn hyrro_multiword_bytes(short: &[u8], long: &[u8]) -> usize {
     macro_rules! run {
         ($W:literal) => {{
             // Stack-allocated peq: no malloc/free per call.
-            // [u64; 256 * W] = W KB for W=1..8 (max 16 KB at W=8).
+            // [u64; 256 * W] = 2W KB (4 KB at W=2, 16 KB at W=8).
             let mut peq = [0u64; 256 * $W];
             for (i, &c) in short.iter().enumerate() {
                 // SAFETY: c as usize < 256 (u8), i/64 < W (i < m ≤ 64*W).
@@ -574,15 +505,15 @@ fn hyrro_multiword_bytes(short: &[u8], long: &[u8]) -> usize {
     }
 }
 
-/// Multi-word Hyyrö for u32 slices (UCS-4 / mixed-kind upcast paths).
+/// Multi-word Hyyrö for UCS-2 (u16), UCS-4 (u32), and mixed-kind (u32) slices.
 /// Peq is a sorted `keys / data` layout; each text lookup is one
 /// `binary_search` (O(log k)).  Same const-generic dispatch as the u8 path.
-fn hyrro_multiword(short: &[u32], long: &[u32]) -> usize {
+fn hyrro_multiword_sorted<T: CodeUnit>(short: &[T], long: &[T]) -> usize {
     debug_assert!(short.len() > 64);
     let m = short.len();
     let w = (m + 63) / 64;
 
-    let mut keys: Vec<u32> = short.iter().copied().collect();
+    let mut keys: Vec<T> = short.iter().copied().collect();
     keys.sort_unstable();
     keys.dedup();
     let n_keys = keys.len();
@@ -662,49 +593,17 @@ fn hyrro_multiword(short: &[u32], long: &[u32]) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Wagner-Fischer (kept as oracle for unit tests only)
+// Test helpers (bypass the PyO3 layer)
 // ---------------------------------------------------------------------------
-
-fn wagner_fischer<T: Eq>(short: &[T], long: &[T]) -> usize {
-    let m = short.len();
-    let mut row: Vec<usize> = (0..=m).collect();
-    for (j, lj) in long.iter().enumerate() {
-        let mut diag = row[0];
-        row[0] = j + 1;
-        for (i, si) in short.iter().enumerate() {
-            let cost  = (si != lj) as usize;
-            let above = row[i + 1];
-            let left  = row[i];
-            let new   = (above + 1).min(left + 1).min(diag + cost);
-            diag      = above;
-            row[i + 1] = new;
-        }
-    }
-    row[m]
-}
-
-// ---------------------------------------------------------------------------
-// Test helpers (bypass the PyO3 layer; no GIL release)
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-fn finish<T: Eq>(prep: Prep<T>) -> usize {
-    match prep {
-        Prep::Done(d)  => d,
-        Prep::Wf(s, l) => wagner_fischer(&s, &l),
-    }
-}
 
 #[cfg(test)]
 fn levenshtein(s1: &str, s2: &str) -> usize {
     if s1.is_ascii() && s2.is_ascii() {
-        finish(prep_bytes::<true>(s1.as_bytes(), s2.as_bytes()))
+        compute_u8::<true>(s1.as_bytes(), s2.as_bytes())
     } else {
-        // No Python interpreter in unit tests; cast chars to u32 directly.
-        if s1 == s2 { return 0; }
         let a: Vec<u32> = s1.chars().map(|c| c as u32).collect();
         let b: Vec<u32> = s2.chars().map(|c| c as u32).collect();
-        finish(prep_fixed(&a, &b))
+        compute_sorted(&a, &b)
     }
 }
 
@@ -859,13 +758,13 @@ mod tests {
         check_latin1(&vec![200u8; 80], &vec![201u8; 80]);
     }
 
-    /// Directly exercise `hyrro_multiword` (u32, m > 64) against the naive DP.
+    /// Directly exercise `hyrro_multiword_sorted` (m > 64) against the naive DP.
     #[test]
-    fn multiword_u32_matches_oracle() {
+    fn multiword_sorted_matches_oracle() {
         let check_u32 = |a: &[u32], b: &[u32]| {
             let (s, l) = if a.len() <= b.len() { (a, b) } else { (b, a) };
             assert!(s.len() > 64, "test case must be long enough to hit multiword");
-            let got = hyrro_multiword(s, l);
+            let got = hyrro_multiword_sorted(s, l);
             let ac: Vec<char> = s.iter().map(|&c| char::from_u32(c).unwrap_or('?')).collect();
             let bc: Vec<char> = l.iter().map(|&c| char::from_u32(c).unwrap_or('?')).collect();
             let exp = naive(&ac, &bc);
@@ -913,7 +812,7 @@ mod tests {
         for &(a, b, expected) in cases {
             let au: Vec<u16> = a.encode_utf16().collect();
             let bu: Vec<u16> = b.encode_utf16().collect();
-            assert_eq!(finish(prep_fixed(&au, &bu)), expected, "u16 ({a:?}, {b:?})");
+            assert_eq!(compute_sorted(&au, &bu), expected, "u16 ({a:?}, {b:?})");
             assert_eq!(levenshtein(a, b), expected, "u32 ({a:?}, {b:?})");
         }
     }
@@ -928,7 +827,7 @@ mod tests {
         for &(a, b, expected) in cases {
             let au: Vec<u32> = a.chars().map(|c| c as u32).collect();
             let bu: Vec<u32> = b.chars().map(|c| c as u32).collect();
-            assert_eq!(finish(prep_fixed(&au, &bu)), expected, "u32 ({a:?}, {b:?})");
+            assert_eq!(compute_sorted(&au, &bu), expected, "u32 ({a:?}, {b:?})");
             assert_eq!(levenshtein(a, b), expected, "u32 ({a:?}, {b:?})");
         }
     }
