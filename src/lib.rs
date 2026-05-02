@@ -125,7 +125,7 @@ unsafe fn to_u32_buf(s: &Bound<'_, PyString>) -> Vec<u32> {
 ///
 /// The distance is the minimum number of single-character insertions,
 /// deletions, or substitutions required to transform `s1` into `s2`.
-/// Lengths are measured in Unicode scalar values (chars), so
+/// Lengths are measured in Unicode scalar values (`char`s), so
 /// multi-byte characters count as a single edit regardless of their
 /// UTF-8 encoded length.
 ///
