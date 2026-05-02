@@ -14,23 +14,28 @@
 //! 2. **Common-affix stripping** – matching leading and trailing code
 //!    units are removed before the main computation.
 //! 3. **Zero-copy CPython buffer access** – Python stores strings in one
-//!    of three packed internal encodings (UCS-1 / UCS-2 / UCS-4).  We
-//!    read the raw buffer directly via the CPython C API, paying zero
-//!    UTF-8 decode cost.  For UCS-1 (`u8`, ≤ U+00FF) the peq table is a
-//!    flat `[u64; 256]` array (O(1) lookup).  For UCS-2 (`u16`) and
-//!    UCS-4 (`u32`) — and for mixed-kind pairs — a unified generic
-//!    implementation uses a stack-allocated sorted `(T, u64)` peq array
-//!    (O(log m) lookup, zero heap allocation).  Mixed-kind pairs upcast
-//!    both buffers to `u32` via `to_u32_buf`; no UTF-8 round-trip, no
-//!    `to_str()`, lone surrogates handled correctly.
+//!    of three packed internal encodings (UCS-1 / UCS-2 / UCS-4).  Kind,
+//!    ascii flag, data pointer, and length are read into a single
+//!    [`UniView`] per string — subsequent dispatch uses locals only, no
+//!    further FFI.  For UCS-1 (`u8`, ≤ U+00FF) the single-word peq table
+//!    is a flat `[u64; 128]` stack array when both strings are ASCII-flagged
+//!    (half-size memset), or `[u64; 256]` otherwise; the multi-word peq is
+//!    always `[u64; 256 × W]` on the stack (no heap allocation, all u8
+//!    values are valid indices).  For UCS-2 (`u16`) and UCS-4 (`u32`) — and
+//!    for mixed-kind pairs — a stack-allocated sorted `(T, u64)` peq array
+//!    is used (O(log m) lookup, zero heap allocation).  Mixed-kind pairs
+//!    upcast both buffers to `u32` via `to_u32_buf`; no UTF-8 round-trip,
+//!    no `to_str()`, lone surrogates handled correctly.
 //! 4. **Hyyrö's bit-parallel algorithm** (Hyyrö, 2003) – runs in
-//!    `O(⌈m / w⌉ · n)` time with `w = 64`.  The single-word variant is
-//!    used whenever the shorter input is ≤ 64 code units, which covers
-//!    the overwhelming majority of real-world inputs.
-//! 5. **Two-row Wagner-Fischer** – a cache-friendly `O(m · n)` fallback
-//!    for inputs whose shorter half exceeds 64 code units after affix
-//!    stripping.  The GIL is released before this path runs so that other
-//!    Python threads can make progress during long computations.
+//!    `O(⌈m / w⌉ · n)` time with `w = 64`.  Two variants are used:
+//!    - *Single-word* (`m ≤ 64`): one 64-bit word covers the whole pattern.
+//!      UCS-1 uses a flat `[u64; 128/256]` peq table (O(1) lookup); UCS-2/4
+//!      use a sorted `(T, u64)` peq array (O(log m) lookup).
+//!    - *Multi-word* (`m > 64`): `⌈m/64⌉` words with carry propagation.
+//!      UCS-1 keeps the flat peq table (O(1) lookup per text byte); UCS-2/4
+//!      use a sorted flat peq layout with one binary search per text unit.
+
+use std::os::raw::c_uint;
 
 use pyo3::ffi;
 use pyo3::prelude::*;
@@ -49,75 +54,48 @@ impl CodeUnit for u16 { const SENTINEL: Self = u16::MAX; }
 impl CodeUnit for u32 { const SENTINEL: Self = u32::MAX; }
 
 // ---------------------------------------------------------------------------
-// Deferred computation result — avoids passing `py` into pure helper fns.
-// ---------------------------------------------------------------------------
-
-/// Either a finished distance or owned slices ready for Wagner-Fischer.
-/// The `Wf` variant is produced when the shorter input exceeds 64 code units;
-/// the caller can then release the GIL before dispatching `wagner_fischer`.
-enum Prep<T> {
-    Done(usize),
-    Wf(Vec<T>, Vec<T>),
-}
-
-// ---------------------------------------------------------------------------
 // CPython internal-buffer accessors
 // ---------------------------------------------------------------------------
 
-/// Returns Python's internal UCS-1 buffer (1 byte / code point, ≤ U+00FF).
-#[inline]
-unsafe fn ucs1_bytes<'a>(s: &Bound<'a, PyString>) -> Option<&'a [u8]> {
-    let ptr = s.as_ptr();
-    if ffi::PyUnicode_KIND(ptr) != ffi::PyUnicode_1BYTE_KIND {
-        return None;
-    }
-    let len  = ffi::PyUnicode_GET_LENGTH(ptr) as usize;
-    let data = ffi::PyUnicode_DATA(ptr) as *const u8;
-    Some(std::slice::from_raw_parts(data, len))
+/// Snapshot of a Python string's internal layout.  All four fields are
+/// derived from a single PyASCIIObject header read; subsequent dispatch
+/// branches operate on locals only — no further FFI calls.
+struct UniView {
+    kind:  c_uint,
+    ascii: bool,
+    data:  *const u8,
+    len:   usize,
 }
 
-/// Returns Python's internal UCS-2 buffer (2 bytes / code point, ≤ U+FFFF).
-#[inline]
-unsafe fn ucs2_shorts<'a>(s: &Bound<'a, PyString>) -> Option<&'a [u16]> {
-    let ptr = s.as_ptr();
-    if ffi::PyUnicode_KIND(ptr) != ffi::PyUnicode_2BYTE_KIND {
-        return None;
-    }
-    let len  = ffi::PyUnicode_GET_LENGTH(ptr) as usize;
-    let data = ffi::PyUnicode_DATA(ptr) as *const u16;
-    Some(std::slice::from_raw_parts(data, len))
-}
-
-/// Returns Python's internal UCS-4 buffer (4 bytes / code point, > U+FFFF).
-#[inline]
-unsafe fn ucs4_words<'a>(s: &Bound<'a, PyString>) -> Option<&'a [u32]> {
-    let ptr = s.as_ptr();
-    if ffi::PyUnicode_KIND(ptr) != ffi::PyUnicode_4BYTE_KIND {
-        return None;
-    }
-    let len  = ffi::PyUnicode_GET_LENGTH(ptr) as usize;
-    let data = ffi::PyUnicode_DATA(ptr) as *const u32;
-    Some(std::slice::from_raw_parts(data, len))
-}
-
-/// Reads any Python string into an owned `Vec<u32>`, regardless of internal
-/// kind.  Lone surrogates in UCS-2 strings are preserved as-is — no UTF-8
-/// round-trip, so this never fails.  Used for mixed-kind pairs where the two
-/// strings have different CPython encodings.
-unsafe fn to_u32_buf(s: &Bound<'_, PyString>) -> Vec<u32> {
+/// Read kind + ascii flag + data ptr + length from a Python string in one go.
+/// Subsequent dispatch matches on `(view1.kind, view2.kind)` without
+/// re-traversing pyo3's PyUnicode helpers.
+#[inline(always)]
+unsafe fn view(s: &Bound<'_, PyString>) -> UniView {
     let ptr  = s.as_ptr();
-    let len  = ffi::PyUnicode_GET_LENGTH(ptr) as usize;
-    let data = ffi::PyUnicode_DATA(ptr);
     let kind = ffi::PyUnicode_KIND(ptr);
-    if kind == ffi::PyUnicode_1BYTE_KIND {
-        let p = data as *const u8;
-        (0..len).map(|i| *p.add(i) as u32).collect()
-    } else if kind == ffi::PyUnicode_2BYTE_KIND {
-        let p = data as *const u16;
-        (0..len).map(|i| *p.add(i) as u32).collect()
-    } else {
-        // PyUnicode_4BYTE_KIND
-        std::slice::from_raw_parts(data as *const u32, len).to_vec()
+    UniView {
+        kind,
+        ascii: ffi::PyUnicode_IS_ASCII(ptr) != 0,
+        data:  ffi::PyUnicode_DATA(ptr) as *const u8,
+        len:   ffi::PyUnicode_GET_LENGTH(ptr) as usize,
+    }
+}
+
+#[inline(always)] unsafe fn as_u8 (v: &UniView) -> &[u8]  { std::slice::from_raw_parts(v.data,                v.len) }
+#[inline(always)] unsafe fn as_u16(v: &UniView) -> &[u16] { std::slice::from_raw_parts(v.data as *const u16, v.len) }
+#[inline(always)] unsafe fn as_u32(v: &UniView) -> &[u32] { std::slice::from_raw_parts(v.data as *const u32, v.len) }
+
+/// Materialise any Python string as `Vec<u32>` for mixed-kind pairs.
+/// Lone surrogates in UCS-2 are preserved (no UTF-8 round-trip).
+unsafe fn to_u32_buf(v: &UniView) -> Vec<u32> {
+    match v.kind {
+        ffi::PyUnicode_1BYTE_KIND => (0..v.len).map(|i| *v.data.add(i) as u32).collect(),
+        ffi::PyUnicode_2BYTE_KIND => {
+            let p = v.data as *const u16;
+            (0..v.len).map(|i| *p.add(i) as u32).collect()
+        }
+        _ => std::slice::from_raw_parts(v.data as *const u32, v.len).to_vec(),
     }
 }
 
@@ -146,22 +124,11 @@ unsafe fn to_u32_buf(s: &Bound<'_, PyString>) -> Vec<u32> {
 ///     2
 #[pyfunction]
 #[pyo3(signature = (s1, s2, /))]
-fn distance(py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> PyResult<usize> {
-    // All paths access CPython's packed buffer directly — no UTF-8 encode,
-    // no char decode, no failure modes.  GIL released for Wagner-Fischer.
+fn distance(_py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> PyResult<usize> {
     unsafe {
-        if let (Some(b1), Some(b2)) = (ucs1_bytes(s1), ucs1_bytes(s2)) {
-            return Ok(apply(py, prep_bytes(b1, b2)));
-        }
-        if let (Some(h1), Some(h2)) = (ucs2_shorts(s1), ucs2_shorts(s2)) {
-            return Ok(apply(py, prep_fixed(h1, h2)));
-        }
-        if let (Some(w1), Some(w2)) = (ucs4_words(s1), ucs4_words(s2)) {
-            return Ok(apply(py, prep_fixed(w1, w2)));
-        }
-        // Mixed-kind (e.g. UCS-1 vs UCS-2): upcast both to u32.
-        // Consistent with same-kind paths; lone surrogates preserved.
-        Ok(apply(py, prep_fixed(&to_u32_buf(s1), &to_u32_buf(s2))))
+        let v1 = view(s1);
+        let v2 = view(s2);
+        Ok(compute(&v1, &v2))
     }
 }
 
@@ -187,29 +154,13 @@ fn distance(py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) 
 ///     1.0
 #[pyfunction]
 #[pyo3(signature = (s1, s2, /))]
-fn ratio(py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> PyResult<f64> {
+fn ratio(_py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> PyResult<f64> {
     unsafe {
-        if let (Some(b1), Some(b2)) = (ucs1_bytes(s1), ucs1_bytes(s2)) {
-            let total = b1.len() + b2.len();
-            if total == 0 { return Ok(1.0); }
-            return Ok(1.0 - apply(py, prep_bytes(b1, b2)) as f64 / total as f64);
-        }
-        if let (Some(h1), Some(h2)) = (ucs2_shorts(s1), ucs2_shorts(s2)) {
-            let total = h1.len() + h2.len();
-            if total == 0 { return Ok(1.0); }
-            return Ok(1.0 - apply(py, prep_fixed(h1, h2)) as f64 / total as f64);
-        }
-        if let (Some(w1), Some(w2)) = (ucs4_words(s1), ucs4_words(s2)) {
-            let total = w1.len() + w2.len();
-            if total == 0 { return Ok(1.0); }
-            return Ok(1.0 - apply(py, prep_fixed(w1, w2)) as f64 / total as f64);
-        }
-        // Mixed-kind: upcast both to u32.
-        let a = to_u32_buf(s1);
-        let b = to_u32_buf(s2);
-        let total = a.len() + b.len();
+        let v1 = view(s1);
+        let v2 = view(s2);
+        let total = v1.len + v2.len;
         if total == 0 { return Ok(1.0); }
-        Ok(1.0 - apply(py, prep_fixed(&a, &b)) as f64 / total as f64)
+        Ok(1.0 - compute(&v1, &v2) as f64 / total as f64)
     }
 }
 
@@ -222,9 +173,43 @@ fn lev(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Top-level dispatch: read both views' kinds, branch once, run the right path.
+// ---------------------------------------------------------------------------
+
+/// Dispatch on `(kind, ascii)` tuples and return the edit distance directly.
+///
+/// UCS-1 with both ASCII flags set uses a half-size 128-entry peq table.
+/// UCS-2 and UCS-4 use the sorted-peq generic pipeline.  Mixed-kind pairs
+/// upcast both buffers to `u32`.
+#[inline(always)]
+unsafe fn compute(v1: &UniView, v2: &UniView) -> usize {
+    use ffi::{PyUnicode_1BYTE_KIND as K1, PyUnicode_2BYTE_KIND as K2, PyUnicode_4BYTE_KIND as K4};
+    match (v1.kind, v2.kind) {
+        (K1, K1) => {
+            let (b1, b2) = (as_u8(v1), as_u8(v2));
+            // Both ASCII flags must be set: any byte ≥ 128 would index past
+            // the 128-entry table used by hyrro_64_ascii.
+            if v1.ascii && v2.ascii {
+                compute_u8::<true>(b1, b2)
+            } else {
+                compute_u8::<false>(b1, b2)
+            }
+        }
+        (K2, K2) => compute_sorted(as_u16(v1), as_u16(v2)),
+        (K4, K4) => compute_sorted(as_u32(v1), as_u32(v2)),
+        _ => {
+            let a = to_u32_buf(v1);
+            let b = to_u32_buf(v2);
+            compute_sorted(&a, &b)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Affix stripping
 // ---------------------------------------------------------------------------
 
+#[inline(always)]
 fn strip_affix<'a, T: Eq>(a: &'a [T], b: &'a [T]) -> (&'a [T], &'a [T]) {
     let prefix = a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count();
     let (a, b) = (&a[prefix..], &b[prefix..]);
@@ -233,64 +218,94 @@ fn strip_affix<'a, T: Eq>(a: &'a [T], b: &'a [T]) -> (&'a [T], &'a [T]) {
 }
 
 // ---------------------------------------------------------------------------
-// UCS-1 pipeline  (dedicated O(1) [u64; 256] peq table)
+// UCS-1 pipeline  (dedicated O(1) [u64; N] peq table; N = 128 for ASCII)
 // ---------------------------------------------------------------------------
 
-/// Strip affixes and run Hyyrö, or package slices for deferred WF.
-fn prep_bytes(a: &[u8], b: &[u8]) -> Prep<u8> {
-    if a == b { return Prep::Done(0); }
+/// Strip affixes and run Hyyrö.  `ASCII = true` enables the 128-entry peq fast path.
+#[inline(always)]
+fn compute_u8<const ASCII: bool>(a: &[u8], b: &[u8]) -> usize {
+    if a == b { return 0; }
     let (a, b) = strip_affix(a, b);
-    if a.is_empty() { return Prep::Done(b.len()); }
-    if b.is_empty() { return Prep::Done(a.len()); }
+    if a.is_empty() { return b.len(); }
+    if b.is_empty() { return a.len(); }
     let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     if short.len() <= 64 {
-        Prep::Done(hyrro_64_bytes(short, long))
+        if ASCII { hyrro_64_ascii(short, long) } else { hyrro_64_bytes(short, long) }
     } else {
-        Prep::Wf(short.to_vec(), long.to_vec())
+        hyrro_multiword_bytes(short, long)
     }
 }
 
-/// Hyyrö single-word variant for byte patterns.  `pattern.len()` in `1..=64`.
+/// Hyyrö single-word variant for ASCII-only patterns.  Uses a 128-entry peq
+/// (1 KB) instead of the 256-entry table needed by Latin-1 — halves the
+/// stack-init cost.  Caller must ensure all bytes of `pattern` and `text`
+/// are < 128 (e.g. via `PyUnicode_IS_ASCII`).
+#[inline(always)]
+fn hyrro_64_ascii(pattern: &[u8], text: &[u8]) -> usize {
+    debug_assert!((1..=64).contains(&pattern.len()));
+    debug_assert!(pattern.iter().all(|&b| b < 128));
+    debug_assert!(text.iter().all(|&b| b < 128));
+    let mut peq = [0u64; 128];
+    let mut bit = 1u64;
+    for &c in pattern {
+        // SAFETY: caller guarantees c < 128.
+        unsafe { *peq.get_unchecked_mut(c as usize) |= bit; }
+        bit <<= 1;
+    }
+    // SAFETY: caller guarantees text bytes < 128.
+    hyrro_inner(pattern.len(), text.len(), |j| unsafe {
+        *peq.get_unchecked(*text.get_unchecked(j) as usize)
+    })
+}
+
+/// Hyyrö single-word variant for the general byte case (Latin-1 etc.).
+/// `pattern.len()` in `1..=64`.
+#[inline(always)]
 fn hyrro_64_bytes(pattern: &[u8], text: &[u8]) -> usize {
     debug_assert!((1..=64).contains(&pattern.len()));
-    let m = pattern.len();
     let mut peq = [0u64; 256];
-    for (i, &c) in pattern.iter().enumerate() {
-        peq[c as usize] |= 1u64 << i;
+    let mut bit = 1u64;
+    for &c in pattern {
+        peq[c as usize] |= bit;
+        bit <<= 1;
     }
-    hyrro_inner(m, text.iter().map(|&b| peq[b as usize]))
+    // SAFETY: j < n from the for-loop in hyrro_inner; u8 < 256 = peq.len().
+    hyrro_inner(pattern.len(), text.len(), |j| unsafe {
+        *peq.get_unchecked(*text.get_unchecked(j) as usize)
+    })
 }
 
 // ---------------------------------------------------------------------------
 // Generic pipeline for UCS-2 (u16), UCS-4 (u32), and mixed-kind (u32)
 // ---------------------------------------------------------------------------
 
-/// Strip affixes and run Hyyrö, or package slices for deferred WF.
-fn prep_fixed<T: CodeUnit>(a: &[T], b: &[T]) -> Prep<T> {
-    if a == b { return Prep::Done(0); }
+/// Strip affixes and run Hyyrö.
+#[inline(always)]
+fn compute_sorted<T: CodeUnit>(a: &[T], b: &[T]) -> usize {
+    if a == b { return 0; }
     let (a, b) = strip_affix(a, b);
-    if a.is_empty() { return Prep::Done(b.len()); }
-    if b.is_empty() { return Prep::Done(a.len()); }
+    if a.is_empty() { return b.len(); }
+    if b.is_empty() { return a.len(); }
     let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     if short.len() <= 64 {
-        Prep::Done(hyrro_64_sorted(short, long.iter().copied()))
+        hyrro_64_sorted(short, long)
     } else {
-        Prep::Wf(short.to_vec(), long.to_vec())
+        hyrro_multiword_sorted(short, long)
     }
 }
 
 /// Hyyrö single-word variant with a stack-allocated sorted `(T, u64)` peq
 /// array.  No heap allocation; O(log m) peq lookup per text character.
 /// `pattern.len()` must be in `1..=64`.
-fn hyrro_64_sorted<T: CodeUnit>(pattern: &[T], text: impl Iterator<Item = T>) -> usize {
+#[inline(always)]
+fn hyrro_64_sorted<T: CodeUnit>(pattern: &[T], text: &[T]) -> usize {
     debug_assert!((1..=64).contains(&pattern.len()));
-    let m = pattern.len();
 
     let mut peq: [(T, u64); 64] = [(T::SENTINEL, 0); 64];
     let mut peq_len = 0usize;
 
-    for (i, &c) in pattern.iter().enumerate() {
-        let bit = 1u64 << i;
+    let mut bit = 1u64;
+    for &c in pattern {
         match peq[..peq_len].binary_search_by_key(&c, |p| p.0) {
             Ok(idx)  => peq[idx].1 |= bit,
             Err(idx) => {
@@ -299,56 +314,52 @@ fn hyrro_64_sorted<T: CodeUnit>(pattern: &[T], text: impl Iterator<Item = T>) ->
                 peq_len += 1;
             }
         }
+        bit <<= 1;
     }
     let peq = &peq[..peq_len];
 
-    hyrro_inner(m, text.map(|c| match peq.binary_search_by_key(&c, |p| p.0) {
-        Ok(idx) => peq[idx].1,
-        Err(_)  => 0,
-    }))
-}
-
-// ---------------------------------------------------------------------------
-// GIL-aware dispatch
-// ---------------------------------------------------------------------------
-
-/// Finalise a [`Prep`] result.  `Done` returns immediately.  `Wf` releases
-/// the GIL before running Wagner-Fischer so other threads can make progress
-/// during long O(m·n) computations.
-#[inline]
-fn apply<T: Eq + Send + 'static>(py: Python<'_>, prep: Prep<T>) -> usize {
-    match prep {
-        Prep::Done(d)  => d,
-        Prep::Wf(s, l) => py.detach(move || wagner_fischer(&s, &l)),
-    }
+    // SAFETY: index `j` is bounded by `text.len()`, the iteration count
+    // passed to hyrro_inner.
+    hyrro_inner(pattern.len(), text.len(), |j| {
+        let c = unsafe { *text.get_unchecked(j) };
+        match peq.binary_search_by_key(&c, |p| p.0) {
+            Ok(idx) => peq[idx].1,
+            Err(_)  => 0,
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
 // Hyyrö's bit-parallel inner loop (single 64-bit word)
 // ---------------------------------------------------------------------------
 
-/// Core Hyyrö loop shared by all pipelines.  `pm_iter` yields the
-/// pattern-match bitmask for each successive text element.
+/// Core Hyyrö loop shared by all pipelines.  `pm_of(j)` returns the
+/// pattern-match bitmask for text element at index `j`.  An indexed closure
+/// (rather than an iterator) keeps the loop trip-count statically known to
+/// the optimizer, which is important on tight bit-parallel code where any
+/// hidden Iterator::next call would balloon the schedule.
 ///
 /// Reference: H. Hyyrö, *A bit-vector algorithm for computing
 /// Levenshtein and Damerau edit distances*, Nordic Journal of Computing,
 /// 2003.
 #[inline(always)]
-fn hyrro_inner(m: usize, pm_iter: impl Iterator<Item = u64>) -> usize {
+fn hyrro_inner<F: FnMut(usize) -> u64>(m: usize, n: usize, mut pm_of: F) -> usize {
     let mut vp    = if m == 64 { !0u64 } else { (1u64 << m) - 1 };
     let mut vn    = 0u64;
-    let shift     = (m - 1) as u32;   // bit position of the score cell; hoisted out of the loop
+    // Top-bit mask of the score cell (hoisted: same value every iter).
+    let top       = 1u64 << (m - 1);
     let mut score = m as isize;
 
-    for pm in pm_iter {
+    for j in 0..n {
+        let pm = pm_of(j);
         let x  = pm | vn;
         let d0 = (((x & vp).wrapping_add(vp)) ^ vp) | x;
         let hp = vn | !(d0 | vp);
         let hn = vp & d0;
 
-        // Extract the top bit of hp/hn without branching: shift it to bit 0,
-        // mask, and cast.  Avoids branch mispredictions on random text.
-        score += ((hp >> shift) & 1) as isize - ((hn >> shift) & 1) as isize;
+        // Branchless top-bit extract: AND with mask, then test-nonzero.
+        // Compiles to `tst; cset` on AArch64 — two ops, no branches.
+        score += (hp & top != 0) as isize - (hn & top != 0) as isize;
 
         let hp_s = (hp << 1) | 1;
         let hn_s = hn << 1;
@@ -360,49 +371,248 @@ fn hyrro_inner(m: usize, pm_iter: impl Iterator<Item = u64>) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Wagner-Fischer fallback (two-row, generic over any Eq type)
+// Multi-word Hyyrö (m > 64)
 // ---------------------------------------------------------------------------
 
-fn wagner_fischer<T: Eq>(short: &[T], long: &[T]) -> usize {
-    let m = short.len();
-    let mut row: Vec<usize> = (0..=m).collect();
-    for (j, lj) in long.iter().enumerate() {
-        let mut diag = row[0];
-        row[0] = j + 1;
-        for (i, si) in short.iter().enumerate() {
-            let cost  = (si != lj) as usize;
-            let above = row[i + 1];
-            let left  = row[i];
-            let new   = (above + 1).min(left + 1).min(diag + cost);
-            diag      = above;
-            row[i + 1] = new;
+/// Add two u64 values with a carry-in bit; return (sum, carry-out).
+#[inline(always)]
+fn carrying_add(a: u64, b: u64, carry: bool) -> (u64, bool) {
+    let (s1, c1) = a.overflowing_add(b);
+    let (s2, c2) = s1.overflowing_add(carry as u64);
+    (s2, c1 | c2)
+}
+
+/// Const-generic inner kernel shared by all multi-word paths.
+///
+/// With `W` known at compile time the compiler can:
+///  * allocate `vp` and `vn` as `[u64; W]` on the stack (no heap access
+///    in the hot loop);
+///  * fully unroll `for k in 0..W`;
+///  * constant-fold `k == W - 1` so the score update emits a single
+///    branchless instruction only in the last unrolled iteration;
+///  * keep the entire state in registers across outer iterations.
+///
+/// `pm_of(j)` is inlined by the monomorphic dispatch — it should not
+/// contain any heap allocation.
+#[inline(always)]
+fn multiword_kernel<const W: usize, F: Fn(usize) -> [u64; W]>(
+    m: usize,
+    n: usize,
+    pm_of: F,
+) -> usize {
+    let last_bits = m - (W - 1) * 64; // 1..=64
+    let top_mask = 1u64 << (last_bits - 1);
+
+    let mut vp = [!0u64; W];
+    let mut vn = [0u64; W];
+    if last_bits < 64 {
+        vp[W - 1] = (1u64 << last_bits) - 1;
+    }
+    let mut score = m as isize;
+
+    for j in 0..n {
+        let pm_row = pm_of(j);
+        let mut carry = false;
+        let mut prev_hp = 1u64;
+        let mut prev_hn = 0u64;
+        for k in 0..W {
+            let pm = pm_row[k];
+            let x = pm | vn[k];
+            let (sum, nc) = carrying_add(x & vp[k], vp[k], carry);
+            carry = nc;
+            let d0 = (sum ^ vp[k]) | x;
+            let hp = vn[k] | !(d0 | vp[k]);
+            let hn = vp[k] & d0;
+            if k == W - 1 {
+                score += (hp & top_mask != 0) as isize - (hn & top_mask != 0) as isize;
+            }
+            let (hp_msb, hn_msb) = (hp >> 63, hn >> 63);
+            vp[k] = (hn << 1 | prev_hn) | !(d0 | (hp << 1 | prev_hp));
+            vn[k] = (hp << 1 | prev_hp) & d0;
+            (prev_hp, prev_hn) = (hp_msb, hn_msb);
         }
     }
-    row[m]
+    score as usize
 }
 
-// ---------------------------------------------------------------------------
-// Test helpers (bypass the PyO3 layer; no GIL release)
-// ---------------------------------------------------------------------------
+/// Multi-word Hyyrö for UCS-1 slices.  Each `run!(W)` arm stack-allocates a
+/// flat `[u64; 256 × W]` peq table (O(1) lookup, zero heap allocation) and
+/// dispatches to `multiword_kernel<W>` for `W = 2..=8`.  With W known at
+/// compile time the compiler stack-allocates `vp`/`vn` and fully unrolls the
+/// inner loop.  ALPHA=256 covers all u8 values without a bounds check.
+fn hyrro_multiword_bytes(short: &[u8], long: &[u8]) -> usize {
+    debug_assert!(short.len() > 64);
+    let m = short.len();
+    let w = (m + 63) / 64;
 
-#[cfg(test)]
-fn finish<T: Eq>(prep: Prep<T>) -> usize {
-    match prep {
-        Prep::Done(d)  => d,
-        Prep::Wf(s, l) => wagner_fischer(&s, &l),
+    macro_rules! run {
+        ($W:literal) => {{
+            // Stack-allocated peq: no malloc/free per call.
+            // [u64; 256 * W] = 2W KB (4 KB at W=2, 16 KB at W=8).
+            let mut peq = [0u64; 256 * $W];
+            for (i, &c) in short.iter().enumerate() {
+                // SAFETY: c as usize < 256 (u8), i/64 < W (i < m ≤ 64*W).
+                unsafe { *peq.get_unchecked_mut(c as usize * $W + i / 64) |= 1u64 << (i % 64); }
+            }
+            multiword_kernel::<$W, _>(m, long.len(), |j| {
+                // SAFETY: j < long.len(), c < 256, base+k < 256*W.
+                let base = unsafe { *long.get_unchecked(j) } as usize * $W;
+                let mut row = [0u64; $W];
+                for k in 0..$W {
+                    row[k] = unsafe { *peq.get_unchecked(base + k) };
+                }
+                row
+            })
+        }};
+    }
+    match w {
+        2 => run!(2),
+        3 => run!(3),
+        4 => run!(4),
+        5 => run!(5),
+        6 => run!(6),
+        7 => run!(7),
+        8 => run!(8),
+        // Heap-allocated fallback for patterns longer than 512 code units.
+        _ => {
+            let last_bits = m - (w - 1) * 64;
+            let top_mask = 1u64 << (last_bits - 1);
+            let mut peq = vec![0u64; 256 * w];
+            for (i, &c) in short.iter().enumerate() {
+                unsafe { *peq.get_unchecked_mut(c as usize * w + i / 64) |= 1u64 << (i % 64); }
+            }
+            let mut vp = vec![!0u64; w];
+            let mut vn = vec![0u64; w];
+            if last_bits < 64 { vp[w - 1] = (1u64 << last_bits) - 1; }
+            let mut score = m as isize;
+            for &tj in long {
+                let base = tj as usize * w;
+                let mut carry = false;
+                let mut prev_hp = 1u64;
+                let mut prev_hn = 0u64;
+                for k in 0..w {
+                    let pm = unsafe { *peq.get_unchecked(base + k) };
+                    let x = pm | unsafe { *vn.get_unchecked(k) };
+                    let vp_k = unsafe { *vp.get_unchecked(k) };
+                    let (sum, nc) = carrying_add(x & vp_k, vp_k, carry);
+                    carry = nc;
+                    let d0 = (sum ^ vp_k) | x;
+                    let vn_k = unsafe { *vn.get_unchecked(k) };
+                    let hp = vn_k | !(d0 | vp_k);
+                    let hn = vp_k & d0;
+                    if k == w - 1 { score += (hp & top_mask != 0) as isize - (hn & top_mask != 0) as isize; }
+                    let (hp_msb, hn_msb) = (hp >> 63, hn >> 63);
+                    unsafe {
+                        *vp.get_unchecked_mut(k) = (hn << 1 | prev_hn) | !(d0 | (hp << 1 | prev_hp));
+                        *vn.get_unchecked_mut(k) = (hp << 1 | prev_hp) & d0;
+                    }
+                    (prev_hp, prev_hn) = (hp_msb, hn_msb);
+                }
+            }
+            score as usize
+        }
     }
 }
+
+/// Multi-word Hyyrö for UCS-2 (u16), UCS-4 (u32), and mixed-kind (u32) slices.
+/// Peq is a sorted `keys / data` layout; each text lookup is one
+/// `binary_search` (O(log k)).  Same const-generic dispatch as the u8 path.
+fn hyrro_multiword_sorted<T: CodeUnit>(short: &[T], long: &[T]) -> usize {
+    debug_assert!(short.len() > 64);
+    let m = short.len();
+    let w = (m + 63) / 64;
+
+    let mut keys: Vec<T> = short.iter().copied().collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let n_keys = keys.len();
+    // One extra zero row at the end: "not found" → index n_keys → zeros.
+    let mut data = vec![0u64; (n_keys + 1) * w];
+    for (i, &c) in short.iter().enumerate() {
+        let ki = keys.partition_point(|&x| x < c);
+        data[ki * w + i / 64] |= 1u64 << (i % 64);
+    }
+
+    macro_rules! run {
+        ($W:literal) => {{
+            let k_ref = &keys;
+            let d_ref = &data;
+            let nk = n_keys;
+            multiword_kernel::<$W, _>(m, long.len(), |j| {
+                let c = unsafe { *long.get_unchecked(j) };
+                let base = match k_ref.binary_search(&c) {
+                    Ok(ki) => ki * $W,
+                    Err(_)  => nk * $W, // zero row
+                };
+                let mut row = [0u64; $W];
+                for k in 0..$W {
+                    row[k] = unsafe { *d_ref.get_unchecked(base + k) };
+                }
+                row
+            })
+        }};
+    }
+    match w {
+        2 => run!(2),
+        3 => run!(3),
+        4 => run!(4),
+        5 => run!(5),
+        6 => run!(6),
+        7 => run!(7),
+        8 => run!(8),
+        _ => {
+            // Heap-allocated fallback for very long patterns (w > 8).
+            let last_bits = m - (w - 1) * 64;
+            let top_mask = 1u64 << (last_bits - 1);
+            let zero_base = n_keys * w;
+            let mut vp = vec![!0u64; w];
+            let mut vn = vec![0u64; w];
+            if last_bits < 64 { vp[w - 1] = (1u64 << last_bits) - 1; }
+            let mut score = m as isize;
+            for &tj in long {
+                let base = match keys.binary_search(&tj) {
+                    Ok(ki) => ki * w,
+                    Err(_)  => zero_base,
+                };
+                let mut carry = false;
+                let mut prev_hp = 1u64;
+                let mut prev_hn = 0u64;
+                for k in 0..w {
+                    let pm = unsafe { *data.get_unchecked(base + k) };
+                    let x = pm | unsafe { *vn.get_unchecked(k) };
+                    let vp_k = unsafe { *vp.get_unchecked(k) };
+                    let (sum, nc) = carrying_add(x & vp_k, vp_k, carry);
+                    carry = nc;
+                    let d0 = (sum ^ vp_k) | x;
+                    let vn_k = unsafe { *vn.get_unchecked(k) };
+                    let hp = vn_k | !(d0 | vp_k);
+                    let hn = vp_k & d0;
+                    if k == w - 1 { score += (hp & top_mask != 0) as isize - (hn & top_mask != 0) as isize; }
+                    let (hp_msb, hn_msb) = (hp >> 63, hn >> 63);
+                    unsafe {
+                        *vp.get_unchecked_mut(k) = (hn << 1 | prev_hn) | !(d0 | (hp << 1 | prev_hp));
+                        *vn.get_unchecked_mut(k) = (hp << 1 | prev_hp) & d0;
+                    }
+                    (prev_hp, prev_hn) = (hp_msb, hn_msb);
+                }
+            }
+            score as usize
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers (bypass the PyO3 layer)
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 fn levenshtein(s1: &str, s2: &str) -> usize {
     if s1.is_ascii() && s2.is_ascii() {
-        finish(prep_bytes(s1.as_bytes(), s2.as_bytes()))
+        compute_u8::<true>(s1.as_bytes(), s2.as_bytes())
     } else {
-        // No Python interpreter in unit tests; cast chars to u32 directly.
-        if s1 == s2 { return 0; }
         let a: Vec<u32> = s1.chars().map(|c| c as u32).collect();
         let b: Vec<u32> = s2.chars().map(|c| c as u32).collect();
-        finish(prep_fixed(&a, &b))
+        compute_sorted(&a, &b)
     }
 }
 
@@ -495,13 +705,102 @@ mod tests {
     }
 
     #[test]
-    fn long_inputs_use_wagner_fischer() {
+    fn long_inputs_multiword() {
         let a: String = "abc".repeat(40); // 120 chars
         let mut b = a.clone();
         b.insert(0, 'x');
         check(&a, &b, 1);
         let c = format!("{a}xyz");
         check(&a, &c, 3);
+    }
+
+    /// Directly exercise `hyrro_multiword_bytes` (m > 64) against the naive DP.
+    #[test]
+    fn multiword_bytes_matches_oracle() {
+        let oracle = |a: &[u8], b: &[u8]| -> usize {
+            let ac: Vec<char> = a.iter().map(|&c| c as char).collect();
+            let bc: Vec<char> = b.iter().map(|&c| c as char).collect();
+            naive(&ac, &bc)
+        };
+        // ASCII bytes (< 128): verify correctness.
+        let check_ascii = |a: &[u8], b: &[u8]| {
+            let (s, l) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+            assert!(s.len() > 64 && s.iter().all(|&c| c < 128) && l.iter().all(|&c| c < 128));
+            assert_eq!(hyrro_multiword_bytes(s, l), oracle(s, l));
+        };
+        // Latin-1 bytes: any u8 value allowed.
+        let check_latin1 = |a: &[u8], b: &[u8]| {
+            let (s, l) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+            assert!(s.len() > 64);
+            assert_eq!(hyrro_multiword_bytes(s, l), oracle(s, l));
+        };
+
+        // Benchmark-like: two long ASCII strings that diverge after a shared prefix.
+        let s1 = b"Lets pretend Marshall Mathers never picked up a pen".repeat(8);
+        let s2 = b"Lets pretend things woulda been no different".repeat(8);
+        let (sh, lo) = if s1.len() <= s2.len() { (&s1[..], &s2[..]) } else { (&s2[..], &s1[..]) };
+        assert_eq!(hyrro_multiword_bytes(sh, lo), oracle(sh, lo));
+
+        // Fully disjoint long ASCII strings.
+        check_ascii(&b"a".repeat(100), &b"b".repeat(100));
+
+        // Insertions at different positions (cycling through lowercase ASCII).
+        let base: Vec<u8> = (0u8..80).map(|i| b'a' + i % 26).collect();
+        let mut ins_front = vec![b'z'];
+        ins_front.extend_from_slice(&base);
+        check_ascii(&base, &ins_front);
+
+        let mut ins_mid = base[..40].to_vec();
+        ins_mid.push(b'z');
+        ins_mid.extend_from_slice(&base[40..]);
+        check_ascii(&base, &ins_mid);
+
+        // Boundary: exactly 65 chars.
+        check_ascii(&b"x".repeat(65), &b"y".repeat(65));
+
+        // Latin-1: bytes spanning full 0..=255 range, 2-word boundary (128 chars).
+        let p128: Vec<u8> = (0u8..128).collect();
+        let q128: Vec<u8> = (1u8..=128).collect(); // 128 is a Latin-1 byte
+        check_latin1(&p128, &q128);
+
+        // Latin-1 disjoint.
+        check_latin1(&vec![200u8; 80], &vec![201u8; 80]);
+    }
+
+    /// Directly exercise `hyrro_multiword_sorted` (m > 64) against the naive DP.
+    #[test]
+    fn multiword_sorted_matches_oracle() {
+        let check_u32 = |a: &[u32], b: &[u32]| {
+            let (s, l) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+            assert!(s.len() > 64, "test case must be long enough to hit multiword");
+            let got = hyrro_multiword_sorted(s, l);
+            let ac: Vec<char> = s.iter().map(|&c| char::from_u32(c).unwrap_or('?')).collect();
+            let bc: Vec<char> = l.iter().map(|&c| char::from_u32(c).unwrap_or('?')).collect();
+            let exp = naive(&ac, &bc);
+            assert_eq!(got, exp, "u32 mismatch ({} vs {} chars)", s.len(), l.len());
+        };
+
+        // Emoji run: each emoji is one code point — build 80-char runs.
+        let emoji_a: Vec<u32> = [0x1f980u32, 0x1f40d, 0x1f389, 0x1f38a, 0x1f388]
+            .iter().copied().cycle().take(80).collect();
+        let emoji_b: Vec<u32> = [0x1f40du32, 0x1f980, 0x1f389, 0x1f38a, 0x1f388]
+            .iter().copied().cycle().take(80).collect();
+        check_u32(&emoji_a, &emoji_b);
+
+        // CJK run: 80 characters from the Japanese test string.
+        let cjk_a: Vec<u32> = "日本語のテスト文字列".chars().map(|c| c as u32).cycle().take(80).collect();
+        let cjk_b: Vec<u32> = "日本語のテスツ文字列".chars().map(|c| c as u32).cycle().take(80).collect();
+        check_u32(&cjk_a, &cjk_b);
+
+        // Exactly 2 words (128 elements).
+        let a128: Vec<u32> = (0u32..128).collect();
+        let b128: Vec<u32> = (1u32..=128).collect();
+        check_u32(&a128, &b128);
+
+        // Fully disjoint.
+        let all_a: Vec<u32> = vec![1u32; 80];
+        let all_b: Vec<u32> = vec![2u32; 80];
+        check_u32(&all_a, &all_b);
     }
 
     #[test]
@@ -522,7 +821,7 @@ mod tests {
         for &(a, b, expected) in cases {
             let au: Vec<u16> = a.encode_utf16().collect();
             let bu: Vec<u16> = b.encode_utf16().collect();
-            assert_eq!(finish(prep_fixed(&au, &bu)), expected, "u16 ({a:?}, {b:?})");
+            assert_eq!(compute_sorted(&au, &bu), expected, "u16 ({a:?}, {b:?})");
             assert_eq!(levenshtein(a, b), expected, "u32 ({a:?}, {b:?})");
         }
     }
@@ -537,7 +836,7 @@ mod tests {
         for &(a, b, expected) in cases {
             let au: Vec<u32> = a.chars().map(|c| c as u32).collect();
             let bu: Vec<u32> = b.chars().map(|c| c as u32).collect();
-            assert_eq!(finish(prep_fixed(&au, &bu)), expected, "u32 ({a:?}, {b:?})");
+            assert_eq!(compute_sorted(&au, &bu), expected, "u32 ({a:?}, {b:?})");
             assert_eq!(levenshtein(a, b), expected, "u32 ({a:?}, {b:?})");
         }
     }
@@ -569,6 +868,29 @@ mod tests {
             let bc: Vec<char> = b.chars().collect();
             assert_eq!(levenshtein(a, b), naive(&ac, &bc), "({a:?}, {b:?})");
         }
+    }
+
+    #[test]
+    fn bench_multiword_raw() {
+        use std::time::Instant;
+        // Simulate the benchmark strings after affix stripping.
+        let s1_full = b"Lets pretend things woulda been no different".repeat(8);
+        let s2_full = b"Lets pretend Marshall Mathers never picked up a pen".repeat(8);
+        // strip 13-char common prefix "Lets pretend "
+        let short = &s1_full[13..];
+        let long  = &s2_full[13..];
+        assert!(short.len() <= long.len());
+        let n = 10_000u32;
+        let mut sink = 0usize;
+        let t0 = Instant::now();
+        for _ in 0..n {
+            sink += hyrro_multiword_bytes(short, long);
+        }
+        let us = t0.elapsed().as_secs_f64() * 1e6 / n as f64;
+        #[cfg(debug_assertions)]
+        eprintln!("NOTE: debug build — release will be ~10-20x faster");
+        eprintln!("raw Rust hyrro_multiword_bytes: {:.3} μs/call  (sink={})", us, sink);
+        assert!(sink > 0); // prevent DCE
     }
 
     #[test]

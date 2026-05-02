@@ -21,20 +21,22 @@ N_LIBS = 1_000
 # Iterations for the fast lev-vs-rapidfuzz kind comparison.
 N_KINDS = 100_000
 
+MULTIPLIER = 16
+
 # Representative string pairs keyed by their CPython internal encoding kind.
 KINDS: dict[str, tuple[str, str]] = {
     "ASCII": (
-        "Lets pretend Marshall Mathers never picked up a pen",
-        "Lets pretend things woulda been no different",
+        "Lets pretend Marshall Mathers never picked up a pen" * MULTIPLIER,
+        "Lets pretend things woulda been no different" * MULTIPLIER,
     ),
     "Latin-1": (
-        "H\xe9llo w\xf6rld, wi\xe9 geht \xe8s \xcdhnen?",
-        "H\xe9llo w\xf6rld, wi\xe9 geht es Ihnen?",
+        "H\xe9llo w\xf6rld, wi\xe9 geht \xe8s \xcdhnen?" * MULTIPLIER,
+        "H\xe9llo w\xf6rld, wi\xe9 geht es Ihnen?" * MULTIPLIER,
     ),
-    "CJK": ("日本語のテスト文字列", "日本語のテスツ文字列"),
+    "CJK": ("日本語のテスト文字列" * MULTIPLIER, "日本語のテスツ文字列" * MULTIPLIER),
     "Emoji": (
-        "\U0001f980\U0001f40d\U0001f389\U0001f38a\U0001f388",
-        "\U0001f40d\U0001f980\U0001f389\U0001f38a\U0001f388",
+        "\U0001f980\U0001f40d\U0001f389\U0001f38a\U0001f388" * MULTIPLIER,
+        "\U0001f40d\U0001f980\U0001f389\U0001f38a\U0001f388" * MULTIPLIER,
     ),
 }
 
