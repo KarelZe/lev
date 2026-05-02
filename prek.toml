@@ -27,6 +27,13 @@ hooks = [
 ]
 
 [[repos]]
+repo = "https://github.com/doublify/pre-commit-rust"
+rev = "v1.0"
+hooks = [
+  { id = "fmt" }
+]
+
+[[repos]]
 repo = "https://github.com/commitizen-tools/commitizen"
 rev = "v4.13.10"
 hooks = [

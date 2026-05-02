@@ -52,11 +52,17 @@ trait CodeUnit: Ord + Copy + Eq + Send + 'static {
 }
 impl CodeUnit for u16 {
     const SENTINEL: Self = u16::MAX;
-    #[inline(always)] fn as_u64(self) -> u64 { self as u64 }
+    #[inline(always)]
+    fn as_u64(self) -> u64 {
+        self as u64
+    }
 }
 impl CodeUnit for u32 {
     const SENTINEL: Self = u32::MAX;
-    #[inline(always)] fn as_u64(self) -> u64 { self as u64 }
+    #[inline(always)]
+    fn as_u64(self) -> u64 {
+        self as u64
+    }
 }
 
 /// Fibonacci hash slot: maps a 64-bit key into `[0, mask]` where `mask = 2^k - 1`.
@@ -81,10 +87,10 @@ fn hslot(key: u64, mask: usize) -> usize {
 /// derived from a single PyASCIIObject header read; subsequent dispatch
 /// branches operate on locals only — no further FFI calls.
 struct UniView {
-    kind:  c_uint,
+    kind: c_uint,
     ascii: bool,
-    data:  *const u8,
-    len:   usize,
+    data: *const u8,
+    len: usize,
 }
 
 /// Read kind + ascii flag + data ptr + length from a Python string in one go.
@@ -92,19 +98,28 @@ struct UniView {
 /// re-traversing pyo3's PyUnicode helpers.
 #[inline(always)]
 unsafe fn view(s: &Bound<'_, PyString>) -> UniView {
-    let ptr  = s.as_ptr();
+    let ptr = s.as_ptr();
     let kind = ffi::PyUnicode_KIND(ptr);
     UniView {
         kind,
         ascii: ffi::PyUnicode_IS_ASCII(ptr) != 0,
-        data:  ffi::PyUnicode_DATA(ptr) as *const u8,
-        len:   ffi::PyUnicode_GET_LENGTH(ptr) as usize,
+        data: ffi::PyUnicode_DATA(ptr) as *const u8,
+        len: ffi::PyUnicode_GET_LENGTH(ptr) as usize,
     }
 }
 
-#[inline(always)] unsafe fn as_u8 (v: &UniView) -> &[u8]  { std::slice::from_raw_parts(v.data,                v.len) }
-#[inline(always)] unsafe fn as_u16(v: &UniView) -> &[u16] { std::slice::from_raw_parts(v.data as *const u16, v.len) }
-#[inline(always)] unsafe fn as_u32(v: &UniView) -> &[u32] { std::slice::from_raw_parts(v.data as *const u32, v.len) }
+#[inline(always)]
+unsafe fn as_u8(v: &UniView) -> &[u8] {
+    std::slice::from_raw_parts(v.data, v.len)
+}
+#[inline(always)]
+unsafe fn as_u16(v: &UniView) -> &[u16] {
+    std::slice::from_raw_parts(v.data as *const u16, v.len)
+}
+#[inline(always)]
+unsafe fn as_u32(v: &UniView) -> &[u32] {
+    std::slice::from_raw_parts(v.data as *const u32, v.len)
+}
 
 /// Materialise any Python string as `Vec<u32>` for mixed-kind pairs.
 /// Lone surrogates in UCS-2 are preserved (no UTF-8 round-trip).
@@ -144,7 +159,11 @@ unsafe fn to_u32_buf(v: &UniView) -> Vec<u32> {
 ///     2
 #[pyfunction]
 #[pyo3(signature = (s1, s2, /))]
-fn distance(_py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> PyResult<usize> {
+fn distance(
+    _py: Python<'_>,
+    s1: &Bound<'_, PyString>,
+    s2: &Bound<'_, PyString>,
+) -> PyResult<usize> {
     unsafe {
         let v1 = view(s1);
         let v2 = view(s2);
@@ -179,7 +198,9 @@ fn ratio(_py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) ->
         let v1 = view(s1);
         let v2 = view(s2);
         let total = v1.len + v2.len;
-        if total == 0 { return Ok(1.0); }
+        if total == 0 {
+            return Ok(1.0);
+        }
         Ok(1.0 - compute(&v1, &v2) as f64 / total as f64)
     }
 }
@@ -233,7 +254,12 @@ unsafe fn compute(v1: &UniView, v2: &UniView) -> usize {
 fn strip_affix<'a, T: Eq>(a: &'a [T], b: &'a [T]) -> (&'a [T], &'a [T]) {
     let prefix = a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count();
     let (a, b) = (&a[prefix..], &b[prefix..]);
-    let suffix = a.iter().rev().zip(b.iter().rev()).take_while(|(x, y)| x == y).count();
+    let suffix = a
+        .iter()
+        .rev()
+        .zip(b.iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
     (&a[..a.len() - suffix], &b[..b.len() - suffix])
 }
 
@@ -244,13 +270,23 @@ fn strip_affix<'a, T: Eq>(a: &'a [T], b: &'a [T]) -> (&'a [T], &'a [T]) {
 /// Strip affixes and run Hyyrö.  `ASCII = true` enables the 128-entry peq fast path.
 #[inline(always)]
 fn compute_u8<const ASCII: bool>(a: &[u8], b: &[u8]) -> usize {
-    if a == b { return 0; }
+    if a == b {
+        return 0;
+    }
     let (a, b) = strip_affix(a, b);
-    if a.is_empty() { return b.len(); }
-    if b.is_empty() { return a.len(); }
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
     let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     if short.len() <= 64 {
-        if ASCII { hyrro_64_ascii(short, long) } else { hyrro_64_bytes(short, long) }
+        if ASCII {
+            hyrro_64_ascii(short, long)
+        } else {
+            hyrro_64_bytes(short, long)
+        }
     } else {
         hyrro_multiword_bytes(short, long)
     }
@@ -269,7 +305,9 @@ fn hyrro_64_ascii(pattern: &[u8], text: &[u8]) -> usize {
     let mut bit = 1u64;
     for &c in pattern {
         // SAFETY: caller guarantees c < 128.
-        unsafe { *peq.get_unchecked_mut(c as usize) |= bit; }
+        unsafe {
+            *peq.get_unchecked_mut(c as usize) |= bit;
+        }
         bit <<= 1;
     }
     // SAFETY: caller guarantees text bytes < 128.
@@ -302,10 +340,16 @@ fn hyrro_64_bytes(pattern: &[u8], text: &[u8]) -> usize {
 /// Strip affixes and run Hyyrö.
 #[inline(always)]
 fn compute_sorted<T: CodeUnit>(a: &[T], b: &[T]) -> usize {
-    if a == b { return 0; }
+    if a == b {
+        return 0;
+    }
     let (a, b) = strip_affix(a, b);
-    if a.is_empty() { return b.len(); }
-    if b.is_empty() { return a.len(); }
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
     let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     if short.len() <= 64 {
         hyrro_64_sorted(short, long)
@@ -357,8 +401,12 @@ fn hyrro_64_sorted<T: CodeUnit>(pattern: &[T], text: &[T]) -> usize {
         let mut slot = hslot(c.as_u64(), MASK);
         loop {
             let v = unsafe { *vals.get_unchecked(slot) };
-            if v == 0 { return 0; } // empty → not in pattern
-            if unsafe { *keys.get_unchecked(slot) } == c { return v; }
+            if v == 0 {
+                return 0;
+            } // empty → not in pattern
+            if unsafe { *keys.get_unchecked(slot) } == c {
+                return v;
+            }
             slot = (slot + 1) & MASK;
         }
     })
@@ -379,15 +427,15 @@ fn hyrro_64_sorted<T: CodeUnit>(pattern: &[T], text: &[T]) -> usize {
 /// 2003.
 #[inline(always)]
 fn hyrro_inner<F: FnMut(usize) -> u64>(m: usize, n: usize, mut pm_of: F) -> usize {
-    let mut vp    = if m == 64 { !0u64 } else { (1u64 << m) - 1 };
-    let mut vn    = 0u64;
+    let mut vp = if m == 64 { !0u64 } else { (1u64 << m) - 1 };
+    let mut vn = 0u64;
     // Top-bit mask of the score cell (hoisted: same value every iter).
-    let top       = 1u64 << (m - 1);
+    let top = 1u64 << (m - 1);
     let mut score = m as isize;
 
     for j in 0..n {
         let pm = pm_of(j);
-        let x  = pm | vn;
+        let x = pm | vn;
         let d0 = (((x & vp).wrapping_add(vp)) ^ vp) | x;
         let hp = vn | !(d0 | vp);
         let hn = vp & d0;
@@ -487,7 +535,9 @@ fn hyrro_multiword_bytes(short: &[u8], long: &[u8]) -> usize {
             let mut peq = [0u64; 256 * $W];
             for (i, &c) in short.iter().enumerate() {
                 // SAFETY: c as usize < 256 (u8), i/64 < W (i < m ≤ 64*W).
-                unsafe { *peq.get_unchecked_mut(c as usize * $W + i / 64) |= 1u64 << (i % 64); }
+                unsafe {
+                    *peq.get_unchecked_mut(c as usize * $W + i / 64) |= 1u64 << (i % 64);
+                }
             }
             multiword_kernel::<$W, _>(m, long.len(), |j| {
                 // SAFETY: j < long.len(), c < 256, base+k < 256*W.
@@ -514,11 +564,15 @@ fn hyrro_multiword_bytes(short: &[u8], long: &[u8]) -> usize {
             let top_mask = 1u64 << (last_bits - 1);
             let mut peq = vec![0u64; 256 * w];
             for (i, &c) in short.iter().enumerate() {
-                unsafe { *peq.get_unchecked_mut(c as usize * w + i / 64) |= 1u64 << (i % 64); }
+                unsafe {
+                    *peq.get_unchecked_mut(c as usize * w + i / 64) |= 1u64 << (i % 64);
+                }
             }
             let mut vp = vec![!0u64; w];
             let mut vn = vec![0u64; w];
-            if last_bits < 64 { vp[w - 1] = (1u64 << last_bits) - 1; }
+            if last_bits < 64 {
+                vp[w - 1] = (1u64 << last_bits) - 1;
+            }
             let mut score = m as isize;
             for &tj in long {
                 let base = tj as usize * w;
@@ -535,10 +589,13 @@ fn hyrro_multiword_bytes(short: &[u8], long: &[u8]) -> usize {
                     let vn_k = unsafe { *vn.get_unchecked(k) };
                     let hp = vn_k | !(d0 | vp_k);
                     let hn = vp_k & d0;
-                    if k == w - 1 { score += (hp & top_mask != 0) as isize - (hn & top_mask != 0) as isize; }
+                    if k == w - 1 {
+                        score += (hp & top_mask != 0) as isize - (hn & top_mask != 0) as isize;
+                    }
                     let (hp_msb, hn_msb) = (hp >> 63, hn >> 63);
                     unsafe {
-                        *vp.get_unchecked_mut(k) = (hn << 1 | prev_hn) | !(d0 | (hp << 1 | prev_hp));
+                        *vp.get_unchecked_mut(k) =
+                            (hn << 1 | prev_hn) | !(d0 | (hp << 1 | prev_hp));
                         *vn.get_unchecked_mut(k) = (hp << 1 | prev_hp) & d0;
                     }
                     (prev_hp, prev_hn) = (hp_msb, hn_msb);
@@ -577,18 +634,21 @@ fn hyrro_multiword_sorted<T: CodeUnit>(short: &[T], long: &[T]) -> usize {
     for (ki, &key) in keys.iter().enumerate() {
         let mut slot = hslot(key.as_u64(), hash_mask);
         loop {
-            if hash_idx[slot] == u32::MAX { hash_idx[slot] = ki as u32; break; }
+            if hash_idx[slot] == u32::MAX {
+                hash_idx[slot] = ki as u32;
+                break;
+            }
             slot = (slot + 1) & hash_mask;
         }
     }
 
     macro_rules! run {
         ($W:literal) => {{
-            let k_ref  = &keys;
-            let d_ref  = &data;
-            let h_ref  = &hash_idx;
-            let nk     = n_keys;
-            let hmask  = hash_mask;
+            let k_ref = &keys;
+            let d_ref = &data;
+            let h_ref = &hash_idx;
+            let nk = n_keys;
+            let hmask = hash_mask;
             multiword_kernel::<$W, _>(m, long.len(), |j| {
                 let c = unsafe { *long.get_unchecked(j) };
                 // O(1) hash lookup replacing binary_search.
@@ -597,8 +657,10 @@ fn hyrro_multiword_sorted<T: CodeUnit>(short: &[T], long: &[T]) -> usize {
                     loop {
                         // SAFETY: slot is always < hash_size = h_ref.len().
                         let ki = unsafe { *h_ref.get_unchecked(slot) };
-                        if ki == u32::MAX { break nk * $W; } // not in pattern → zero row
-                        // SAFETY: ki < n_keys = k_ref.len().
+                        if ki == u32::MAX {
+                            break nk * $W;
+                        } // not in pattern → zero row
+                          // SAFETY: ki < n_keys = k_ref.len().
                         if unsafe { *k_ref.get_unchecked(ki as usize) } == c {
                             break ki as usize * $W;
                         }
@@ -628,7 +690,9 @@ fn hyrro_multiword_sorted<T: CodeUnit>(short: &[T], long: &[T]) -> usize {
             let zero_base = n_keys * w;
             let mut vp = vec![!0u64; w];
             let mut vn = vec![0u64; w];
-            if last_bits < 64 { vp[w - 1] = (1u64 << last_bits) - 1; }
+            if last_bits < 64 {
+                vp[w - 1] = (1u64 << last_bits) - 1;
+            }
             let mut score = m as isize;
             for &tj in long {
                 let base = {
@@ -636,9 +700,13 @@ fn hyrro_multiword_sorted<T: CodeUnit>(short: &[T], long: &[T]) -> usize {
                     loop {
                         // SAFETY: slot ∈ [0, hash_mask] ⊂ [0, hash_idx.len()).
                         let ki = unsafe { *hash_idx.get_unchecked(slot) };
-                        if ki == u32::MAX { break zero_base; }
+                        if ki == u32::MAX {
+                            break zero_base;
+                        }
                         // SAFETY: ki was stored as a valid index into keys (0..n_keys).
-                        if unsafe { *keys.get_unchecked(ki as usize) } == tj { break ki as usize * w; }
+                        if unsafe { *keys.get_unchecked(ki as usize) } == tj {
+                            break ki as usize * w;
+                        }
                         slot = (slot + 1) & hash_mask;
                     }
                 };
@@ -655,10 +723,13 @@ fn hyrro_multiword_sorted<T: CodeUnit>(short: &[T], long: &[T]) -> usize {
                     let vn_k = unsafe { *vn.get_unchecked(k) };
                     let hp = vn_k | !(d0 | vp_k);
                     let hn = vp_k & d0;
-                    if k == w - 1 { score += (hp & top_mask != 0) as isize - (hn & top_mask != 0) as isize; }
+                    if k == w - 1 {
+                        score += (hp & top_mask != 0) as isize - (hn & top_mask != 0) as isize;
+                    }
                     let (hp_msb, hn_msb) = (hp >> 63, hn >> 63);
                     unsafe {
-                        *vp.get_unchecked_mut(k) = (hn << 1 | prev_hn) | !(d0 | (hp << 1 | prev_hp));
+                        *vp.get_unchecked_mut(k) =
+                            (hn << 1 | prev_hn) | !(d0 | (hp << 1 | prev_hp));
                         *vn.get_unchecked_mut(k) = (hp << 1 | prev_hp) & d0;
                     }
                     (prev_hp, prev_hn) = (hp_msb, hn_msb);
@@ -696,8 +767,12 @@ mod tests {
     fn naive(a: &[char], b: &[char]) -> usize {
         let (m, n) = (a.len(), b.len());
         let mut dp = vec![vec![0usize; n + 1]; m + 1];
-        for i in 0..=m { dp[i][0] = i; }
-        for j in 0..=n { dp[0][j] = j; }
+        for i in 0..=m {
+            dp[i][0] = i;
+        }
+        for j in 0..=n {
+            dp[0][j] = j;
+        }
         for i in 1..=m {
             for j in 1..=n {
                 let cost = (a[i - 1] != b[j - 1]) as usize;
@@ -806,7 +881,11 @@ mod tests {
         // Benchmark-like: two long ASCII strings that diverge after a shared prefix.
         let s1 = b"Lets pretend Marshall Mathers never picked up a pen".repeat(8);
         let s2 = b"Lets pretend things woulda been no different".repeat(8);
-        let (sh, lo) = if s1.len() <= s2.len() { (&s1[..], &s2[..]) } else { (&s2[..], &s1[..]) };
+        let (sh, lo) = if s1.len() <= s2.len() {
+            (&s1[..], &s2[..])
+        } else {
+            (&s2[..], &s1[..])
+        };
         assert_eq!(hyrro_multiword_bytes(sh, lo), oracle(sh, lo));
 
         // Fully disjoint long ASCII strings.
@@ -840,24 +919,51 @@ mod tests {
     fn multiword_sorted_matches_oracle() {
         let check_u32 = |a: &[u32], b: &[u32]| {
             let (s, l) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-            assert!(s.len() > 64, "test case must be long enough to hit multiword");
+            assert!(
+                s.len() > 64,
+                "test case must be long enough to hit multiword"
+            );
             let got = hyrro_multiword_sorted(s, l);
-            let ac: Vec<char> = s.iter().map(|&c| char::from_u32(c).unwrap_or('?')).collect();
-            let bc: Vec<char> = l.iter().map(|&c| char::from_u32(c).unwrap_or('?')).collect();
+            let ac: Vec<char> = s
+                .iter()
+                .map(|&c| char::from_u32(c).unwrap_or('?'))
+                .collect();
+            let bc: Vec<char> = l
+                .iter()
+                .map(|&c| char::from_u32(c).unwrap_or('?'))
+                .collect();
             let exp = naive(&ac, &bc);
             assert_eq!(got, exp, "u32 mismatch ({} vs {} chars)", s.len(), l.len());
         };
 
         // Emoji run: each emoji is one code point — build 80-char runs.
         let emoji_a: Vec<u32> = [0x1f980u32, 0x1f40d, 0x1f389, 0x1f38a, 0x1f388]
-            .iter().copied().cycle().take(80).collect();
+            .iter()
+            .copied()
+            .cycle()
+            .take(80)
+            .collect();
         let emoji_b: Vec<u32> = [0x1f40du32, 0x1f980, 0x1f389, 0x1f38a, 0x1f388]
-            .iter().copied().cycle().take(80).collect();
+            .iter()
+            .copied()
+            .cycle()
+            .take(80)
+            .collect();
         check_u32(&emoji_a, &emoji_b);
 
         // CJK run: 80 characters from the Japanese test string.
-        let cjk_a: Vec<u32> = "日本語のテスト文字列".chars().map(|c| c as u32).cycle().take(80).collect();
-        let cjk_b: Vec<u32> = "日本語のテスツ文字列".chars().map(|c| c as u32).cycle().take(80).collect();
+        let cjk_a: Vec<u32> = "日本語のテスト文字列"
+            .chars()
+            .map(|c| c as u32)
+            .cycle()
+            .take(80)
+            .collect();
+        let cjk_b: Vec<u32> = "日本語のテスツ文字列"
+            .chars()
+            .map(|c| c as u32)
+            .cycle()
+            .take(80)
+            .collect();
         check_u32(&cjk_a, &cjk_b);
 
         // Exactly 2 words (128 elements).
@@ -946,7 +1052,7 @@ mod tests {
         let s2_full = b"Lets pretend Marshall Mathers never picked up a pen".repeat(8);
         // strip 13-char common prefix "Lets pretend "
         let short = &s1_full[13..];
-        let long  = &s2_full[13..];
+        let long = &s2_full[13..];
         assert!(short.len() <= long.len());
         let n = 10_000u32;
         let mut sink = 0usize;
@@ -957,7 +1063,10 @@ mod tests {
         let us = t0.elapsed().as_secs_f64() * 1e6 / n as f64;
         #[cfg(debug_assertions)]
         eprintln!("NOTE: debug build — release will be ~10-20x faster");
-        eprintln!("raw Rust hyrro_multiword_bytes: {:.3} μs/call  (sink={})", us, sink);
+        eprintln!(
+            "raw Rust hyrro_multiword_bytes: {:.3} μs/call  (sink={})",
+            us, sink
+        );
         assert!(sink > 0); // prevent DCE
     }
 
@@ -965,7 +1074,11 @@ mod tests {
     fn ratio_basic() {
         let r = |a: &str, b: &str| -> f64 {
             let total = a.chars().count() + b.chars().count();
-            if total == 0 { 1.0 } else { 1.0 - levenshtein(a, b) as f64 / total as f64 }
+            if total == 0 {
+                1.0
+            } else {
+                1.0 - levenshtein(a, b) as f64 / total as f64
+            }
         };
         assert!((r("", "") - 1.0).abs() < 1e-12);
         assert!((r("abc", "abc") - 1.0).abs() < 1e-12);

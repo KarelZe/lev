@@ -37,6 +37,16 @@ Run the test suite:
 cargo test
 ```
 
+## Code formatting
+
+Rust sources are formatted with `rustfmt`. Run it manually with:
+
+```bash
+cargo fmt
+```
+
+The formatter is also enforced automatically via [prek](https://prek.j178.dev/) on every commit (pre-commit hook) and in CI via the `prek checks` GitHub Actions workflow.
+
 ## Docs
 
 Build and serve the documentation locally (requires the extension to be compiled first):
