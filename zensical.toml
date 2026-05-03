@@ -57,6 +57,10 @@ show_signature_annotations = true
 separate_signature         = true
 inherited_members          = true
 
+[project.markdown_extensions.attr_list]
+
+[project.markdown_extensions.md_in_html]
+
 [project.markdown_extensions.admonition]
 
 [project.markdown_extensions.toc]
