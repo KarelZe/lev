@@ -1,12 +1,3 @@
-# /// script
-# requires-python = ">=3.13"
-# dependencies = [
-#     "matplotlib>=3.10.9",
-#     "matplotx>=0.3.10",
-#     "numpy>=2.0",
-#     "rapidfuzz>=3.14.5",
-# ]
-# ///
 """
 Benchmark lev vs rapidfuzz across string lengths for each CPython encoding kind.
 
