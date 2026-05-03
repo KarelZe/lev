@@ -25,20 +25,20 @@ jobs:
               /opt/python/cp312-cp312/bin/python
               /opt/python/cp313-cp313/bin/python
               /opt/python/cp314-cp314/bin/python
-          - target: aarch64
-            # aarch64 cross-compiles; binaries can't run on the x86_64 host so
-            # maturin reads sysconfig data files instead of executing interpreters.
-            # Remove PyPy before the build — PyUnicode_DATA/KIND don't exist on
-            # PyPy and --find-interpreter would otherwise pick it up.
-            args: --release --out dist --find-interpreter
-            before-script: rm -rf /opt/python/pp*
+          # - target: aarch64
+          #   # aarch64 cross-compiles; binaries can't run on the x86_64 host so
+          #   # maturin reads sysconfig data files instead of executing interpreters.
+          #   # Remove PyPy before the build — PyUnicode_DATA/KIND don't exist on
+          #   # PyPy and --find-interpreter would otherwise pick it up.
+          #   args: --release --out dist --find-interpreter
+          #   before-script: rm -rf /opt/python/pp*
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           target: ${{ matrix.target }}
           manylinux: auto
-          before-script-linux: ${{ matrix.before-script || '' }}
+          # before-script-linux: ${{ matrix.before-script || '' }}
           args: ${{ matrix.args }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
