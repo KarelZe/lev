@@ -6,6 +6,8 @@
 
 ## Installation
 
+Install the latest version from [pypi](https://pypi.org/project/lev-rs/):
+
 ```bash
 uv add lev-rs
 ```
