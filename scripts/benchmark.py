@@ -112,11 +112,12 @@ def plot_libraries(measures: dict[str, float], kind: str) -> None:
                 "axes.edgecolor": text_color,
                 "legend.edgecolor": text_color,
             })
-            colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-            bar_colors = [colors[2] if k == "lev" else colors[0] for k in sorted_measures]
             fig, ax = plt.subplots(figsize=(10, 2))
-            bars = ax.barh(list(sorted_measures.keys()), list(sorted_measures.values()), color=bar_colors)
+            bars = ax.barh(list(sorted_measures.keys()), list(sorted_measures.values()))
             ax.bar_label(bars, padding=5, fmt="%.1f ms")
+            for label in ax.get_yticklabels():
+                if label.get_text() == "lev":
+                    label.set_fontweight("bold")
             ax.grid(True, axis="x", ls="-")
             ax.grid(False, axis="y")
             ax.set_xlim(left=0, right=ax.get_xlim()[1] * 1.15)
