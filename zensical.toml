@@ -41,7 +41,7 @@ toggle.name = "Switch to dark mode"
 
 [[project.extra.social]]
 icon = "fontawesome/brands/github"
-link = "https://github.com/karelze/tclf"
+link = "https://github.com/KarelZe/lev"
 
 [[project.extra.social]]
 icon = "fontawesome/brands/linkedin"
