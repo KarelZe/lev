@@ -39,6 +39,7 @@ dev = [
     "commitizen",
     "maturin",
     "prek",
+    "pytest-codspeed",
     "pytest-cov",
     "pytest",
     "ruff",

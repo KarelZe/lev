@@ -17,6 +17,7 @@ import lev
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.benchmark
 @pytest.mark.parametrize(
     ("s1", "s2", "expected"),
     [
@@ -44,39 +45,27 @@ import lev
         ("levenshtein", "frankenstein", 6),
         ("confide", "deceit", 6),
         ("CUNsperrICY", "conspiracy", 8),
+        # Long strings: > 64 chars exercises the Wagner-Fischer fallback.
+        ("abc" * 40, "x" + "abc" * 40, 1),
+        ("abc" * 40, "abc" * 40 + "xyz", 3),
+        # 64-char boundary: pattern length exactly 64 hits the `m == 64` branch.
+        ("a" * 64, "a" * 64, 0),
+        ("a" * 64, "a" * 65, 1),
+        ("a" * 64, "b" + "a" * 63, 1),
     ],
 )
 def test_distance(s1: str, s2: str, expected: int) -> None:
     """
-    Test levenshtein distance.
+    Test and benchmark lev.distance.
 
     Args:
-        s1 (str): left string
-        s2 (str): right string
-        expected (int): expected distance
+        s1: First input string.
+        s2: Second input string.
+        expected: Expected Levenshtein distance.
 
     """
     assert lev.distance(s1, s2) == expected
     assert lev.distance(s2, s1) == expected  # symmetric
-
-
-def test_distance_long_inputs() -> None:
-    """Test levenshtein distance."""
-    # > 64 chars on the shorter side exercises the Wagner-Fischer fallback.
-    a = "abc" * 40  # 120 chars
-    b = "x" + a
-    assert lev.distance(a, b) == 1
-    assert lev.distance(a, a + "xyz") == 3
-
-
-def test_distance_64_boundary() -> None:
-    """Test levenshtein distance at 64 char boundary."""
-    a64 = "a" * 64
-    a65 = "a" * 65
-    assert lev.distance(a64, a64) == 0
-    assert lev.distance(a64, a65) == 1
-    # Pattern length exactly 64 hits the `m == 64` branch.
-    assert lev.distance(a64, "b" + "a" * 63) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +73,7 @@ def test_distance_64_boundary() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.benchmark
 @pytest.mark.parametrize(
     ("s1", "s2", "expected"),
     [
@@ -92,16 +82,19 @@ def test_distance_64_boundary() -> None:
         ("abc", "xyz", 1.0 - 3.0 / 6.0),
         ("kitten", "sitting", 1.0 - 3.0 / 13.0),
         ("a", "b", 1.0 - 1.0 / 2.0),
+        # Long strings.
+        ("abc" * 40, "x" + "abc" * 40, 1.0 - 1.0 / 241.0),
+        ("a" * 64, "a" * 65, 1.0 - 1.0 / 129.0),
     ],
 )
 def test_ratio(s1: str, s2: str, expected: float) -> None:
     """
-    Test ratio implementation.
+    Test and benchmark lev.ratio.
 
     Args:
-        s1 (str): left string
-        s2 (str): right string
-        expected (float): expected ratio
+        s1: First input string.
+        s2: Second input string.
+        expected: Expected ratio.
 
     """
     assert math.isclose(lev.ratio(s1, s2), expected, abs_tol=1e-12)
