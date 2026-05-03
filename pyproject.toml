@@ -93,10 +93,11 @@ name = "cz_conventional_commits"
 version = "0.1.0"
 tag_format = "$version"
 version_files = [
+    "Cargo.toml:version",
     "pyproject.toml:version",
     "version",
 ]
-bump_message = "bump: version $current_version → $new_version"
+bump_message = "chore: bump version $current_version → $new_version 👒"
 update_changelog_on_bump = true
 annotated_tag = true
 
