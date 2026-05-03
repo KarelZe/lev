@@ -3,7 +3,7 @@ requires = ["maturin>=1.13.1,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "lev"
+name = "lev-rs"
 authors = [
   { name="Markus Bilz", email="github@markusbilz.com" },
 ]
@@ -91,7 +91,7 @@ annotated_tag = true
 
 [tool.maturin]
 # bindings = "bin"
-# module-name = "lev"
+module-name = "lev"
 # python-source = "python"
 strip = true
 
