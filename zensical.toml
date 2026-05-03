@@ -5,6 +5,7 @@ site_author      = "KarelZe"
 site_url         = "https://KarelZe.github.io/lev/"
 repo_url         = "https://github.com/KarelZe/lev"
 repo_name        = "KarelZe/lev"
+edit_uri = "edit/main/docs/"
 
 nav = [
   { Home = "index.md" },
@@ -21,7 +22,12 @@ features = [
   "navigation.instant",
   "navigation.tracking",
   "navigation.top",
+  "search.highlight",
+  "search.suggest",
 ]
+
+[project.theme.icon]
+repo = "fontawesome/brands/github"
 
 [[project.theme.palette]]
 scheme      = "slate"
@@ -33,14 +39,23 @@ scheme      = "default"
 toggle.icon = "lucide/moon"
 toggle.name = "Switch to dark mode"
 
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/karelze/tclf"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/linkedin"
+link = "https://www.linkedin.com/in/markus-bilz/"
+
 [project.plugins.search]
 
 [project.plugins.mkdocstrings.handlers.python.options]
 docstring_style            = "google"
 show_root_heading          = true
-show_source                = false
+show_source                = true
 show_signature_annotations = true
 separate_signature         = true
+inherited_members          = true
 
 [project.markdown_extensions.admonition]
 
