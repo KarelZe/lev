@@ -102,7 +102,13 @@ unsafe fn view(s: &Bound<'_, PyString>) -> UniView {
     let kind = ffi::PyUnicode_KIND(ptr);
     UniView {
         kind,
+        // PyUnicode_IS_ASCII and the PyASCIIObject state bitfield are opaque
+        // on Python 3.14+; fall back to the 256-entry Latin-1 table (correct
+        // for all u8 values; small perf cost for pure-ASCII strings on 3.14).
+        #[cfg(not(Py_3_14))]
         ascii: ffi::PyUnicode_IS_ASCII(ptr) != 0,
+        #[cfg(Py_3_14)]
+        ascii: false,
         data: ffi::PyUnicode_DATA(ptr) as *const u8,
         len: ffi::PyUnicode_GET_LENGTH(ptr) as usize,
     }
