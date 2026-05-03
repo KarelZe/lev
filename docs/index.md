@@ -51,11 +51,9 @@ For more details on the API see the [API Reference](api.md).
 
 `lev` is significantly faster than the other libraries on 100-character ASCII strings.
 
-<figure markdown="span">
-  ![ASCII benchmark – light](assets/benchmark_ascii_light.svg#only-light){ width="75%" }
-  ![ASCII benchmark – dark](assets/benchmark_ascii_dark.svg#only-dark){ width="75%" }
-  <figcaption>ASCII</figcaption>
-</figure>
+![ASCII benchmark – light](assets/benchmark_ascii_light.svg#only-light){ width="75%" }
+![ASCII benchmark – dark](assets/benchmark_ascii_dark.svg#only-dark){ width="75%" }
+
 
 ### Other Encodings
 
@@ -63,24 +61,17 @@ For more details on the API see the [API Reference](api.md).
 
 #### Latin-1
 
-<figure markdown="span">
-  ![Latin-1 benchmark – light](assets/benchmark_latin_1_light.svg#only-light){ width="75%" }
-  ![Latin-1 benchmark – dark](assets/benchmark_latin_1_dark.svg#only-dark){ width="75%" }
-  <figcaption>Latin-1</figcaption>
-</figure>
+
+![Latin-1 benchmark – light](assets/benchmark_latin_1_light.svg#only-light){ width="75%" }
+![Latin-1 benchmark – dark](assets/benchmark_latin_1_dark.svg#only-dark){ width="75%" }
+
 
 #### CJK
 
-<figure markdown="span">
-  ![CJK benchmark – light](assets/benchmark_cjk_light.svg#only-light){ width="75%" }
-  ![CJK benchmark – dark](assets/benchmark_cjk_dark.svg#only-dark){ width="75%" }
-  <figcaption>CJK</figcaption>
-</figure>
+![CJK benchmark – light](assets/benchmark_cjk_light.svg#only-light){ width="75%" }
+![CJK benchmark – dark](assets/benchmark_cjk_dark.svg#only-dark){ width="75%" }
 
 #### Emoji
 
-<figure markdown="span">
-  ![Emoji benchmark – light](assets/benchmark_emoji_light.svg#only-light){ width="75%" }
-  ![Emoji benchmark – dark](assets/benchmark_emoji_dark.svg#only-dark){ width="75%" }
-  <figcaption>Emoji</figcaption>
-</figure>
+![Emoji benchmark – light](assets/benchmark_emoji_light.svg#only-light){ width="75%" }
+![Emoji benchmark – dark](assets/benchmark_emoji_dark.svg#only-dark){ width="75%" }
