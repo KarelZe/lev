@@ -140,9 +140,11 @@ def plot(
             fontsize=14,
         )
         colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        lib_colors = {lib: (colors[2] if lib == "lev [ours]" else colors[0]) for lib in LIBRARIES}
 
         for ax, kind in zip(axes.flat, KINDS):
-            for (lib, _), color in zip(LIBRARIES.items(), colors):
+            for lib, _ in LIBRARIES.items():
+                color = lib_colors[lib]
                 ys = data[kind][lib]  # (n_lengths, N_REPEAT)
                 med = np.median(ys, axis=1)
                 p25 = np.percentile(ys, 25, axis=1)
