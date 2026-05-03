@@ -193,3 +193,6 @@ Cargo.lock
 
 ## visualizations
 *.png
+
+## benchmarks
+bench*.json

@@ -46,6 +46,15 @@ docs = [
     "zensical",
     "mkdocstrings[python]",
 ]
+benchmark = [
+    "edlib",
+    "editdistance>=0.8.1",
+    "matplotlib>=3.10.9",
+    "matplotx>=0.3.10",
+    "numpy>=2.0",
+    "pylev>=1.4.0",
+    "rapidfuzz>=3.14.5",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/KarelZe/lev"
