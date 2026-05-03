@@ -10,7 +10,7 @@ authors = [
 description = "A extremely fast Python library for the Levenshtein distance, written in Rust 🦀."
 readme = "README.md"
 license = {file = "LICENSE"}
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.10"
 keywords = [
     "distance",
@@ -90,7 +90,7 @@ show_missing = true
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "0.1.0"
+version = "0.2.0"
 tag_format = "$version"
 version_files = [
     "pyproject.toml:version",
