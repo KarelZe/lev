@@ -139,25 +139,24 @@ def plot(
             f"({N_REPEAT} runs × {N_NUMBER:,} calls)",  # noqa: RUF001
             fontsize=14,
         )
-        colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-        lib_colors = {lib: (colors[2] if lib == "lev [ours]" else colors[0]) for lib in LIBRARIES}
-
         for ax, kind in zip(axes.flat, KINDS):
             for lib, _ in LIBRARIES.items():
-                color = lib_colors[lib]
                 ys = data[kind][lib]  # (n_lengths, N_REPEAT)
                 med = np.median(ys, axis=1)
                 p25 = np.percentile(ys, 25, axis=1)
                 p75 = np.percentile(ys, 75, axis=1)
-                ax.plot(xs, med, label=lib, color=color, linewidth=1.8)
-                ax.fill_between(xs, p25, p75, alpha=0.22, color=color)
+                (line,) = ax.plot(xs, med, label=lib, linewidth=1.8)
+                ax.fill_between(xs, p25, p75, alpha=0.22, color=line.get_color())
 
             ax.set_title(kind, fontsize=13)
             ax.set_xlabel("string length (chars)", fontsize=11)
             ax.set_xlim(xs[0], xs[-1])
             ax.set_ylim(bottom=0)
             matplotx.ylabel_top("time (µs)", ax=ax)  # noqa: RUF001
-            ax.legend(fontsize=11)
+            legend = ax.legend(fontsize=11)
+            for text in legend.get_texts():
+                if text.get_text() == "lev [ours]":
+                    text.set_fontweight("bold")
 
         fig.tight_layout()
         fig.savefig(out, bbox_inches="tight", dpi=150)
