@@ -74,7 +74,9 @@ Open <http://localhost:8000> in your browser. The server reloads automatically o
 ## Benchmarks
 
 ```bash
+uv sync --extra benchmark
 uv run python scripts/benchmark.py
+uv run python scripts/benchmark_by_length.py
 ```
 
 Produces two plots and a printed timing table:

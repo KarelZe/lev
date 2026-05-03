@@ -1,14 +1,3 @@
-# /// script
-# requires-python = ">=3.13"
-# dependencies = [
-#     "editdistance>=0.8.1",
-#     "levenshtein>=0.27.3",
-#     "matplotlib>=3.10.9",
-#     "matplotx>=0.3.10",
-#     "pylev>=1.4.0",
-#     "rapidfuzz>=3.14.5",
-# ]
-# ///
 """Simple benchmarking script for popular levenshtein implementations."""
 
 from timeit import timeit
@@ -57,9 +46,9 @@ def measure_libraries() -> dict[str, float]:
             "import editdistance",
             number=N_LIBS,
         ),
-        "levenshtein": timeit(
-            f"Levenshtein.distance({_ASCII_S1!r}, {_ASCII_S2!r})",
-            "import Levenshtein",
+        "edlib": timeit(
+            f"edlib.align({_ASCII_S1!r}, {_ASCII_S2!r})['editDistance']",
+            "import edlib",
             number=N_LIBS,
         ),
         "pylev": timeit(

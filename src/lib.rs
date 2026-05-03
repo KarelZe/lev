@@ -704,7 +704,6 @@ fn hyrro_multiword_sorted<T: CodeUnit>(short: &[T], long: &[T]) -> usize {
                 vp[w - 1] = (1u64 << last_bits) - 1;
             }
             let mut score = m as isize;
-            let hshift = 64 - hash_mask.count_ones();
             for &tj in long {
                 let base = {
                     let mut slot = hslot(tj.as_u64(), hshift);
