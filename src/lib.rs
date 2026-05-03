@@ -254,7 +254,7 @@ unsafe fn compute(v1: &UniView, v2: &UniView) -> usize {
 fn strip_affix<'a, T: Eq>(mut a: &'a [T], mut b: &'a [T]) -> (&'a [T], &'a [T]) {
     let mut prefix = 0;
     let len = usize::min(a.len(), b.len());
-    while prefix < len && a[prefix] == b[prefix] {
+    while prefix < len && unsafe { a.get_unchecked(prefix) == b.get_unchecked(prefix) } {
         prefix += 1;
     }
     a = &a[prefix..];
@@ -262,7 +262,9 @@ fn strip_affix<'a, T: Eq>(mut a: &'a [T], mut b: &'a [T]) -> (&'a [T], &'a [T]) 
 
     let mut suffix = 0;
     let len = usize::min(a.len(), b.len());
-    while suffix < len && a[a.len() - 1 - suffix] == b[b.len() - 1 - suffix] {
+    while suffix < len
+        && unsafe { a.get_unchecked(a.len() - 1 - suffix) == b.get_unchecked(b.len() - 1 - suffix) }
+    {
         suffix += 1;
     }
     (&a[..a.len() - suffix], &b[..b.len() - suffix])
@@ -428,11 +430,11 @@ fn hyrro_64_sorted<T: CodeUnit>(pattern: &[T], text: &[T]) -> usize {
 // Hyyrö's bit-parallel inner loop (single 64-bit word)
 // ---------------------------------------------------------------------------
 
-/// Core Hyyrö loop shared by all pipelines.  `pm_of(j)` returns the
-/// pattern-match bitmask for text element at index `j`.  An indexed closure
-/// (rather than an iterator) keeps the loop trip-count statically known to
-/// the optimizer, which is important on tight bit-parallel code where any
-/// hidden Iterator::next call would balloon the schedule.
+/// Core Hyyrö loop shared by all pipelines. The iterator `pm_iter` returns the
+/// pattern-match bitmask for each text element. An `Iterator` is used here
+/// as it integrates cleanly with the monomorphic dispatch and has been shown
+/// to enable better auto-vectorization and bounds check elimination compared
+/// to indexed closures.
 ///
 /// Reference: H. Hyyrö, *A bit-vector algorithm for computing
 /// Levenshtein and Damerau edit distances*, Nordic Journal of Computing,
@@ -451,9 +453,8 @@ fn hyrro_inner<I: Iterator<Item = u64>>(m: usize, pm_iter: I) -> usize {
         let hp = vn | !(d0 | vp);
         let hn = vp & d0;
 
-        // Branchless top-bit extract: AND with mask, then test-nonzero.
-        // Compiles to `tst; cset` on AArch64 — two ops, no branches.
-        score += (hp & top != 0) as isize - (hn & top != 0) as isize;
+        // Branchless top-bit extract: bitwise shift maps the high bit to 1 or 0.
+        score += ((hp & top) >> (m - 1)) as isize - ((hn & top) >> (m - 1)) as isize;
 
         let hp_s = (hp << 1) | 1;
         let hn_s = hn << 1;
@@ -486,7 +487,7 @@ fn carrying_add(a: u64, b: u64, carry: bool) -> (u64, bool) {
 ///    branchless instruction only in the last unrolled iteration;
 ///  * keep the entire state in registers across outer iterations.
 ///
-/// `pm_of(j)` is inlined by the monomorphic dispatch — it should not
+/// The iterator `pm_iter` is inlined by the monomorphic dispatch — it should not
 /// contain any heap allocation.
 #[inline(always)]
 fn multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(m: usize, pm_iter: I) -> usize {
@@ -513,7 +514,8 @@ fn multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(m: usize, pm_i
             let hp = vn[k] | !(d0 | vp[k]);
             let hn = vp[k] & d0;
             if k == W - 1 {
-                score += (hp & top_mask != 0) as isize - (hn & top_mask != 0) as isize;
+                score += ((hp & top_mask) >> (last_bits - 1)) as isize
+                    - ((hn & top_mask) >> (last_bits - 1)) as isize;
             }
             let (hp_msb, hn_msb) = (hp >> 63, hn >> 63);
             vp[k] = (hn << 1 | prev_hn) | !(d0 | (hp << 1 | prev_hp));
@@ -599,7 +601,8 @@ fn hyrro_multiword_bytes(short: &[u8], long: &[u8]) -> usize {
                     let hp = vn_k | !(d0 | vp_k);
                     let hn = vp_k & d0;
                     if k == w - 1 {
-                        score += (hp & top_mask != 0) as isize - (hn & top_mask != 0) as isize;
+                        score += ((hp & top_mask) >> (last_bits - 1)) as isize
+                            - ((hn & top_mask) >> (last_bits - 1)) as isize;
                     }
                     let (hp_msb, hn_msb) = (hp >> 63, hn >> 63);
                     unsafe {
@@ -654,12 +657,6 @@ fn hyrro_multiword_sorted<T: CodeUnit>(short: &[T], long: &[T]) -> usize {
 
     macro_rules! run {
         ($W:literal) => {{
-            let k_ref = &keys;
-            let d_ref = &data;
-            let h_ref = &hash_idx;
-            let nk = n_keys;
-            let hmask = hash_mask;
-            let hshift = 64 - hash_mask.count_ones();
             multiword_kernel::<$W, _>(
                 m,
                 long.iter().map(|&c| {
@@ -667,21 +664,21 @@ fn hyrro_multiword_sorted<T: CodeUnit>(short: &[T], long: &[T]) -> usize {
                     let base = {
                         let mut slot = hslot(c.as_u64(), hshift);
                         loop {
-                            // SAFETY: slot is always < hash_size = h_ref.len().
-                            let ki = unsafe { *h_ref.get_unchecked(slot) };
+                            // SAFETY: slot is always < hash_size = hash_idx.len().
+                            let ki = unsafe { *hash_idx.get_unchecked(slot) };
                             if ki == u32::MAX {
-                                break nk * $W;
+                                break n_keys * $W;
                             } // not in pattern → zero row
-                              // SAFETY: ki < n_keys = k_ref.len().
-                            if unsafe { *k_ref.get_unchecked(ki as usize) } == c {
+                              // SAFETY: ki < n_keys = keys.len().
+                            if unsafe { *keys.get_unchecked(ki as usize) } == c {
                                 break ki as usize * $W;
                             }
-                            slot = (slot + 1) & hmask;
+                            slot = (slot + 1) & hash_mask;
                         }
                     };
                     let mut row = [0u64; $W];
                     for k in 0..$W {
-                        row[k] = unsafe { *d_ref.get_unchecked(base + k) };
+                        row[k] = unsafe { *data.get_unchecked(base + k) };
                     }
                     row
                 }),
@@ -738,7 +735,8 @@ fn hyrro_multiword_sorted<T: CodeUnit>(short: &[T], long: &[T]) -> usize {
                     let hp = vn_k | !(d0 | vp_k);
                     let hn = vp_k & d0;
                     if k == w - 1 {
-                        score += (hp & top_mask != 0) as isize - (hn & top_mask != 0) as isize;
+                        score += ((hp & top_mask) >> (last_bits - 1)) as isize
+                            - ((hn & top_mask) >> (last_bits - 1)) as isize;
                     }
                     let (hp_msb, hn_msb) = (hp >> 63, hn >> 63);
                     unsafe {
