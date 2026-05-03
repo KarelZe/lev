@@ -148,7 +148,7 @@ unsafe fn to_u32_buf(v: &UniView) -> Vec<u32> {
 ///     s2 (str): Second input string.
 ///
 /// Returns:
-///     int: Non-negative integer edit distance.
+///     Non-negative integer edit distance.
 ///
 /// Examples:
 ///     >>> import lev
@@ -184,7 +184,7 @@ fn distance(
 ///     s2 (str): Second input string.
 ///
 /// Returns:
-///     float: Similarity score between `0.0` (completely different) and `1.0` (identical).
+///     Similarity score between `0.0` (completely different) and `1.0` (identical).
 ///
 /// Examples:
 ///     >>> import lev
