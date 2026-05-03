@@ -2,6 +2,18 @@
 
 High-performance Levenshtein distance and similarity ratio for Python, implemented in Rust 🦀.
 
+## Installation
+
+```bash
+uv add lev-rs
+```
+
+or
+
+```bash
+pip install lev-rs
+```
+
 ## Usage
 
 ```python
@@ -74,23 +86,6 @@ Produces two plots and a printed timing table:
 
 Releases are driven by [commitizen](https://commitizen-tools.github.io/commitizen/) and automated via
 [`.github/workflows/release.yml`](.github/workflows/release.yml).
-
-### One-time setup
-
-**Trusted publishing** — configure OIDC publishers on both registries so no API tokens are needed.
-Go to the publishing settings page and add a pending publisher for each row:
-
-| Registry | Project | Owner | Repo | Workflow | Environment |
-|---|---|---|---|---|---|
-| [PyPI](https://pypi.org/manage/account/publishing/) | `lev` | `KarelZe` | `lev` | `release.yml` | `pypi` |
-| [Test PyPI](https://test.pypi.org/manage/account/publishing/) | `lev` | `KarelZe` | `lev` | `release.yml` | `test-pypi` |
-
-**GitHub environments** — go to Settings → Environments and create two environments:
-
-- `test-pypi`: no protection rules (publishes automatically on every tag)
-- `pypi`: add yourself as a required reviewer so you can verify Test PyPI first
-
-### Cutting a release
 
 ```bash
 # 1. Bump version, update CHANGELOG.md, and create an annotated tag

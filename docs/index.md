@@ -22,7 +22,13 @@ lev.ratio("", "")                   # 1.0
 ## Installation
 
 ```bash
-pip install lev
+uv add lev-rs
+```
+
+or
+
+```bash
+pip install lev-rs
 ```
 
 ## Benchmarks
