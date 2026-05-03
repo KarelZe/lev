@@ -138,6 +138,7 @@ unsafe fn to_u32_buf(v: &UniView) -> Vec<u32> {
 ///
 /// The distance is the minimum number of single-character insertions,
 /// deletions, or substitutions required to transform `s1` into `s2`.
+///
 /// Lengths are measured in Unicode scalar values (`char`s), so
 /// multi-byte characters count as a single edit regardless of their
 /// UTF-8 encoded length.
@@ -174,16 +175,16 @@ fn distance(
 /// Calculate normalized Levenshtein similarity ratio in [0.0, 1.0].
 ///
 /// Defined as `1 - distance(s1, s2) / (len(s1) + len(s2))`, where
-/// lengths are measured in Unicode scalar values. Two empty strings
-/// return `1.0` by convention.
+/// lengths are measured in Unicode scalar values.
+///
+/// Two empty strings return `1.0` by convention.
 ///
 /// Args:
 ///     s1 (str): First input string.
 ///     s2 (str): Second input string.
 ///
 /// Returns:
-///     float: Similarity score between `0.0` (completely different) and
-///     `1.0` (identical).
+///     float: Similarity score between `0.0` (completely different) and `1.0` (identical).
 ///
 /// Examples:
 ///     >>> import lev

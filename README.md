@@ -1,6 +1,6 @@
 # lev
 
-High-performance Levenshtein distance and similarity ratio for Python, implemented in Rust 🦀.
+`lev` is an extremely fast Python library for the [Levenshtein distance](https://en.wikipedia.org/wiki/Levenshtein_distance) and similarity ratio. Written in Rust. 🦀
 
 ## Installation
 
@@ -8,7 +8,7 @@ High-performance Levenshtein distance and similarity ratio for Python, implement
 uv add lev-rs
 ```
 
-or
+or if you prefer slow:
 
 ```bash
 pip install lev-rs
@@ -26,8 +26,6 @@ lev.distance("日本語", "日本")       # 1
 lev.ratio("kitten", "sitting")      # 0.769...
 lev.ratio("", "")                   # 1.0
 ```
-
-Both functions accept any Python `str` regardless of script or encoding.
 
 ## Development build
 
