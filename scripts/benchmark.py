@@ -1,40 +1,59 @@
 """Simple benchmarking script for popular levenshtein implementations."""
 
+import json
+from pathlib import Path
 from timeit import timeit
 
 import matplotlib.pyplot as plt
 import matplotx
 
-# Iterations for the slow multi-library comparison (pylev is ~1000x slower).
+# All output files are written here so `uv run scripts/benchmark.py` works from any cwd.
+OUT_DIR = Path(__file__).parent.parent / "docs" / "assets"
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Iterations for each library comparison.
 N_LIBS = 1_000
-# Iterations for the fast lev-vs-rapidfuzz kind comparison.
-N_KINDS = 100_000
 
-MULTIPLIER = 16
 
-# Representative string pairs keyed by their CPython internal encoding kind.
+def make_len(s: str, n: int) -> str:
+    """
+    Repeat *s* until it is exactly *n* characters long.
+
+    Returns:
+        str: s repeated to length n.
+
+    """
+    return (s * (n // len(s) + 1))[:n]
+
+
+# Representative 100-character string pairs keyed by CPython internal encoding kind.
 KINDS: dict[str, tuple[str, str]] = {
     "ASCII": (
-        "Lets pretend Marshall Mathers never picked up a pen" * MULTIPLIER,
-        "Lets pretend things woulda been no different" * MULTIPLIER,
+        make_len("Lets pretend Marshall Mathers never picked up a pen", 100),
+        make_len("Lets pretend things woulda been no different", 100),
     ),
     "Latin-1": (
-        "H\xe9llo w\xf6rld, wi\xe9 geht \xe8s \xcdhnen?" * MULTIPLIER,
-        "H\xe9llo w\xf6rld, wi\xe9 geht es Ihnen?" * MULTIPLIER,
+        make_len("H\xe9llo w\xf6rld, wi\xe9 geht \xe8s \xcdhnen?", 100),
+        make_len("H\xe9llo w\xf6rld, wi\xe9 geht es Ihnen?", 100),
     ),
-    "CJK": ("日本語のテスト文字列" * MULTIPLIER, "日本語のテスツ文字列" * MULTIPLIER),
+    "CJK": (
+        make_len("\u65e5\u672c\u8a9e\u306e\u30c6\u30b9\u30c8\u6587\u5b57\u5217", 100),
+        make_len("\u65e5\u672c\u8a9e\u306e\u30c6\u30b9\u30c4\u6587\u5b57\u5217", 100),
+    ),
     "Emoji": (
-        "\U0001f980\U0001f40d\U0001f389\U0001f38a\U0001f388" * MULTIPLIER,
-        "\U0001f40d\U0001f980\U0001f389\U0001f38a\U0001f388" * MULTIPLIER,
+        make_len("\U0001f980\U0001f40d\U0001f389\U0001f38a\U0001f388", 100),
+        make_len("\U0001f40d\U0001f980\U0001f389\U0001f38a\U0001f388", 100),
     ),
 }
 
-_ASCII_S1, _ASCII_S2 = KINDS["ASCII"]
 
-
-def measure_libraries() -> dict[str, float]:
+def measure_libraries(s1: str, s2: str) -> dict[str, float]:
     """
-    Measure wall time for each library on the ASCII pair.
+    Measure wall time for each library on the given string pair.
+
+    Args:
+        s1: First string.
+        s2: Second string.
 
     Returns:
         dict[str, float]: Library name to total time for N_LIBS repetitions.
@@ -42,126 +61,86 @@ def measure_libraries() -> dict[str, float]:
     """
     return {
         "editdistance": timeit(
-            f"editdistance.eval({_ASCII_S1!r}, {_ASCII_S2!r})",
+            f"editdistance.eval({s1!r}, {s2!r})",
             "import editdistance",
             number=N_LIBS,
         ),
         "edlib": timeit(
-            f"edlib.align({_ASCII_S1!r}, {_ASCII_S2!r})['editDistance']",
+            f"edlib.align({s1!r}, {s2!r})['editDistance']",
             "import edlib",
             number=N_LIBS,
         ),
-        "pylev": timeit(
-            f"pylev.levenshtein({_ASCII_S1!r}, {_ASCII_S2!r})",
-            "import pylev",
-            number=N_LIBS,
-        ),
         "rapidfuzz": timeit(
-            f"Levenshtein.distance({_ASCII_S1!r}, {_ASCII_S2!r})",
+            f"Levenshtein.distance({s1!r}, {s2!r})",
             "from rapidfuzz.distance import Levenshtein",
             number=N_LIBS,
         ),
-        "lev [ours]": timeit(
-            f"lev.distance({_ASCII_S1!r}, {_ASCII_S2!r})",
+        "lev": timeit(
+            f"lev.distance({s1!r}, {s2!r})",
             "import lev",
             number=N_LIBS,
         ),
     }
 
 
-def measure_by_kind() -> dict[str, dict[str, float]]:
+def plot_libraries(measures: dict[str, float], kind: str) -> None:
     """
-    Measure lev vs rapidfuzz across all four CPython string-encoding kinds.
+    Plot a horizontal bar chart comparing all libraries for the given encoding kind.
 
-    Returns:
-        dict[str, dict[str, float]]: Kind to library-to-time mapping for N_KINDS repetitions.
-
-    """
-    results: dict[str, dict[str, float]] = {}
-    for kind, (s1, s2) in KINDS.items():
-        results[kind] = {
-            "lev [ours]": timeit(
-                f"lev.distance({s1!r}, {s2!r})",
-                "import lev",
-                number=N_KINDS,
-            ),
-            "rapidfuzz": timeit(
-                f"Levenshtein.distance({s1!r}, {s2!r})",
-                "from rapidfuzz.distance import Levenshtein",
-                number=N_KINDS,
-            ),
-        }
-    return results
-
-
-def plot_libraries(measures: dict[str, float]) -> None:
-    """
-    Plot a bar chart comparing all libraries on the ASCII pair.
+    Saves a light and a dark variant for use with MkDocs light/dark theme switching.
 
     Args:
         measures: Library name to total time in seconds.
+        kind: Encoding kind label shown in the chart title and used in the filename.
 
     """
-    with plt.style.context(matplotx.styles.duftify(matplotx.styles.github["dark"])):
-        fig, ax = plt.subplots()
-        ax.bar(measures.keys(), measures.values())
-        ax.tick_params(axis="x", labelrotation=90)
-        ax.set_yscale("log")
-        ax.set_title(f"Average runtime for Levenshtein distance on ASCII strings with $n={N_LIBS:,}$ repeats")
-        matplotx.ylabel_top("time [ms]")
-        fig.savefig("benchmark_results.png", bbox_inches="tight")
-        plt.close(fig)
+    # Convert to milliseconds and sort slowest → fastest.
+    measures_ms = {k: v * 1000 for k, v in measures.items()}
+    sorted_measures = dict(sorted(measures_ms.items(), key=lambda item: item[1], reverse=True))
 
+    # Slug for the filename: "Latin-1" → "latin_1", "CJK" → "cjk", etc.
+    kind_slug = kind.lower().replace("-", "_").replace(" ", "_")
 
-def plot_by_kind(by_kind: dict[str, dict[str, float]]) -> None:
-    """
-    Plot a grouped bar chart comparing lev vs rapidfuzz per string-encoding kind.
+    def _render(theme: str) -> None:
+        text_color = "white" if theme == "dark" else "black"
+        with plt.style.context(matplotx.styles.duftify(matplotx.styles.github[theme])):
+            plt.rcParams.update({
+                "text.color": text_color,
+                "axes.labelcolor": text_color,
+                "xtick.color": text_color,
+                "ytick.color": text_color,
+                "axes.edgecolor": text_color,
+                "legend.edgecolor": text_color,
+            })
+            fig, ax = plt.subplots(figsize=(10, 2))
+            bars = ax.barh(list(sorted_measures.keys()), list(sorted_measures.values()))
+            ax.bar_label(bars, padding=5, fmt="%.1f ms")
+            ax.grid(True, axis="x", ls="-")
+            ax.grid(False, axis="y")
+            ax.set_xlim(left=0, right=ax.get_xlim()[1] * 1.15)
+            ax.set_title(f"{kind} [100 chars, n={N_LIBS}]")
+            ax.set_xlabel("time [ms]")
+            fig.savefig(OUT_DIR / f"benchmark_{kind_slug}_{theme}.svg", bbox_inches="tight")
+            plt.close(fig)
 
-    Args:
-        by_kind: Kind to library-to-time mapping in seconds.
-
-    """
-    kinds = list(by_kind)
-    libraries = list(next(iter(by_kind.values())))
-    width = 0.35
-    x = list(range(len(kinds)))
-
-    with plt.style.context(matplotx.styles.duftify(matplotx.styles.github["dark"])):
-        fig, ax = plt.subplots()
-        for i, lib in enumerate(libraries):
-            times_us = [by_kind[k][lib] / N_KINDS * 1e6 for k in kinds]
-            offset = (i - (len(libraries) - 1) / 2) * width
-            ax.bar([xi + offset for xi in x], times_us, width, label=lib)
-        ax.set_xticks(x)
-        ax.set_xticklabels(kinds)
-        ax.legend()
-        ax.set_title(f"runtime by string-encoding kind ($n={N_KINDS:,}$ repeats)")
-        matplotx.ylabel_top("time [μs]")
-        fig.savefig("benchmark_results_by_kind.png", bbox_inches="tight")
-        plt.close(fig)
-
-
-def print_kind_table(by_kind: dict[str, dict[str, float]]) -> None:
-    """
-    Print a per-kind timing table to stdout.
-
-    Args:
-        by_kind: Kind to library-to-time mapping in seconds.
-
-    """
-    header = f"{'Kind':8s}  {'lev [ours]':>12s}  {'rapidfuzz':>12s}  {'speedup':>8s}"
-    print(header)
-    print("-" * len(header))
-    for kind, times in by_kind.items():
-        lev_us = times["lev [ours]"] / N_KINDS * 1e6
-        rf_us = times["rapidfuzz"] / N_KINDS * 1e6
-        print(f"{kind:8s}  {lev_us:>11.3f}μs  {rf_us:>11.3f}μs  {rf_us / lev_us:>7.2f}x")
+    _render("light")
+    _render("dark")
 
 
 if __name__ == "__main__":
-    lib_times = measure_libraries()
-    plot_libraries(lib_times)
+    all_results: dict[str, dict[str, float]] = {}
 
-    kind_times = measure_by_kind()
-    print_kind_table(kind_times)
-    plot_by_kind(kind_times)
+    for kind, (s1, s2) in KINDS.items():
+        print(f"Benchmarking {kind}...")
+        times = measure_libraries(s1, s2)
+        plot_libraries(times, kind)
+        all_results[kind] = times
+
+        lev_ms = times["lev"] / N_LIBS * 1000
+        rf_ms = times["rapidfuzz"] / N_LIBS * 1000
+        print(f"  lev {lev_ms:.3f} ms  rapidfuzz {rf_ms:.3f} ms  speedup {rf_ms / lev_ms:.2f}x")
+
+    with open(OUT_DIR / "benchmark_results.json", "w") as f:
+        json.dump(all_results, f, indent=2)
+
+    print(f"\nResults written to {OUT_DIR}")
