@@ -1,3 +1,9 @@
+## 0.2.1 (2026-05-03)
+
+### Fix
+
+- align version of crate with python package version🐞 (#84)
+
 ## 0.2.0 (2026-05-03)
 
 ### Feat
