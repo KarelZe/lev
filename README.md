@@ -43,7 +43,7 @@ For more details on the API see the [API Reference](https://karelze.github.io/le
 
 `lev` is significantly faster than the other libraries on 100-character ASCII strings.
 
-![ASCII benchmark – dark](docs/assets/benchmark_ascii_dark.svg)
+![ASCII benchmark – dark](https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_ascii_dark.svg)
 
 ### Other Encodings
 
@@ -51,15 +51,15 @@ For more details on the API see the [API Reference](https://karelze.github.io/le
 
 #### Latin-1
 
-![Latin-1 benchmark – dark](docs/assets/benchmark_latin_1_dark.svg)
+![Latin-1 benchmark – dark](https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_latin_1_dark.svg)
 
 #### CJK
 
-![CJK benchmark – dark](docs/assets/benchmark_cjk_dark.svg)
+![CJK benchmark – dark](https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_cjk_dark.svg)
 
 #### Emoji
 
-![Emoji benchmark – dark](docs/assets/benchmark_emoji_dark.svg)
+![Emoji benchmark – dark](https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_emoji_dark.svg)
 
 ## Contact
 
