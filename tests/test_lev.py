@@ -45,7 +45,7 @@ import lev
         ("levenshtein", "frankenstein", 6),
         ("confide", "deceit", 6),
         ("CUNsperrICY", "conspiracy", 8),
-        # Long strings: > 64 chars exercises the Wagner-Fischer fallback.
+        # Long strings: > 64 chars exercises the fallback algorithm.
         ("abc" * 40, "x" + "abc" * 40, 1),
         ("abc" * 40, "abc" * 40 + "xyz", 3),
         # 64-char boundary: pattern length exactly 64 hits the `m == 64` branch.
@@ -59,9 +59,9 @@ def test_distance(s1: str, s2: str, expected: int) -> None:
     Test and benchmark lev.distance.
 
     Args:
-        s1: First input string.
-        s2: Second input string.
-        expected: Expected Levenshtein distance.
+        s1 (str): First input string.
+        s2 (str): Second input string.
+        expected (int): Expected Levenshtein distance.
 
     """
     assert lev.distance(s1, s2) == expected
@@ -92,9 +92,9 @@ def test_ratio(s1: str, s2: str, expected: float) -> None:
     Test and benchmark lev.ratio.
 
     Args:
-        s1: First input string.
-        s2: Second input string.
-        expected: Expected ratio.
+        s1 (str): First input string.
+        s2 (str): Second input string.
+        expected (float): Expected ratio.
 
     """
     assert math.isclose(lev.ratio(s1, s2), expected, abs_tol=1e-12)
