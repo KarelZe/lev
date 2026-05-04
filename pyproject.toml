@@ -59,7 +59,7 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 
 [tool.coverage.run]
-omit = ["debug_*.py", "tclf/tests/*"]
+omit = ["debug_*.py", "tests/*"]
 branch = true
 
 [tool.coverage.report]
