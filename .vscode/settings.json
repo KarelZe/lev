@@ -14,13 +14,15 @@
         "maturin",
         "prek",
         "pypi",
+        "pytest",
         "rapidfuzz",
         "woulda",
         "xticklabels",
         "xticks",
         "ylabel",
-        "yscale"
+        "yscale",
         "résumé",
-        "woulda"
+        "woulda",
+        "zensical"
     ]
 }
