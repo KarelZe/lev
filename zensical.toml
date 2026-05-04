@@ -10,8 +10,8 @@ edit_uri = "edit/main/docs/"
 nav = [{ Home = "index.md" }, { "API Reference" = "api.md" }]
 
 [project.theme]
-variant    = "modern"
-language   = "en"
+variant = "modern"
+language = "en"
 custom_dir = "docs/overrides"
 
 features = [
