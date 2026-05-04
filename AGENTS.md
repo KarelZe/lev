@@ -7,7 +7,7 @@ and type stubs in `lev.pyi`. Performance is the primary design constraint —
 prefer Rust-side optimizations over Python wrappers.
 
 ## Environment Setup
-- Python 3.13
+- Python >= 3.10
 - Install: `uv sync --all-extras`
 - After editing Rust, rebuild the extension: `bash scripts/install_dev.sh`
 
