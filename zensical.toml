@@ -1,20 +1,18 @@
 [project]
-site_name        = "lev"
+site_name = "lev"
 site_description = "lev is an extremely fast Python library for Levenshtein distance, written in Rust. 🦀"
-site_author      = "KarelZe"
-site_url         = "https://KarelZe.github.io/lev/"
-repo_url         = "https://github.com/KarelZe/lev"
-repo_name        = "KarelZe/lev"
+site_author = "KarelZe"
+site_url = "https://KarelZe.github.io/lev/"
+repo_url = "https://github.com/KarelZe/lev"
+repo_name = "KarelZe/lev"
 edit_uri = "edit/main/docs/"
 
-nav = [
-  { Home = "index.md" },
-  { "API Reference" = "api.md" },
-]
+nav = [{ Home = "index.md" }, { "API Reference" = "api.md" }]
 
 [project.theme]
-variant  = "modern"
+variant = "modern"
 language = "en"
+custom_dir = "docs/overrides"
 
 features = [
   "content.code.copy",
@@ -30,14 +28,18 @@ features = [
 repo = "fontawesome/brands/github"
 
 [[project.theme.palette]]
-scheme      = "slate"
+scheme = "slate"
 toggle.icon = "lucide/sun"
 toggle.name = "Switch to light mode"
 
 [[project.theme.palette]]
-scheme      = "default"
+scheme = "default"
 toggle.icon = "lucide/moon"
 toggle.name = "Switch to dark mode"
+
+[project.extra.analytics]
+provider = "umami"
+property = "8e64b217-2297-4cec-9006-60314a629b93"
 
 [[project.extra.social]]
 icon = "fontawesome/brands/github"
@@ -50,12 +52,12 @@ link = "https://www.linkedin.com/in/markus-bilz/"
 [project.plugins.search]
 
 [project.plugins.mkdocstrings.handlers.python.options]
-docstring_style            = "google"
-show_root_heading          = true
-show_source                = true
+docstring_style = "google"
+show_root_heading = true
+show_source = false
 show_signature_annotations = true
-separate_signature         = true
-inherited_members          = true
+separate_signature = true
+inherited_members = true
 
 [project.markdown_extensions.attr_list]
 

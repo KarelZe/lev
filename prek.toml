@@ -12,33 +12,24 @@ hooks = [
   { id = "check-toml" },
   { id = "end-of-file-fixer" },
   { id = "mixed-line-ending" },
-  { id = "trailing-whitespace" }
 ]
 
 [[repos]]
 repo = "https://github.com/astral-sh/ruff-pre-commit"
 rev = "v0.15.12"
-hooks = [
-  {
-    id = "ruff-check",
-    args = ["--fix"]
-  },
-  { id = "ruff-format" }
-]
+hooks = [{ id = "ruff-check", args = ["--fix"] }, { id = "ruff-format" }]
 
 [[repos]]
 repo = "https://github.com/doublify/pre-commit-rust"
 rev = "v1.0"
-hooks = [
-  { id = "fmt" }
-]
+hooks = [{ id = "fmt" }]
 
 [[repos]]
 repo = "https://github.com/commitizen-tools/commitizen"
 rev = "v4.13.10"
-hooks = [
-  {
-    id = "commitizen",
-    stages = ["commit-msg"]
-  }
-]
+hooks = [{ id = "commitizen", stages = ["commit-msg"] }]
+
+[[repos]]
+repo = "https://github.com/ComPWA/taplo-pre-commit"
+rev = "v0.9.3"
+hooks = [{ id = "taplo-format" }]
