@@ -178,7 +178,7 @@ fn distance(
     }
 }
 
-/// Calculate normalized Levenshtein similarity ratio in [0.0, 1.0].
+/// Calculate normalized Levenshtein similarity ratio in `[0.0, 1.0]`.
 ///
 /// Defined as `1 - distance(s1, s2) / (len(s1) + len(s2))`, where
 /// lengths are measured in Unicode scalar values.
