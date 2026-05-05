@@ -14,7 +14,7 @@ on:
 jobs:
   benchmarks:
     name: CodSpeed benchmarks
-    runs-on: codspeed-macro
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -32,6 +32,6 @@ jobs:
 
       - uses: CodSpeedHQ/action@c381be0bfd20e844fb45594f6aa182ffcd94545c # v4.15.0
         with:
-          mode: walltime
+          mode: simulation
           token: ${{ secrets.CODSPEED_TOKEN }}
           run: pytest tests/test_lev.py --codspeed --no-cov
