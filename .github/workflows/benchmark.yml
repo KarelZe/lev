@@ -30,7 +30,8 @@ jobs:
       - name: Install benchmark deps
         run: pip install pytest pytest-codspeed pytest-cov
 
-      - uses: CodSpeedHQ/action@76578c2a7ddd928664caa737f0e962e3085d4e7c # v3
+      - uses: CodSpeedHQ/action@c381be0bfd20e844fb45594f6aa182ffcd94545c # v4.15.0
         with:
+          mode: simulation
           token: ${{ secrets.CODSPEED_TOKEN }}
           run: pytest tests/test_lev.py --codspeed --no-cov
