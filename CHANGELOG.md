@@ -1,3 +1,9 @@
+## 0.2.2 (2026-05-05)
+
+### Perf
+
+- simplify and improve implementation of hot path🚀 (#100)
+
 ## 0.2.1 (2026-05-03)
 
 ### Fix
