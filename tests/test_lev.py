@@ -52,6 +52,18 @@ import lev
         ("a" * 64, "a" * 64, 0),
         ("a" * 64, "a" * 65, 1),
         ("a" * 64, "b" + "a" * 63, 1),
+        # Mixed internal encodings (ASCII, Latin-1, UCS-2, UCS-4).
+        ("abc", "abc\xff", 1),  # ASCII vs Latin-1
+        ("abc", "abc\u0400", 1),  # ASCII vs UCS-2
+        ("abc", "abc\U0001f400", 1),  # ASCII vs UCS-4
+        ("abc\xff", "abc\u0400", 1),  # Latin-1 vs UCS-2
+        ("abc\u0400", "abc\U0001f400", 1),  # UCS-2 vs UCS-4
+        # Mixed types with common affixes.
+        ("prefix_abc", "prefix_abc\xff", 1),
+        ("abc_suffix", "abc\xff_suffix", 1),
+        # Mixed types with multi-word patterns.
+        ("a" * 70, ("a" * 70)[:-1] + "\xff", 1),
+        ("a" * 70, ("a" * 70)[:-1] + "\u0400", 1),
     ],
 )
 def test_distance(s1: str, s2: str, expected: int) -> None:
