@@ -26,17 +26,18 @@ jobs:
               /opt/python/cp312-cp312/bin/python
               /opt/python/cp313-cp313/bin/python
               /opt/python/cp314-cp314/bin/python
-          - target: aarch64
-            # aarch64: explicit CPython paths (cross-compiled).
-            # Consistent with x86_64 to ensure specific versions and skip PyPy.
-            args: >-
-              --release --out dist
-              --interpreter
-              /opt/python/cp310-cp310/bin/python
-              /opt/python/cp311-cp311/bin/python
-              /opt/python/cp312-cp312/bin/python
-              /opt/python/cp313-cp313/bin/python
-              /opt/python/cp314-cp314/bin/python
+          # FIXME: currently disabled as paths cannot be found.
+          # - target: aarch64
+          #   # aarch64: explicit CPython paths (cross-compiled).
+          #   # Consistent with x86_64 to ensure specific versions and skip PyPy.
+          #   args: >-
+          #     --release --out dist
+          #     --interpreter
+          #     /opt/python/cp310-cp310/bin/python
+          #     /opt/python/cp311-cp311/bin/python
+          #     /opt/python/cp312-cp312/bin/python
+          #     /opt/python/cp313-cp313/bin/python
+          #     /opt/python/cp314-cp314/bin/python
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
