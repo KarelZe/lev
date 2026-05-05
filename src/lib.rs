@@ -134,19 +134,6 @@ unsafe fn as_u32(v: &UniView) -> &[u32] {
     std::slice::from_raw_parts(v.data as *const u32, v.len)
 }
 
-/// Materialise any Python string as `Vec<u32>` for mixed-kind pairs.
-/// Lone surrogates in UCS-2 are preserved (no UTF-8 round-trip).
-unsafe fn to_u32_buf(v: &UniView) -> Vec<u32> {
-    match v.kind {
-        ffi::PyUnicode_1BYTE_KIND => (0..v.len).map(|i| *v.data.add(i) as u32).collect(),
-        ffi::PyUnicode_2BYTE_KIND => {
-            let p = v.data as *const u16;
-            (0..v.len).map(|i| *p.add(i) as u32).collect()
-        }
-        _ => std::slice::from_raw_parts(v.data as *const u32, v.len).to_vec(),
-    }
-}
-
 /// Levenshtein edit distance between two strings.
 ///
 /// The distance is the minimum number of single-character insertions,
@@ -178,6 +165,9 @@ fn distance(
     s1: &Bound<'_, PyString>,
     s2: &Bound<'_, PyString>,
 ) -> PyResult<usize> {
+    if s1.is(s2) {
+        return Ok(0);
+    }
     unsafe {
         let v1 = view(s1);
         let v2 = view(s2);
@@ -208,6 +198,9 @@ fn distance(
 #[pyfunction]
 #[pyo3(signature = (s1, s2, /))]
 fn ratio(_py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> PyResult<f64> {
+    if s1.is(s2) {
+        return Ok(1.0);
+    }
     unsafe {
         let v1 = view(s1);
         let v2 = view(s2);
@@ -232,23 +225,14 @@ fn lev(m: &Bound<'_, PyModule>) -> PyResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Dispatch on `(kind, ascii)` tuples and return the edit distance directly.
-///
-/// UCS-1 with both ASCII flags set uses a half-size 128-entry peq table.
-/// UCS-2 and UCS-4 use the sorted-peq generic pipeline.  Mixed-kind pairs
-/// upcast both buffers to `u32`.
 #[inline(always)]
 unsafe fn compute(v1: &UniView, v2: &UniView) -> usize {
     use ffi::{PyUnicode_1BYTE_KIND as K1, PyUnicode_2BYTE_KIND as K2, PyUnicode_4BYTE_KIND as K4};
 
-    // 1. Identity short-circuit (same buffer, length, and kind).
-    if v1.data == v2.data && v1.len == v2.len && v1.kind == v2.kind {
-        return 0;
-    }
-
-    // 2. Normalize: v1 is the shorter pattern string (m), v2 is the text (n).
+    // 1. Normalize: v1 is the shorter pattern string (m), v2 is the text (n).
     let (v1, v2) = if v1.len <= v2.len { (v1, v2) } else { (v2, v1) };
 
-    // 3. Dispatch based on kinds.
+    // 2. Dispatch based on kinds.
     match (v1.kind, v2.kind) {
         (K1, K1) => {
             let (b1, b2) = (as_u8(v1), as_u8(v2));
@@ -260,14 +244,17 @@ unsafe fn compute(v1: &UniView, v2: &UniView) -> usize {
         }
         (K2, K2) => compute_sorted(as_u16(v1), as_u16(v2)),
         (K4, K4) => compute_sorted(as_u32(v1), as_u32(v2)),
-        // Mixed kinds: Upcast only the shorter pattern string to u32.
-        // Text string v2 is iterated over in its native kind.
+        // Mixed kinds: Iterate natively without any temporary buffer allocation.
+        (K1, K2) => compute_sorted_mixed(as_u8(v1), as_u16(v2)),
+        (K1, K4) => compute_sorted_mixed(as_u8(v1), as_u32(v2)),
+        (K2, K4) => compute_sorted_mixed(as_u16(v1), as_u32(v2)),
         _ => {
-            let p32 = to_u32_buf(v1);
-            match v2.kind {
-                K1 => compute_mixed(&p32, as_u8(v2)),
-                K2 => compute_mixed(&p32, as_u16(v2)),
-                _ => compute_mixed(&p32, as_u32(v2)),
+            // Normalization ensures v1.len <= v2.len, but not v1.kind <= v2.kind.
+            match (v1.kind, v2.kind) {
+                (K2, K1) => compute_sorted_mixed(as_u16(v1), as_u8(v2)),
+                (K4, K1) => compute_sorted_mixed(as_u32(v1), as_u8(v2)),
+                (K4, K2) => compute_sorted_mixed(as_u32(v1), as_u16(v2)),
+                _ => unreachable!(),
             }
         }
     }
@@ -276,6 +263,31 @@ unsafe fn compute(v1: &UniView, v2: &UniView) -> usize {
 // ---------------------------------------------------------------------------
 // Affix stripping
 // ---------------------------------------------------------------------------
+
+/// Strip common prefix and suffix from two slices of different types.
+#[inline(always)]
+fn strip_affix_mixed<'a, T1: CodeUnit, T2: CodeUnit>(
+    a: &'a [T1],
+    b: &'a [T2],
+) -> (&'a [T1], &'a [T2]) {
+    let prefix = a
+        .iter()
+        .zip(b.iter())
+        .position(|(x, y)| x.as_u64() != y.as_u64())
+        .unwrap_or_else(|| a.len().min(b.len()));
+
+    let a = &a[prefix..];
+    let b = &b[prefix..];
+
+    let suffix = a
+        .iter()
+        .rev()
+        .zip(b.iter().rev())
+        .position(|(x, y)| x.as_u64() != y.as_u64())
+        .unwrap_or_else(|| a.len().min(b.len()));
+
+    (&a[..a.len() - suffix], &b[..b.len() - suffix])
+}
 
 /// Strip common prefix and suffix from two slices.
 #[inline(always)]
@@ -306,7 +318,6 @@ fn strip_affix<'a, T: Eq>(a: &'a [T], b: &'a [T]) -> (&'a [T], &'a [T]) {
 /// Strip affixes and run Hyyrö.  `ASCII = true` enables the 128-entry peq fast path.
 #[inline(always)]
 fn compute_u8<const ASCII: bool>(a: &[u8], b: &[u8]) -> usize {
-    // a.len() <= b.len() already guaranteed by compute() normalization.
     let (a, b) = strip_affix(a, b);
     if a.is_empty() {
         return b.len();
@@ -340,22 +351,17 @@ fn compute_sorted<T: CodeUnit>(a: &[T], b: &[T]) -> usize {
     }
 }
 
-/// Run Hyyrö for mixed-kind strings. `pattern` is already upcast to u32.
-/// `text` is iterated in its native kind. Common affixes are NOT stripped
-/// here as they require different types; compute() ensures mixed-kind
-/// strings don't benefit from easy stripping as easily, but we could add it.
-/// However, Python's internal strings are usually either all-ASCII/Latin-1
-/// or have at least one character forcing a higher kind, making common affixes
-/// across kinds rare except for ASCII prefixes.
+/// Strip affixes and run Hyyrö for mixed-kind strings.
 #[inline(always)]
-fn compute_mixed<T: CodeUnit>(pattern: &[u32], text: &[T]) -> usize {
-    // Note: We don't strip affixes for mixed kinds because they are likely
-    // to have no common affixes if they were forced into different kinds,
-    // or the cost of conversion/comparison outweighs the gain.
-    if pattern.len() <= 64 {
-        hyrro_64_mixed(pattern, text)
+fn compute_sorted_mixed<T1: CodeUnit, T2: CodeUnit>(a: &[T1], b: &[T2]) -> usize {
+    let (a, b) = strip_affix_mixed(a, b);
+    if a.is_empty() {
+        return b.len();
+    }
+    if a.len() <= 64 {
+        hyrro_64_mixed(a, b)
     } else {
-        hyrro_multiword_mixed(pattern, text)
+        hyrro_multiword_mixed(a, b)
     }
 }
 
@@ -387,9 +393,9 @@ fn hyrro_64_sorted<T: CodeUnit>(pattern: &[T], text: &[T]) -> usize {
     hyrro_64_generic(pattern, text.iter().map(|&c| c.as_u64()))
 }
 
-/// Hyyrö single-word variant for mixed-kind (u32 pattern vs T text).
+/// Hyyrö single-word variant for mixed-kind.
 #[inline(always)]
-fn hyrro_64_mixed<T: CodeUnit>(pattern: &[u32], text: &[T]) -> usize {
+fn hyrro_64_mixed<T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[T2]) -> usize {
     hyrro_64_generic(pattern, text.iter().map(|&c| c.as_u64()))
 }
 
@@ -509,7 +515,7 @@ fn hyrro_inner_masked<I: Iterator<Item = u64>>(m: usize, pm_iter: I) -> usize {
 
 /// Multi-word Hyyrö for mixed kinds.
 #[inline(always)]
-fn hyrro_multiword_mixed<T: CodeUnit>(pattern: &[u32], text: &[T]) -> usize {
+fn hyrro_multiword_mixed<T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[T2]) -> usize {
     hyrro_multiword_sorted_generic(pattern, text)
 }
 
