@@ -37,7 +37,7 @@ For more details on the API see the [API Reference](https://karelze.github.io/le
 [edlib](https://github.com/Martinsos/edlib). We excluded slower implementations like
 [pylev](https://github.com/toastdriven/pylev/tree/main) and [python-Levenshtein](https://github.com/ztane/python-Levenshtein).
 
-> Benchmarks were run on an Apple Mac Mini M2 Pro (macOS 26.2) using Python 3.13. Each string pair is exactly 100 characters long. Results represent the total wall time for 1,000 repetitions using Python's `timeit`. To reproduce, run [`uv run python scripts/benchmark.py`](https://github.com/KarelZe/lev/blob/main/scripts/benchmark.py)..
+> Benchmarks were run on an Apple Mac Mini M2 Pro (macOS 26.2) using Python 3.13. Each string pair is exactly 100 characters long. Results represent the total wall time for 1,000 repetitions using Python's `timeit`. To reproduce, run [`uv run python scripts/benchmark.py`](https://github.com/KarelZe/lev/blob/main/scripts/benchmark.py).
 
 ### ASCII
 
