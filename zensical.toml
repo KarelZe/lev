@@ -47,10 +47,6 @@ property = "8e64b217-2297-4cec-9006-60314a629b93"
 icon = "fontawesome/brands/github"
 link = "https://github.com/KarelZe/lev"
 
-[[project.extra.social]]
-icon = "fontawesome/brands/linkedin"
-link = "https://www.linkedin.com/in/markus-bilz/"
-
 [project.plugins.search]
 
 [project.plugins.mkdocstrings.handlers.python.options]
