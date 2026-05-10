@@ -15,36 +15,20 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        include:
-          - target: x86_64
-            # x86_64: explicit CPython paths to skip PyPy in the manylinux container.
-            args: >-
-              --release --out dist
-              --interpreter
-              /opt/python/cp310-cp310/bin/python
-              /opt/python/cp311-cp311/bin/python
-              /opt/python/cp312-cp312/bin/python
-              /opt/python/cp313-cp313/bin/python
-              /opt/python/cp314-cp314/bin/python
-          # FIXME: currently disabled as paths cannot be found.
-          # - target: aarch64
-          #   # aarch64: explicit CPython paths (cross-compiled).
-          #   # Consistent with x86_64 to ensure specific versions and skip PyPy.
-          #   args: >-
-          #     --release --out dist
-          #     --interpreter
-          #     /opt/python/cp310-cp310/bin/python
-          #     /opt/python/cp311-cp311/bin/python
-          #     /opt/python/cp312-cp312/bin/python
-          #     /opt/python/cp313-cp313/bin/python
-          #     /opt/python/cp314-cp314/bin/python
+        target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           target: ${{ matrix.target }}
           manylinux: auto
-          args: ${{ matrix.args }}
+          # Version-only specifiers (not full paths). In the manylinux-cross
+          # container these resolve via sysconfig data files, which lets the
+          # aarch64 build read interpreter metadata without exec'ing the
+          # aarch64 binaries on the x86_64 host.
+          args: >-
+            --release --out dist
+            -i python3.10 python3.11 python3.12 python3.13 python3.14
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wheels-linux-${{ matrix.target }}
