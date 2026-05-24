@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$CLAUDE_PROJECT_DIR\" && uv run --no-sync ruff format . >&2 && uv run --no-sync ruff check --fix . >&2 || exit 2",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && uv run --no-sync ruff check --fix . >&2 && uv run --no-sync ruff format . >&2 || exit 2",
             "timeout": 60
           },
           {
