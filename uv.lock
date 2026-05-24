@@ -6,6 +6,10 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 
+[options]
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer-span = "P7D"
+
 [[package]]
 name = "argcomplete"
 version = "3.6.3"
@@ -870,7 +874,7 @@ wheels = [
 
 [[package]]
 name = "lev-rs"
-version = "0.2.1"
+version = "0.2.2"
 source = { editable = "." }
 
 [package.optional-dependencies]
@@ -916,7 +920,7 @@ requires-dist = [
     { name = "matplotx", marker = "extra == 'benchmark'", specifier = ">=0.3.10" },
     { name = "maturin", marker = "extra == 'dev'" },
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'docs'" },
-    { name = "numpy", marker = "extra == 'benchmark'", specifier = ">=2.0" },
+    { name = "numpy", marker = "extra == 'benchmark'", specifier = ">=2.2.6" },
     { name = "prek", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-codspeed", marker = "extra == 'dev'" },

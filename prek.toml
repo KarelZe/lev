@@ -22,7 +22,16 @@ hooks = [{ id = "ruff-check", args = ["--fix"] }, { id = "ruff-format" }]
 [[repos]]
 repo = "https://github.com/doublify/pre-commit-rust"
 rev = "v1.0"
-hooks = [{ id = "fmt" }]
+hooks = [
+  { id = "fmt" },
+  { id = "clippy", args = [
+    "--all-targets",
+    "--all-features",
+    "--",
+    "-D",
+    "warnings",
+  ] },
+]
 
 [[repos]]
 repo = "https://github.com/commitizen-tools/commitizen"

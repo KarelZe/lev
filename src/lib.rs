@@ -561,7 +561,7 @@ fn multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(m: usize, pm_i
 fn hyrro_multiword_bytes(short: &[u8], long: &[u8]) -> usize {
     debug_assert!(short.len() > 64);
     let m = short.len();
-    let w = (m + 63) / 64;
+    let w = m.div_ceil(64);
 
     macro_rules! run {
         ($W:literal) => {{
@@ -643,7 +643,7 @@ fn hyrro_multiword_sorted<T: CodeUnit>(short: &[T], long: &[T]) -> usize {
 fn hyrro_multiword_sorted_generic<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2]) -> usize {
     debug_assert!(short.len() > 64);
     let m = short.len();
-    let w = (m + 63) / 64;
+    let w = m.div_ceil(64);
 
     let mut keys: Vec<u64> = short.iter().map(|&c| c.as_u64()).collect();
     keys.sort_unstable();
@@ -786,11 +786,11 @@ mod tests {
     fn naive(a: &[char], b: &[char]) -> usize {
         let (m, n) = (a.len(), b.len());
         let mut dp = vec![vec![0usize; n + 1]; m + 1];
-        for i in 0..=m {
-            dp[i][0] = i;
+        for (i, row) in dp.iter_mut().enumerate() {
+            row[0] = i;
         }
-        for j in 0..=n {
-            dp[0][j] = j;
+        for (j, val) in dp[0].iter_mut().enumerate() {
+            *val = j;
         }
         for i in 1..=m {
             for j in 1..=n {
@@ -930,7 +930,7 @@ mod tests {
         check_latin1(&p128, &q128);
 
         // Latin-1 disjoint.
-        check_latin1(&vec![200u8; 80], &vec![201u8; 80]);
+        check_latin1(&[200u8; 80], &[201u8; 80]);
     }
 
     /// Directly exercise `hyrro_multiword_sorted` (m > 64) against the naive DP.
