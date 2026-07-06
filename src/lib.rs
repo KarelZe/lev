@@ -103,6 +103,7 @@ struct UniView {
 /// Read kind + ascii flag + data ptr + length from a Python string in one go.
 /// Subsequent dispatch matches on `(view1.kind, view2.kind)` without
 /// re-traversing pyo3's PyUnicode helpers.
+#[cfg(not(all(Py_3_14, target_endian = "little")))]
 #[inline(always)]
 unsafe fn view(s: &Bound<'_, PyString>) -> UniView {
     let ptr = s.as_ptr();
@@ -118,6 +119,51 @@ unsafe fn view(s: &Bound<'_, PyString>) -> UniView {
         ascii: false,
         data: ffi::PyUnicode_DATA(ptr) as *const u8,
         len: ffi::PyUnicode_GET_LENGTH(ptr) as usize,
+    }
+}
+
+/// Python 3.14+ fast path: pyo3-ffi routes `PyUnicode_KIND` / `PyUnicode_DATA`
+/// through exported C functions there and drops `PyUnicode_IS_ASCII` entirely
+/// (four cross-library calls per distance/ratio call, and the pure-ASCII peq
+/// path would be lost).  The `PyASCIIObject` header layout is unchanged in
+/// CPython 3.14/3.15 (state bitfield: `interned:2, kind:3, compact:1, ascii:1`,
+/// LSB-first on little-endian targets — the same assumption pyo3-ffi itself
+/// makes up to 3.13), so decode the header directly.  kind/compact/ascii are
+/// immutable after string creation, which also makes this safe on
+/// free-threaded builds.  Debug builds cross-check against the C API.
+#[cfg(all(Py_3_14, target_endian = "little"))]
+#[inline(always)]
+unsafe fn view(s: &Bound<'_, PyString>) -> UniView {
+    let ptr = s.as_ptr();
+    let obj = ptr as *mut ffi::PyASCIIObject;
+    let state = (*obj).state;
+    let kind = ((state >> 2) & 0b111) as c_uint;
+    let compact = (state >> 5) & 1 != 0;
+    let ascii = (state >> 6) & 1 != 0;
+    let data = if compact {
+        if ascii {
+            obj.add(1) as *const u8
+        } else {
+            (ptr as *mut ffi::PyCompactUnicodeObject).add(1) as *const u8
+        }
+    } else {
+        (*(ptr as *mut ffi::PyUnicodeObject)).data.any as *const u8
+    };
+    debug_assert_eq!(
+        kind,
+        ffi::PyUnicode_KIND(ptr),
+        "state bitfield layout changed"
+    );
+    debug_assert_eq!(
+        data,
+        ffi::PyUnicode_DATA(ptr) as *const u8,
+        "compact data offset changed"
+    );
+    UniView {
+        kind,
+        ascii,
+        data,
+        len: (*obj).length as usize,
     }
 }
 
@@ -289,24 +335,68 @@ fn strip_affix_mixed<'a, T1: CodeUnit, T2: CodeUnit>(
     (&a[..a.len() - suffix], &b[..b.len() - suffix])
 }
 
-/// Strip common prefix and suffix from two slices.
+/// Reinterpret a code-unit slice as raw bytes (sound: u8/u16/u32 are plain data).
 #[inline(always)]
-fn strip_affix<'a, T: Eq>(a: &'a [T], b: &'a [T]) -> (&'a [T], &'a [T]) {
-    let prefix = a
-        .iter()
-        .zip(b.iter())
-        .position(|(x, y)| x != y)
-        .unwrap_or_else(|| a.len().min(b.len()));
+fn as_bytes<T: CodeUnit>(s: &[T]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, std::mem::size_of_val(s)) }
+}
+
+/// Length in bytes of the common prefix of `a` and `b`, compared 8 bytes at a time.
+#[inline(always)]
+fn common_prefix_bytes(a: &[u8], b: &[u8]) -> usize {
+    let n = a.len().min(b.len());
+    let mut i = 0;
+    while i + 8 <= n {
+        let x = u64::from_le_bytes(a[i..i + 8].try_into().unwrap());
+        let y = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+        let diff = x ^ y;
+        if diff != 0 {
+            return i + (diff.trailing_zeros() / 8) as usize;
+        }
+        i += 8;
+    }
+    while i < n && a[i] == b[i] {
+        i += 1;
+    }
+    i
+}
+
+/// Length in bytes of the common suffix of `a` and `b`, compared 8 bytes at a time.
+#[inline(always)]
+fn common_suffix_bytes(a: &[u8], b: &[u8]) -> usize {
+    let n = a.len().min(b.len());
+    let (la, lb) = (a.len(), b.len());
+    let mut i = 0;
+    while i + 8 <= n {
+        let x = u64::from_le_bytes(a[la - i - 8..la - i].try_into().unwrap());
+        let y = u64::from_le_bytes(b[lb - i - 8..lb - i].try_into().unwrap());
+        let diff = x ^ y;
+        if diff != 0 {
+            return i + (diff.leading_zeros() / 8) as usize;
+        }
+        i += 8;
+    }
+    while i < n && a[la - i - 1] == b[lb - i - 1] {
+        i += 1;
+    }
+    i
+}
+
+/// Strip common prefix and suffix from two same-kind slices.
+///
+/// Code-unit equality is byte equality for equal-width slices, so the scan
+/// runs on the raw bytes 8 at a time; matched byte counts are floor-divided
+/// by the element size, which discards any partial element at a difference
+/// boundary.
+#[inline(always)]
+fn strip_affix<'a, T: CodeUnit>(a: &'a [T], b: &'a [T]) -> (&'a [T], &'a [T]) {
+    let size = std::mem::size_of::<T>();
+    let prefix = common_prefix_bytes(as_bytes(a), as_bytes(b)) / size;
 
     let a = &a[prefix..];
     let b = &b[prefix..];
 
-    let suffix = a
-        .iter()
-        .rev()
-        .zip(b.iter().rev())
-        .position(|(x, y)| x != y)
-        .unwrap_or_else(|| a.len().min(b.len()));
+    let suffix = common_suffix_bytes(as_bytes(a), as_bytes(b)) / size;
 
     (&a[..a.len() - suffix], &b[..b.len() - suffix])
 }
@@ -315,6 +405,29 @@ fn strip_affix<'a, T: Eq>(a: &'a [T], b: &'a [T]) -> (&'a [T], &'a [T]) {
 // UCS-1 pipeline
 // ---------------------------------------------------------------------------
 
+/// Patterns at or below this length skip peq-table construction entirely; the
+/// pattern-match word is computed per text char by a fully unrolled linear
+/// scan.  Zero-initializing the peq tables (1-2 KiB) dominates the runtime for
+/// tiny inputs, so trading one table load for ≤ `TINY_M` compare+or ops wins.
+const TINY_M: usize = 8;
+
+/// Tiny-pattern Hyyrö: no peq table, `pm` built by branchless linear scan.
+#[inline(always)]
+fn hyrro_64_tiny<T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[T2]) -> usize {
+    debug_assert!((1..=TINY_M).contains(&pattern.len()));
+    hyrro_inner(
+        pattern.len(),
+        text.iter().map(|&c| {
+            let c = c.as_u64();
+            let mut pm = 0u64;
+            for (i, &p) in pattern.iter().enumerate() {
+                pm |= ((p.as_u64() == c) as u64) << i;
+            }
+            pm
+        }),
+    )
+}
+
 /// Strip affixes and run Hyyrö.  `ASCII = true` enables the 128-entry peq fast path.
 #[inline(always)]
 fn compute_u8<const ASCII: bool>(a: &[u8], b: &[u8]) -> usize {
@@ -322,7 +435,9 @@ fn compute_u8<const ASCII: bool>(a: &[u8], b: &[u8]) -> usize {
     if a.is_empty() {
         return b.len();
     }
-    if a.len() <= 64 {
+    if a.len() <= TINY_M {
+        hyrro_64_tiny(a, b)
+    } else if a.len() <= 64 {
         if ASCII {
             hyrro_64_u8::<128>(a, b)
         } else {
@@ -344,7 +459,9 @@ fn compute_sorted<T: CodeUnit>(a: &[T], b: &[T]) -> usize {
     if a.is_empty() {
         return b.len();
     }
-    if a.len() <= 64 {
+    if a.len() <= TINY_M {
+        hyrro_64_tiny(a, b)
+    } else if a.len() <= 64 {
         hyrro_64_sorted(a, b)
     } else {
         hyrro_multiword_sorted(a, b)
@@ -358,7 +475,9 @@ fn compute_sorted_mixed<T1: CodeUnit, T2: CodeUnit>(a: &[T1], b: &[T2]) -> usize
     if a.is_empty() {
         return b.len();
     }
-    if a.len() <= 64 {
+    if a.len() <= TINY_M {
+        hyrro_64_tiny(a, b)
+    } else if a.len() <= 64 {
         hyrro_64_mixed(a, b)
     } else {
         hyrro_multiword_mixed(a, b)
@@ -1001,6 +1120,69 @@ mod tests {
         check("xxx_kitten_yyy", "xxx_sitting_yyy", 3);
         check("prefix-foo", "prefix-bar", 3);
         check("foo-suffix", "bar-suffix", 3);
+    }
+
+    #[test]
+    fn strip_affix_unaligned_lengths() {
+        // One string a prefix of the other, lengths crossing the 8-byte chunk boundary.
+        for n in 1..=17 {
+            let a = "a".repeat(n);
+            let b = "a".repeat(n + 1);
+            check(&a, &b, 1);
+            let c = format!("{a}b");
+            check(&c, &a, 1);
+        }
+        // Prefix and suffix scans meeting in the middle.
+        check("abcdefgh_XY_abcdefgh", "abcdefgh_YX_abcdefgh", 2);
+        check("abcdefghij", "abcdefghij", 0);
+    }
+
+    #[test]
+    fn strip_affix_discards_partial_elements() {
+        // u16 units where raw bytes match past an element boundary: the
+        // half-matched element must not be stripped.
+        let a16: Vec<u16> = vec![0x0101, 0x0102, 0x0201];
+        let b16: Vec<u16> = vec![0x0101, 0x0202, 0x0201];
+        let (sa, sb) = strip_affix(&a16, &b16);
+        assert_eq!(sa, &[0x0102]);
+        assert_eq!(sb, &[0x0202]);
+        assert_eq!(compute_sorted(&a16, &b16), 1);
+    }
+
+    #[test]
+    fn tiny_patterns_match_oracle() {
+        // Deterministic LCG; small alphabet forces shared affixes and hits the
+        // tiny path (m ≤ TINY_M after stripping) as well as empty-after-strip.
+        let mut state = 0x243F_6A88_85A3_08D3_u64;
+        let mut rng = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as usize
+        };
+        for _ in 0..2000 {
+            let la = rng() % 13;
+            let lb = rng() % 13;
+            let a: String = (0..la)
+                .map(|_| (b'a' + (rng() % 4) as u8) as char)
+                .collect();
+            let b: String = (0..lb)
+                .map(|_| (b'a' + (rng() % 4) as u8) as char)
+                .collect();
+            let ac: Vec<char> = a.chars().collect();
+            let bc: Vec<char> = b.chars().collect();
+            assert_eq!(levenshtein(&a, &b), naive(&ac, &bc), "({a:?}, {b:?})");
+        }
+    }
+
+    #[test]
+    fn tiny_patterns_mixed_kinds() {
+        // Tiny path through the mixed-kind pipeline (u8 pattern, u16 text).
+        let a: Vec<u8> = b"abc".to_vec();
+        let b: Vec<u16> = "axc".encode_utf16().collect();
+        assert_eq!(compute_sorted_mixed(&a, &b), 1);
+        let c: Vec<u16> = "xyz".encode_utf16().collect();
+        assert_eq!(compute_sorted_mixed(&a, &c), 3);
     }
 
     #[test]
