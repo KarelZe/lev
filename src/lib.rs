@@ -142,9 +142,9 @@ unsafe fn view(s: &Bound<'_, PyString>) -> UniView {
     let ascii = (state >> 6) & 1 != 0;
     let data = if compact {
         if ascii {
-            obj.offset(1) as *const u8
+            obj.add(1) as *const u8
         } else {
-            (ptr as *mut ffi::PyCompactUnicodeObject).offset(1) as *const u8
+            (ptr as *mut ffi::PyCompactUnicodeObject).add(1) as *const u8
         }
     } else {
         (*(ptr as *mut ffi::PyUnicodeObject)).data.any as *const u8
