@@ -298,3 +298,4 @@ def test_banded_long_strings_match_oracle(n: int, edits: int) -> None:
     # A leading shift additionally defeats affix stripping and the Hamming bound.
     b = "x" + b[:-1]
     assert lev.distance(a, b) == naive(a, b)
+    assert lev.distance(b, a) == naive(a, b)  # symmetric
