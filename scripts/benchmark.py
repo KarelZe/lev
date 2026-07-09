@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from timeit import timeit
+from timeit import repeat
 
 import matplotlib.pyplot as plt
 import matplotx
@@ -11,8 +11,9 @@ import matplotx
 OUT_DIR = Path(__file__).parent.parent / "docs" / "assets"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Iterations for each library comparison.
+# Iterations for each library comparison; best of N_REPEAT runs is reported.
 N_LIBS = 1_000
+N_REPEAT = 5
 
 
 def make_len(s: str, n: int) -> str:
@@ -51,6 +52,9 @@ def measure_libraries(s1: str, s2: str) -> dict[str, float]:
     """
     Measure wall time for each library on the given string pair.
 
+    Each measurement is the best of ``N_REPEAT`` runs of ``N_LIBS`` calls, so a
+    single cold-start or scheduling hiccup cannot skew the published numbers.
+
     Args:
         s1: First string.
         s2: Second string.
@@ -59,28 +63,16 @@ def measure_libraries(s1: str, s2: str) -> dict[str, float]:
         dict[str, float]: Library name to total time for N_LIBS repetitions.
 
     """
-    return {
-        "editdistance": timeit(
-            f"editdistance.eval({s1!r}, {s2!r})",
-            "import editdistance",
-            number=N_LIBS,
-        ),
-        "edlib": timeit(
-            f"edlib.align({s1!r}, {s2!r})['editDistance']",
-            "import edlib",
-            number=N_LIBS,
-        ),
-        "rapidfuzz": timeit(
+    statements = {
+        "editdistance": (f"editdistance.eval({s1!r}, {s2!r})", "import editdistance"),
+        "edlib": (f"edlib.align({s1!r}, {s2!r})['editDistance']", "import edlib"),
+        "rapidfuzz": (
             f"Levenshtein.distance({s1!r}, {s2!r})",
             "from rapidfuzz.distance import Levenshtein",
-            number=N_LIBS,
         ),
-        "lev": timeit(
-            f"lev.distance({s1!r}, {s2!r})",
-            "import lev",
-            number=N_LIBS,
-        ),
+        "lev": (f"lev.distance({s1!r}, {s2!r})", "import lev"),
     }
+    return {lib: min(repeat(stmt, setup, repeat=N_REPEAT, number=N_LIBS)) for lib, (stmt, setup) in statements.items()}
 
 
 def plot_libraries(measures: dict[str, float], kind: str) -> None:
