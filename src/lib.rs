@@ -32,6 +32,11 @@
 //!      UCS-1 uses a flat `[u64; 256 × W]` stack peq (O(1) lookup, no heap).
 //!      UCS-2/4 use a heap-allocated peq data array addressed through the
 //!      same open-addressing hash index.
+//! 5. **Ukkonen banding** (`m > 512`) – similar strings are resolved by a
+//!    narrow diagonal band over Myers' blocked recurrence (O(n · d/w) instead
+//!    of O(n · m/w)); an early-aborting optimistic pass plus a pass at a cheap
+//!    Hamming-based upper bound keep the overhead on dissimilar strings to a
+//!    few percent before falling back to the full matrix.
 
 use std::os::raw::c_uint;
 
@@ -711,47 +716,196 @@ fn hyrro_multiword_bytes(short: &[u8], long: &[u8]) -> usize {
         6 => run!(6),
         7 => run!(7),
         8 => run!(8),
-        _ => hyrro_multiword_fallback(short, long, w, m),
+        _ => {
+            let mut peq = vec![0u64; 256 * w];
+            for (i, &c) in short.iter().enumerate() {
+                peq[c as usize * w + i / 64] |= 1u64 << (i % 64);
+            }
+            LargeCtx {
+                m,
+                n: long.len(),
+                w,
+                data: &peq,
+                base_of: |j: usize| unsafe { *long.get_unchecked(j) as usize * w },
+            }
+            .run(hamming_ub(short, long))
+        }
     }
 }
 
-/// Heap-allocated fallback for very long patterns.
-fn hyrro_multiword_fallback(short: &[u8], long: &[u8], w: usize, m: usize) -> usize {
-    let last_bits = m - (w - 1) * 64;
-    let top_mask = 1u64 << (last_bits - 1);
-    let mut peq = vec![0u64; 256 * w];
-    for (i, &c) in short.iter().enumerate() {
-        peq[c as usize * w + i / 64] |= 1u64 << (i % 64);
-    }
-    let mut vp = vec![!0u64; w];
-    let mut vn = vec![0u64; w];
-    if last_bits < 64 {
-        vp[w - 1] = (1u64 << last_bits) - 1;
-    }
-    let mut score = m as isize;
-    for &tj in long {
-        let base = tj as usize * w;
-        let mut carry = false;
-        let mut prev_hp = 1u64;
-        let mut prev_hn = 0u64;
-        for k in 0..w {
-            let pm = peq[base + k];
-            let x = pm | vn[k];
-            let (sum, nc) = (x & vp[k]).carrying_add(vp[k], carry);
-            carry = nc;
-            let d0 = (sum ^ vp[k]) | x;
-            let hp = vn[k] | !(d0 | vp[k]);
-            let hn = vp[k] & d0;
-            if k == w - 1 {
-                score += ((hp & top_mask) != 0) as isize - ((hn & top_mask) != 0) as isize;
-            }
-            let (hp_msb, hn_msb) = (hp >> 63, hn >> 63);
-            vp[k] = (hn << 1 | prev_hn) | !(d0 | (hp << 1 | prev_hp));
-            vn[k] = (hp << 1 | prev_hp) & d0;
-            (prev_hp, prev_hn) = (hp_msb, hn_msb);
+// ---------------------------------------------------------------------------
+// Banded multi-word Hyyrö (w > 8)
+// ---------------------------------------------------------------------------
+
+/// Cheap upper bound on the distance: substitute every mismatch of the
+/// length-aligned prefix, then insert the remaining tail of the longer string.
+#[inline(always)]
+fn hamming_ub<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2]) -> usize {
+    // An under-estimate here would silently break the guaranteed banded pass,
+    // so violations of the caller's ordering must fail loudly, not saturate.
+    debug_assert!(short.len() <= long.len());
+    long.len() - short.len()
+        + short
+            .iter()
+            .zip(long.iter())
+            .filter(|(x, y)| x.as_u64() != y.as_u64())
+            .count()
+}
+
+/// Number of 64-row blocks a band of half-width `t` can touch in one column.
+#[inline(always)]
+fn band_blocks(t: usize) -> usize {
+    2 * t / 64 + 2
+}
+
+/// Shared context for the very-long-pattern kernels (w > 8 words): `data` is
+/// the flat peq table with stride `w`, and `base_of(j)` yields the row base
+/// for text position `j`.
+struct LargeCtx<'a, F> {
+    m: usize,
+    n: usize,
+    w: usize,
+    data: &'a [u64],
+    base_of: F,
+}
+
+impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
+    /// Ukkonen band of half-width `t` over Myers' blocked recurrence: blocks
+    /// exchange only the horizontal delta `hin`/`hout` (Edlib's formulation),
+    /// so per column only blocks intersecting rows `[j - t, j + t]` run.
+    ///
+    /// Out-of-band boundaries are pessimistic (`hin = +1` below a dropped
+    /// block; `+1`-per-row extension above entering blocks), so every computed
+    /// cell is `>=` its true value, while cells on any optimal path are exact
+    /// whenever the true distance is `<= t` (such paths never leave the band).
+    /// Returns `Some(distance)` when the result proves itself (`score <= t`).
+    fn banded(&self, t: usize, pv: &mut [u64], mv: &mut [u64], abort: bool) -> Option<usize> {
+        let (m, n, w) = (self.m, self.n, self.w);
+        debug_assert!(n >= m);
+        debug_assert!(t >= n - m);
+        // Lowest row covered when `k` is the last live block.
+        let bottom = |k: usize| (64 * (k + 1)).min(m);
+        let mut last = (t / 64).min(w - 1);
+        let mut first = 0usize;
+        for k in 0..=last {
+            pv[k] = !0;
+            mv[k] = 0;
         }
+        let mut score = bottom(last) as isize;
+        let mut top_bit = (bottom(last) - 1) & 63;
+
+        for j in 1..=n {
+            let needed = ((j + t - 1) / 64).min(w - 1);
+            if needed > last {
+                for k in last + 1..=needed {
+                    pv[k] = !0;
+                    mv[k] = 0;
+                }
+                score += (bottom(needed) - bottom(last)) as isize;
+                last = needed;
+                top_bit = (bottom(last) - 1) & 63;
+            }
+            if j > t + 1 {
+                first = ((j - t - 1) / 64).min(last);
+            }
+            debug_assert!(first <= last);
+            let base = (self.base_of)(j - 1);
+            let mut hin: i32 = 1;
+            for k in first..=last {
+                let eq = unsafe { *self.data.get_unchecked(base + k) };
+                let (pv_k, mv_k) = (pv[k], mv[k]);
+                let xv = eq | mv_k;
+                let eq_in = eq | ((hin < 0) as u64);
+                let xh = ((eq_in & pv_k).wrapping_add(pv_k) ^ pv_k) | eq_in;
+                let ph = mv_k | !(xh | pv_k);
+                let mh = pv_k & xh;
+                if k == last {
+                    score += ((ph >> top_bit) & 1) as isize - ((mh >> top_bit) & 1) as isize;
+                }
+                let hout = ((ph >> 63) & 1) as i32 - ((mh >> 63) & 1) as i32;
+                let ph_s = (ph << 1) | ((hin > 0) as u64);
+                let mh_s = (mh << 1) | ((hin < 0) as u64);
+                pv[k] = mh_s | !(xv | ph_s);
+                mv[k] = ph_s & xv;
+                hin = hout;
+            }
+            // `score` never underestimates D[bottom(last)][j], and finishing
+            // from there takes at least `score - excess` edits (D never
+            // decreases along diagonal steps); once that exceeds `t` this band
+            // can no longer prove a result, so bail out and let the caller
+            // widen or fall back.
+            if abort {
+                let excess = (n - j) as isize - (m - bottom(last)) as isize;
+                if score - excess.max(0) > t as isize {
+                    return None;
+                }
+            }
+        }
+        debug_assert_eq!(last, w - 1);
+        (score as usize <= t).then_some(score as usize)
     }
-    score as usize
+
+    /// Full-matrix exact kernel (heap fallback for w > 8).
+    fn full(&self, vp: &mut [u64], vn: &mut [u64]) -> usize {
+        let (m, n, w) = (self.m, self.n, self.w);
+        let last_bits = m - (w - 1) * 64;
+        let top_mask = 1u64 << (last_bits - 1);
+        for k in 0..w {
+            vp[k] = !0;
+            vn[k] = 0;
+        }
+        if last_bits < 64 {
+            vp[w - 1] = (1u64 << last_bits) - 1;
+        }
+        let mut score = m as isize;
+        for j in 0..n {
+            let base = (self.base_of)(j);
+            let mut carry = false;
+            let mut prev_hp = 1u64;
+            let mut prev_hn = 0u64;
+            for k in 0..w {
+                let pm = unsafe { *self.data.get_unchecked(base + k) };
+                let x = pm | vn[k];
+                let (sum, nc) = (x & vp[k]).carrying_add(vp[k], carry);
+                carry = nc;
+                let d0 = (sum ^ vp[k]) | x;
+                let hp = vn[k] | !(d0 | vp[k]);
+                let hn = vp[k] & d0;
+                if k == w - 1 {
+                    score += ((hp & top_mask) != 0) as isize - ((hn & top_mask) != 0) as isize;
+                }
+                let (hp_msb, hn_msb) = (hp >> 63, hn >> 63);
+                vp[k] = (hn << 1 | prev_hn) | !(d0 | (hp << 1 | prev_hp));
+                vn[k] = (hp << 1 | prev_hp) & d0;
+                (prev_hp, prev_hn) = (hp_msb, hn_msb);
+            }
+        }
+        score as usize
+    }
+
+    /// Try narrow bands before paying for the full matrix.  `ub` must be a
+    /// true upper bound on the distance.
+    fn run(&self, ub: usize) -> usize {
+        let mut pv = vec![0u64; self.w];
+        let mut mv = vec![0u64; self.w];
+        // One optimistic pass; its early abort keeps the cost of a miss on
+        // dissimilar strings to a few percent of the full kernel.
+        let t0 = (self.n - self.m + 32).max(64);
+        if band_blocks(t0) * 2 <= self.w {
+            if let Some(d) = self.banded(t0, &mut pv, &mut mv, true) {
+                return d;
+            }
+            // d > t0.  A band as wide as `ub` is guaranteed to succeed; take
+            // it while it is still clearly narrower than the matrix.
+            if ub > t0 && band_blocks(ub) * 4 <= self.w * 3 {
+                if let Some(d) = self.banded(ub, &mut pv, &mut mv, false) {
+                    return d;
+                }
+                debug_assert!(false, "band at the upper bound must succeed");
+            }
+        }
+        self.full(&mut pv, &mut mv)
+    }
 }
 
 /// Multi-word Hyyrö for non-UCS-1 strings.
@@ -825,49 +979,28 @@ fn hyrro_multiword_sorted_generic<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long
         7 => run!(7),
         8 => run!(8),
         _ => {
-            let last_bits = m - (w - 1) * 64;
-            let top_mask = 1u64 << (last_bits - 1);
             let zero_base = n_keys * w;
-            let mut vp = vec![!0u64; w];
-            let mut vn = vec![0u64; w];
-            if last_bits < 64 {
-                vp[w - 1] = (1u64 << last_bits) - 1;
+            LargeCtx {
+                m,
+                n: long.len(),
+                w,
+                data: &data,
+                base_of: |j: usize| {
+                    let key = unsafe { long.get_unchecked(j) }.as_u64();
+                    let mut slot = hslot(key, hshift);
+                    loop {
+                        let ki = unsafe { *hash_idx.get_unchecked(slot) };
+                        if ki == u32::MAX {
+                            break zero_base;
+                        }
+                        if unsafe { *keys.get_unchecked(ki as usize) } == key {
+                            break ki as usize * w;
+                        }
+                        slot = (slot + 1) & hash_mask;
+                    }
+                },
             }
-            let mut score = m as isize;
-            for &tj in long {
-                let key = tj.as_u64();
-                let mut slot = hslot(key, hshift);
-                let base = loop {
-                    let ki = unsafe { *hash_idx.get_unchecked(slot) };
-                    if ki == u32::MAX {
-                        break zero_base;
-                    }
-                    if unsafe { *keys.get_unchecked(ki as usize) } == key {
-                        break ki as usize * w;
-                    }
-                    slot = (slot + 1) & hash_mask;
-                };
-                let mut carry = false;
-                let mut prev_hp = 1u64;
-                let mut prev_hn = 0u64;
-                for k in 0..w {
-                    let pm = data[base + k];
-                    let x = pm | vn[k];
-                    let (sum, nc) = (x & vp[k]).carrying_add(vp[k], carry);
-                    carry = nc;
-                    let d0 = (sum ^ vp[k]) | x;
-                    let hp = vn[k] | !(d0 | vp[k]);
-                    let hn = vp[k] & d0;
-                    if k == w - 1 {
-                        score += ((hp & top_mask) != 0) as isize - ((hn & top_mask) != 0) as isize;
-                    }
-                    let (hp_msb, hn_msb) = (hp >> 63, hn >> 63);
-                    vp[k] = (hn << 1 | prev_hn) | !(d0 | (hp << 1 | prev_hp));
-                    vn[k] = (hp << 1 | prev_hp) & d0;
-                    (prev_hp, prev_hn) = (hp_msb, hn_msb);
-                }
-            }
-            score as usize
+            .run(hamming_ub(short, long))
         }
     }
 }
@@ -1183,6 +1316,111 @@ mod tests {
         assert_eq!(compute_sorted_mixed(&a, &b), 1);
         let c: Vec<u16> = "xyz".encode_utf16().collect();
         assert_eq!(compute_sorted_mixed(&a, &c), 3);
+    }
+
+    /// Deterministic LCG used by the banded-kernel tests.
+    fn lcg(state: &mut u64) -> usize {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (*state >> 33) as usize
+    }
+
+    fn rand_string(state: &mut u64, len: usize, alpha: &[u8]) -> String {
+        (0..len)
+            .map(|_| alpha[lcg(state) % alpha.len()] as char)
+            .collect()
+    }
+
+    fn mutate(state: &mut u64, s: &str, edits: usize, alpha: &[u8]) -> String {
+        let mut out: Vec<char> = s.chars().collect();
+        for _ in 0..edits {
+            let i = lcg(state) % out.len();
+            match lcg(state) % 3 {
+                0 => out[i] = alpha[lcg(state) % alpha.len()] as char,
+                1 => out.insert(i, alpha[lcg(state) % alpha.len()] as char),
+                _ => {
+                    out.remove(i);
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    #[test]
+    fn banded_long_strings_match_oracle() {
+        // m > 512 (w > 8) exercises the banded kernel: small edit counts hit
+        // the optimistic pass, larger ones the retry/fallback logic.
+        let mut state = 0xDEAD_BEEF_CAFE_F00D_u64;
+        let alpha = b"abcdefghij";
+        for &(len, edits) in &[(520, 1), (700, 3), (900, 30), (1500, 60), (900, 120)] {
+            let a = rand_string(&mut state, len, alpha);
+            let b = mutate(&mut state, &a, edits, alpha);
+            let ac: Vec<char> = a.chars().collect();
+            let bc: Vec<char> = b.chars().collect();
+            assert_eq!(
+                levenshtein(&a, &b),
+                naive(&ac, &bc),
+                "len {len} edits {edits}"
+            );
+        }
+        // Substitution-only edits keep the Hamming upper bound tight while
+        // d > 64, forcing the second (guaranteed) banded pass.
+        let a = rand_string(&mut state, 700, alpha);
+        let mut bc: Vec<char> = a.chars().collect();
+        for _ in 0..100 {
+            let i = lcg(&mut state) % bc.len();
+            bc[i] = alpha[lcg(&mut state) % alpha.len()] as char;
+        }
+        let b: String = bc.iter().collect();
+        let ac: Vec<char> = a.chars().collect();
+        assert_eq!(levenshtein(&a, &b), naive(&ac, &bc));
+    }
+
+    #[test]
+    fn banded_shifted_and_dissimilar() {
+        let mut state = 0x1234_5678_9ABC_DEF0_u64;
+        let alpha = b"abcdefghij";
+        // A 1-char front shift defeats both affix stripping and the Hamming
+        // bound, but the optimistic band still catches d = 2 directly.
+        let a = rand_string(&mut state, 800, alpha);
+        let b = format!("x{}", &a[..a.len() - 1]);
+        let (ac, bc): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+        assert_eq!(levenshtein(&a, &b), naive(&ac, &bc));
+        // Unrelated strings: early-abort then full-matrix path.
+        let c = rand_string(&mut state, 750, alpha);
+        let d = rand_string(&mut state, 640, alpha);
+        let (cc, dc): (Vec<char>, Vec<char>) = (c.chars().collect(), d.chars().collect());
+        assert_eq!(levenshtein(&c, &d), naive(&cc, &dc));
+        // Large length difference: banding is skipped outright (t0 too wide).
+        let e = rand_string(&mut state, 600, alpha);
+        let f = mutate(&mut state, &e, 5, alpha) + &rand_string(&mut state, 700, alpha);
+        let (ec, fc): (Vec<char>, Vec<char>) = (e.chars().collect(), f.chars().collect());
+        assert_eq!(levenshtein(&e, &f), naive(&ec, &fc));
+    }
+
+    #[test]
+    fn banded_non_ascii_long_strings() {
+        // Banded kernel through the hash-based (non-UCS-1) peq pipeline.
+        let mut state = 0x0F0F_0F0F_1111_2222_u64;
+        let alpha: Vec<char> = "ぁあぃいぅうぇえおかがきぎく".chars().collect();
+        let a: String = (0..640)
+            .map(|_| alpha[lcg(&mut state) % alpha.len()])
+            .collect();
+        let mut bc: Vec<char> = a.chars().collect();
+        for _ in 0..7 {
+            let i = lcg(&mut state) % bc.len();
+            match lcg(&mut state) % 3 {
+                0 => bc[i] = alpha[lcg(&mut state) % alpha.len()],
+                1 => bc.insert(i, alpha[lcg(&mut state) % alpha.len()]),
+                _ => {
+                    bc.remove(i);
+                }
+            }
+        }
+        let b: String = bc.iter().collect();
+        let ac: Vec<char> = a.chars().collect();
+        assert_eq!(levenshtein(&a, &b), naive(&ac, &bc));
     }
 
     #[test]
