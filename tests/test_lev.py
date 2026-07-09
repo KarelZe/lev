@@ -179,6 +179,7 @@ def test_distance_long(s1: str, s2: str, expected: int) -> None:
 
     """
     assert lev.distance(s1, s2) == expected
+    assert lev.distance(s2, s1) == expected  # symmetric
 
 
 # ---------------------------------------------------------------------------
