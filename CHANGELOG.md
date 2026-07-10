@@ -1,3 +1,14 @@
+## 0.2.3 (2026-07-09)
+
+### Fix
+
+- correct typo in project.description🐞 (#106)
+
+### Perf
+
+- improve performance on exceptionally long strings🚀 (#131)
+- improve speed for >= python 3.14🚀 (#129)
+
 ## 0.2.2 (2026-05-05)
 
 ### Perf
