@@ -543,6 +543,9 @@ fn small_ub_mixed<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2]) -> Opti
 /// (insertion), `0b11` advances both (substitution).  O(ub * n) worst case,
 /// no peq table, no allocation.
 fn mbleven<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2], ub: usize) -> usize {
+    if ub == 0 {
+        return 0;
+    }
     debug_assert!((1..=MBLEVEN_MAX).contains(&ub));
     let diff = long.len() - short.len();
     debug_assert!(diff <= ub);
