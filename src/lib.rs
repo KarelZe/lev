@@ -485,7 +485,11 @@ fn small_ub<T: CodeUnit>(short: &[T], long: &[T]) -> Option<usize> {
     }
     let size = std::mem::size_of::<T>();
     let lane_bits = 8 * size;
-    let lane_mask = if lane_bits >= 64 { u64::MAX } else { (1u64 << lane_bits) - 1 };
+    let lane_mask = if lane_bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << lane_bits) - 1
+    };
     let a = as_bytes(short);
     let b = &as_bytes(long)[..a.len()];
 
