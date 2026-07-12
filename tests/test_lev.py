@@ -82,6 +82,106 @@ def test_distance(s1: str, s2: str, expected: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# distance: mixed internal encodings at realistic lengths
+# ---------------------------------------------------------------------------
+
+# The mixed cases in `test_distance` are tiny or affix-dominated; these pairs
+# keep the mixed-kind kernels (single-word, multiword, small-distance, and
+# affix stripping) busy at realistic lengths. One side of each pair contains
+# a character of a wider kind, so the two strings use different CPython
+# internal representations. Expected distances verified against rapidfuzz.
+
+
+def _substitute(s: str, positions: list[int], ch: str) -> str:
+    """
+    Replace the characters of s at the given positions with ch.
+
+    Returns:
+        str: copy of s with the substitutions applied.
+
+    """
+    b = list(s)
+    for p in positions:
+        b[p] = ch
+    return "".join(b)
+
+
+_ASCII_100 = ("The quick brown fox jumps over the lazy dog. " * 3)[:100]
+_LATIN1_100 = ("café résumé naïve façade jalapeño Zürich smörgåsbord " * 2)[:100]
+_CJK_100 = ("日本語のテスト文字列を長くするために繰り返します。" * 5)[:100]
+
+_MIXED_KIND_CASES = [
+    pytest.param(
+        _ASCII_100,
+        _substitute(_ASCII_100, [0, 33, 66, 99], "😀"),
+        4,
+        id="ascii-vs-emoji-100",
+    ),
+    pytest.param(
+        _ASCII_100,
+        _substitute(_ASCII_100, [0, 33, 66, 99], "日"),
+        4,
+        id="ascii-vs-cjk-100",
+    ),
+    pytest.param(
+        _ASCII_100,
+        _substitute(_ASCII_100, [0, 33, 66, 99], "ÿ"),
+        4,
+        id="ascii-vs-latin1-100",
+    ),
+    pytest.param(
+        _LATIN1_100,
+        _substitute(_LATIN1_100, [0, 33, 66, 99], "😀"),
+        4,
+        id="latin1-vs-emoji-100",
+    ),
+    pytest.param(
+        _CJK_100,
+        _substitute(_CJK_100, [0, 33, 66, 99], "😀"),
+        4,
+        id="cjk-vs-emoji-100",
+    ),
+    # Single-word mixed kernel (pattern <= 64 chars).
+    pytest.param(
+        _ASCII_100[:48],
+        _substitute(_ASCII_100[:48], [0, 47], "😀"),
+        2,
+        id="ascii-vs-emoji-48",
+    ),
+    # Near-identical mixed pair (small-distance fast path).
+    pytest.param(
+        _ASCII_100,
+        _substitute(_ASCII_100, [50], "😀"),
+        1,
+        id="ascii-vs-emoji-d1",
+    ),
+    # Long shared affixes around a mixed-kind difference.
+    pytest.param(
+        "x" * 80 + "middle" + "y" * 80,
+        "x" * 80 + "m😀ddle" + "y" * 80,
+        1,
+        id="mixed-affix-heavy",
+    ),
+]
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize(("s1", "s2", "expected"), _MIXED_KIND_CASES)
+def test_distance_mixed_kind(s1: str, s2: str, expected: int) -> None:
+    """
+    Test and benchmark lev.distance on pairs with different internal encodings.
+
+    Args:
+        s1 (str): First input string.
+        s2 (str): Second input string (wider CPython string kind than s1).
+        expected (int): Expected Levenshtein distance.
+
+    """
+    assert lev.distance(s1, s2) == expected
+    assert lev.distance(s2, s1) == expected  # symmetric
+
+
+# ---------------------------------------------------------------------------
 # distance: long strings (> 512 chars, banded multiword kernel)
 # ---------------------------------------------------------------------------
 
