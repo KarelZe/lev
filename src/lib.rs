@@ -1088,6 +1088,7 @@ fn hyrro_multiword_sorted_generic<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long
     let mut n_keys = 0u64;
     for &c in short {
         let key = c.as_u64();
+        debug_assert!(key <= u32::MAX as u64, "CodeUnit value must fit in 32 bits");
         let mut slot = hslot(key, hshift);
         loop {
             let entry = hash[slot];
