@@ -11,6 +11,36 @@ prefer Rust-side optimizations over Python wrappers.
 - Install: `uv sync --all-extras`
 - After editing Rust, rebuild the extension: `bash scripts/install_dev.sh`
 
+## Performance workflow
+
+All performance changes follow this loop. One change per experiment,
+measured on the same hardware, kept only if it wins.
+
+1. Pin a baseline before any change:
+   - Python-level:
+     `uv run python scripts/benchmark.py --save baselines/<name>.json`
+     Add `--kind ascii` (or `latin1`, `cjk`, `emoji`) to baseline a single
+     CPython string kind instead of all four.
+   - Rust-level (if criterion benches exist for the change surface):
+     `cargo bench -- --save-baseline <name>`
+2. State a single, testable hypothesis before editing (e.g. "prefix/suffix
+   trim removes ~30% of DP work on ASCII-100"). One change per experiment.
+3. Re-run the same benchmark on identical hardware, quiet system, `taskset`
+   or `sudo nice -n -20` where reasonable. Report median + IQR, not mean.
+4. If the change is under 3% or within noise on every kind, REVERT.
+   Do not commit tuning that only wins in one microbenchmark.
+5. Verify correctness against the property tests and a diff test vs.
+   rapidfuzz / edlib on random inputs before keeping any win.
+6. Check codegen for the hot loop with `cargo asm` (or `--emit=asm`) when
+   claiming SIMD or auto-vectorization wins.
+7. Never edit the release profile in `Cargo.toml` (LTO, codegen-units,
+   panic) as part of an algorithmic experiment. Separate PR.
+
+Profiling is a read-only step and is delegated to the `profile-runner`
+sub-agent (`.claude/agents/profile-runner.md`). It uses samply for the
+Python-level benchmark and cargo flamegraph for the criterion benches;
+neither needs `--profile-time`.
+
 ## Testing
 - Python: `pytest tests/`
 - Rust: `cargo test`

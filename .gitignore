@@ -196,3 +196,5 @@ Cargo.lock
 
 ## benchmarks
 bench*.json
+*json.gz
+baselines/
