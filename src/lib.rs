@@ -442,6 +442,8 @@ fn compute_u8<const ASCII: bool>(a: &[u8], b: &[u8]) -> usize {
     }
     if a.len() <= TINY_M {
         hyrro_64_tiny(a, b)
+    } else if let Some(ub) = small_ub(a, b) {
+        mbleven(a, b, ub)
     } else if a.len() <= 64 {
         if ASCII {
             hyrro_64_u8::<128>(a, b)
@@ -451,6 +453,150 @@ fn compute_u8<const ASCII: bool>(a: &[u8], b: &[u8]) -> usize {
     } else {
         hyrro_multiword_bytes(a, b)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Small-distance fast path (mbleven)
+// ---------------------------------------------------------------------------
+
+/// Largest internally-derived upper bound handled by [`mbleven`].
+const MBLEVEN_MAX: usize = 3;
+
+/// Longest pattern eligible for the mbleven gate.  Bounds the gate's
+/// hamming scan; beyond this the banded kernels already handle
+/// near-identical strings well.
+const MBLEVEN_MAX_LEN: usize = 512;
+
+/// Gate for the mbleven fast path (same-kind slices): `Some(ub)` when
+/// `length difference + aligned mismatches <= MBLEVEN_MAX`.
+///
+/// Scans the raw bytes one u64 block at a time (element sizes divide 8, so a
+/// block always holds whole elements — same trick as
+/// [`common_prefix_bytes`]).  Clean blocks cost one XOR + branch; only blocks
+/// containing a difference are inspected per lane, and at most four such
+/// blocks are touched before aborting, so the worst case stays cheap on both
+/// early-mismatch and late-mismatch inputs.
+#[inline(always)]
+fn small_ub<T: CodeUnit>(short: &[T], long: &[T]) -> Option<usize> {
+    debug_assert!(short.len() <= long.len());
+    let mut ub = long.len() - short.len();
+    if ub > MBLEVEN_MAX || short.len() > MBLEVEN_MAX_LEN {
+        return None;
+    }
+    let size = std::mem::size_of::<T>();
+    let lane_bits = 8 * size;
+    let lane_mask = if lane_bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << lane_bits) - 1
+    };
+    let a = as_bytes(short);
+    let b = &as_bytes(long)[..a.len()];
+
+    let mut chunks_a = a.chunks_exact(8);
+    let mut chunks_b = b.chunks_exact(8);
+    for (ca, cb) in chunks_a.by_ref().zip(chunks_b.by_ref()) {
+        let mut d =
+            u64::from_le_bytes(ca.try_into().unwrap()) ^ u64::from_le_bytes(cb.try_into().unwrap());
+        while d != 0 {
+            ub += 1;
+            if ub > MBLEVEN_MAX {
+                return None;
+            }
+            let lane = d.trailing_zeros() as usize / lane_bits;
+            d &= !(lane_mask << (lane * lane_bits));
+        }
+    }
+    for e in (a.len() - chunks_a.remainder().len()) / size..short.len() {
+        if short[e].as_u64() != long[e].as_u64() {
+            ub += 1;
+            if ub > MBLEVEN_MAX {
+                return None;
+            }
+        }
+    }
+    Some(ub)
+}
+
+/// [`small_ub`] for mixed-kind slices: plain element-wise scan with early
+/// abort (mixed pairs have no byte-comparable representation).
+#[inline(always)]
+fn small_ub_mixed<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2]) -> Option<usize> {
+    debug_assert!(short.len() <= long.len());
+    let mut ub = long.len() - short.len();
+    if ub > MBLEVEN_MAX || short.len() > MBLEVEN_MAX_LEN {
+        return None;
+    }
+    for (x, y) in short.iter().zip(long.iter()) {
+        if x.as_u64() != y.as_u64() {
+            ub += 1;
+            if ub > MBLEVEN_MAX {
+                return None;
+            }
+        }
+    }
+    Some(ub)
+}
+
+/// Exact distance when an upper bound `ub` in `1..=3` is known (mbleven,
+/// Hyyrö 2018 formulation as used by rapidfuzz): try every candidate edit-op
+/// sequence of cost <= `ub` and take the cheapest that aligns the strings.
+///
+/// Each sequence packs ops two bits per op from the LSB: `0b01` advances only
+/// `long` (deletion from the longer string), `0b10` advances only `short`
+/// (insertion), `0b11` advances both (substitution).  O(ub * n) worst case,
+/// no peq table, no allocation.
+fn mbleven<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2], ub: usize) -> usize {
+    if ub == 0 {
+        return 0;
+    }
+    debug_assert!((1..=MBLEVEN_MAX).contains(&ub));
+    let diff = long.len() - short.len();
+    debug_assert!(diff <= ub);
+
+    // Rows indexed by (ub, diff): (1,0),(1,1),(2,0),(2,1),(2,2),(3,0)..(3,3).
+    static SEQS: [&[u64]; 9] = [
+        &[0x03],
+        &[0x01],
+        &[0x0F, 0x09, 0x06],
+        &[0x0D, 0x07],
+        &[0x05],
+        &[0x3F, 0x27, 0x2D, 0x39, 0x36, 0x1E, 0x1B],
+        &[0x3D, 0x37, 0x1F, 0x25, 0x19, 0x16],
+        &[0x35, 0x1D, 0x17],
+        &[0x15],
+    ];
+    let row = (ub - 1) * (ub + 2) / 2 + diff;
+
+    let mut best = usize::MAX;
+    for &seq in SEQS[row] {
+        let mut ops = seq;
+        let (mut sp, mut lp, mut cost) = (0usize, 0usize, 0usize);
+        while sp < short.len() && lp < long.len() {
+            // SAFETY: sp/lp are bounded by the loop condition.
+            let (cs, cl) = unsafe {
+                (
+                    short.get_unchecked(sp).as_u64(),
+                    long.get_unchecked(lp).as_u64(),
+                )
+            };
+            if cs != cl {
+                cost += 1;
+                if ops == 0 {
+                    break;
+                }
+                lp += (ops & 1) as usize;
+                sp += ((ops >> 1) & 1) as usize;
+                ops >>= 2;
+            } else {
+                sp += 1;
+                lp += 1;
+            }
+        }
+        cost += (short.len() - sp) + (long.len() - lp);
+        best = best.min(cost);
+    }
+    best
 }
 
 // ---------------------------------------------------------------------------
@@ -466,6 +612,8 @@ fn compute_sorted<T: CodeUnit>(a: &[T], b: &[T]) -> usize {
     }
     if a.len() <= TINY_M {
         hyrro_64_tiny(a, b)
+    } else if let Some(ub) = small_ub(a, b) {
+        mbleven(a, b, ub)
     } else if a.len() <= 64 {
         hyrro_64_sorted(a, b)
     } else {
@@ -482,6 +630,8 @@ fn compute_sorted_mixed<T1: CodeUnit, T2: CodeUnit>(a: &[T1], b: &[T2]) -> usize
     }
     if a.len() <= TINY_M {
         hyrro_64_tiny(a, b)
+    } else if let Some(ub) = small_ub_mixed(a, b) {
+        mbleven(a, b, ub)
     } else if a.len() <= 64 {
         hyrro_64_mixed(a, b)
     } else {
@@ -783,6 +933,7 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
         let (m, n, w) = (self.m, self.n, self.w);
         debug_assert!(n >= m);
         debug_assert!(t >= n - m);
+        debug_assert!(pv.len() >= w && mv.len() >= w);
         // Lowest row covered when `k` is the last live block.
         let bottom = |k: usize| (64 * (k + 1)).min(m);
         let mut last = (t / 64).min(w - 1);
@@ -813,7 +964,9 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
             let mut hin: i32 = 1;
             for k in first..=last {
                 let eq = unsafe { *self.data.get_unchecked(base + k) };
-                let (pv_k, mv_k) = (pv[k], mv[k]);
+                // SAFETY: k <= last, and both `last` assignments clamp with
+                // .min(w - 1); pv/mv have length >= w (asserted at entry).
+                let (pv_k, mv_k) = unsafe { (*pv.get_unchecked(k), *mv.get_unchecked(k)) };
                 let xv = eq | mv_k;
                 let eq_in = eq | ((hin < 0) as u64);
                 let xh = ((eq_in & pv_k).wrapping_add(pv_k) ^ pv_k) | eq_in;
@@ -825,8 +978,11 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
                 let hout = ((ph >> 63) & 1) as i32 - ((mh >> 63) & 1) as i32;
                 let ph_s = (ph << 1) | ((hin > 0) as u64);
                 let mh_s = (mh << 1) | ((hin < 0) as u64);
-                pv[k] = mh_s | !(xv | ph_s);
-                mv[k] = ph_s & xv;
+                // SAFETY: same bound as the read above.
+                unsafe {
+                    *pv.get_unchecked_mut(k) = mh_s | !(xv | ph_s);
+                    *mv.get_unchecked_mut(k) = ph_s & xv;
+                }
                 hin = hout;
             }
             // `score` never underestimates D[bottom(last)][j], and finishing
@@ -848,6 +1004,7 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
     /// Full-matrix exact kernel (heap fallback for w > 8).
     fn full(&self, vp: &mut [u64], vn: &mut [u64]) -> usize {
         let (m, n, w) = (self.m, self.n, self.w);
+        debug_assert!(vp.len() >= w && vn.len() >= w);
         let last_bits = m - (w - 1) * 64;
         let top_mask = 1u64 << (last_bits - 1);
         for k in 0..w {
@@ -865,18 +1022,23 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
             let mut prev_hn = 0u64;
             for k in 0..w {
                 let pm = unsafe { *self.data.get_unchecked(base + k) };
-                let x = pm | vn[k];
-                let (sum, nc) = (x & vp[k]).carrying_add(vp[k], carry);
+                // SAFETY: k < w and vp/vn have length >= w (asserted at entry).
+                let (vp_k, vn_k) = unsafe { (*vp.get_unchecked(k), *vn.get_unchecked(k)) };
+                let x = pm | vn_k;
+                let (sum, nc) = (x & vp_k).carrying_add(vp_k, carry);
                 carry = nc;
-                let d0 = (sum ^ vp[k]) | x;
-                let hp = vn[k] | !(d0 | vp[k]);
-                let hn = vp[k] & d0;
+                let d0 = (sum ^ vp_k) | x;
+                let hp = vn_k | !(d0 | vp_k);
+                let hn = vp_k & d0;
                 if k == w - 1 {
                     score += ((hp & top_mask) != 0) as isize - ((hn & top_mask) != 0) as isize;
                 }
                 let (hp_msb, hn_msb) = (hp >> 63, hn >> 63);
-                vp[k] = (hn << 1 | prev_hn) | !(d0 | (hp << 1 | prev_hp));
-                vn[k] = (hp << 1 | prev_hp) & d0;
+                // SAFETY: same bound as the read above.
+                unsafe {
+                    *vp.get_unchecked_mut(k) = (hn << 1 | prev_hn) | !(d0 | (hp << 1 | prev_hp));
+                    *vn.get_unchecked_mut(k) = (hp << 1 | prev_hp) & d0;
+                }
                 (prev_hp, prev_hn) = (hp_msb, hn_msb);
             }
         }
@@ -918,30 +1080,50 @@ fn hyrro_multiword_sorted_generic<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long
     let m = short.len();
     let w = m.div_ceil(64);
 
-    let mut keys: Vec<u64> = short.iter().map(|&c| c.as_u64()).collect();
-    keys.sort_unstable();
-    keys.dedup();
-    let n_keys = keys.len();
-    let mut data = vec![0u64; (n_keys + 1) * w];
-    for (i, &c) in short.iter().enumerate() {
-        let key = c.as_u64();
-        let ki = keys.partition_point(|&x| x < key);
-        data[ki * w + i / 64] |= 1u64 << (i % 64);
-    }
-
-    let hash_size = (n_keys * 2 + 2).next_power_of_two();
+    // Dense-index the pattern alphabet in first-seen order with a single
+    // open-addressing pass; each live entry packs (dense index << 32) | key.
+    // Code units fit in 32 bits and the dense index is bounded by the string
+    // length, so no live entry can equal the EMPTY sentinel.
+    const EMPTY: u64 = u64::MAX;
+    let hash_size = (m * 2).next_power_of_two();
     let hash_mask = hash_size - 1;
-    let mut hash_idx: Vec<u32> = vec![u32::MAX; hash_size];
     let hshift = 64 - hash_mask.count_ones();
-    for (ki, &key) in keys.iter().enumerate() {
+    let mut hash: Vec<u64> = vec![EMPTY; hash_size];
+    let mut n_keys = 0u64;
+    for &c in short {
+        let key = c.as_u64();
+        debug_assert!(key <= u32::MAX as u64, "CodeUnit value must fit in 32 bits");
         let mut slot = hslot(key, hshift);
         loop {
-            if hash_idx[slot] == u32::MAX {
-                hash_idx[slot] = ki as u32;
+            let entry = hash[slot];
+            if entry == EMPTY {
+                hash[slot] = n_keys << 32 | key;
+                n_keys += 1;
+                break;
+            }
+            if entry & 0xFFFF_FFFF == key {
                 break;
             }
             slot = (slot + 1) & hash_mask;
         }
+    }
+    let n_keys = n_keys as usize;
+
+    // Rows sized by the actual alphabet; the trailing row stays all-zero and
+    // serves text chars that do not occur in the pattern.
+    let mut data = vec![0u64; (n_keys + 1) * w];
+    for (i, &c) in short.iter().enumerate() {
+        let key = c.as_u64();
+        let mut slot = hslot(key, hshift);
+        let ki = loop {
+            let entry = unsafe { *hash.get_unchecked(slot) };
+            debug_assert!(entry != EMPTY, "pattern key must already be inserted");
+            if entry & 0xFFFF_FFFF == key {
+                break (entry >> 32) as usize;
+            }
+            slot = (slot + 1) & hash_mask;
+        };
+        data[ki * w + i / 64] |= 1u64 << (i % 64);
     }
 
     macro_rules! run {
@@ -952,12 +1134,12 @@ fn hyrro_multiword_sorted_generic<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long
                     let key = c.as_u64();
                     let mut slot = hslot(key, hshift);
                     let base = loop {
-                        let ki = unsafe { *hash_idx.get_unchecked(slot) };
-                        if ki == u32::MAX {
+                        let entry = unsafe { *hash.get_unchecked(slot) };
+                        if entry == EMPTY {
                             break n_keys * $W;
                         }
-                        if unsafe { *keys.get_unchecked(ki as usize) } == key {
-                            break ki as usize * $W;
+                        if entry & 0xFFFF_FFFF == key {
+                            break (entry >> 32) as usize * $W;
                         }
                         slot = (slot + 1) & hash_mask;
                     };
@@ -989,12 +1171,12 @@ fn hyrro_multiword_sorted_generic<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long
                     let key = unsafe { long.get_unchecked(j) }.as_u64();
                     let mut slot = hslot(key, hshift);
                     loop {
-                        let ki = unsafe { *hash_idx.get_unchecked(slot) };
-                        if ki == u32::MAX {
+                        let entry = unsafe { *hash.get_unchecked(slot) };
+                        if entry == EMPTY {
                             break zero_base;
                         }
-                        if unsafe { *keys.get_unchecked(ki as usize) } == key {
-                            break ki as usize * w;
+                        if entry & 0xFFFF_FFFF == key {
+                            break (entry >> 32) as usize * w;
                         }
                         slot = (slot + 1) & hash_mask;
                     }
@@ -1058,6 +1240,85 @@ mod tests {
     fn check(a: &str, b: &str, expected: usize) {
         assert_eq!(levenshtein(a, b), expected, "({a:?}, {b:?})");
         assert_eq!(levenshtein(b, a), expected, "({b:?}, {a:?}) symmetry");
+    }
+
+    /// Exhaustive mbleven validation: every pair over a binary alphabet with
+    /// lengths (9..=11, 9..=11) whose gate bound qualifies must match the
+    /// oracle exactly.
+    #[test]
+    fn mbleven_matches_oracle_exhaustive() {
+        let strings = |len: usize| -> Vec<Vec<u8>> {
+            (0u32..1 << len)
+                .map(|bits| (0..len).map(|i| b'a' + ((bits >> i) & 1) as u8).collect())
+                .collect()
+        };
+        let mut hits = 0usize;
+        for la in 9..=11usize {
+            for lb in la..=11usize {
+                for a in strings(la) {
+                    for b in strings(lb) {
+                        if let Some(ub) = small_ub(&a, &b) {
+                            if ub == 0 {
+                                continue;
+                            }
+                            let ac: Vec<char> = a.iter().map(|&c| c as char).collect();
+                            let bc: Vec<char> = b.iter().map(|&c| c as char).collect();
+                            assert_eq!(
+                                mbleven(&a, &b, ub),
+                                naive(&ac, &bc),
+                                "({a:?}, {b:?}, ub={ub})"
+                            );
+                            hits += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(hits > 100_000, "gate should trigger often here: {hits}");
+    }
+
+    /// Integration: random small-edit pairs (which exercise the small_ub gate
+    /// through compute) agree with the oracle across lengths and alphabets.
+    #[test]
+    fn small_edit_pairs_match_oracle() {
+        let mut state = 0x243F_6A88_85A3_08D3u64; // xorshift, deterministic
+        let mut rng = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let alphabets: [&[char]; 3] = [
+            &['a', 'b', 'c', 'd', 'e', 'f'],
+            &['é', 'ü', 'ø', 'å'],
+            &['日', '本', '語', 'あ', 'い'],
+        ];
+        for _ in 0..4000 {
+            let ab = alphabets[(rng() % 3) as usize];
+            let n = 9 + (rng() % 120) as usize;
+            let a: Vec<char> = (0..n)
+                .map(|_| ab[(rng() % ab.len() as u64) as usize])
+                .collect();
+            let mut b = a.clone();
+            for _ in 0..(rng() % 4) {
+                match rng() % 3 {
+                    0 if !b.is_empty() => {
+                        let i = (rng() % b.len() as u64) as usize;
+                        b[i] = ab[(rng() % ab.len() as u64) as usize];
+                    }
+                    1 if !b.is_empty() => {
+                        b.remove((rng() % b.len() as u64) as usize);
+                    }
+                    _ => {
+                        let i = (rng() % (b.len() as u64 + 1)) as usize;
+                        b.insert(i, ab[(rng() % ab.len() as u64) as usize]);
+                    }
+                }
+            }
+            let sa: String = a.iter().collect();
+            let sb: String = b.iter().collect();
+            assert_eq!(levenshtein(&sa, &sb), naive(&a, &b), "({sa:?}, {sb:?})");
+        }
     }
 
     #[test]
