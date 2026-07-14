@@ -9,7 +9,7 @@ prefer Rust-side optimizations over Python wrappers.
 ## Environment Setup
 - Python >= 3.10
 - Install: `uv sync --all-extras`
-- After editing Rust, rebuild the extension: `bash scripts/install_dev.sh`
+- After editing Rust, rebuild the extension: `uv run maturin develop --release`
 
 ## Performance workflow
 
@@ -18,7 +18,7 @@ measured on the same hardware, kept only if it wins.
 
 1. Pin a baseline before any change:
    - Python-level:
-     `uv run python scripts/benchmark.py --save baselines/<name>.json`
+     `uv run scripts/benchmark.py --save baselines/<name>.json`
      Add `--kind ascii` (or `latin1`, `cjk`, `emoji`) to baseline a single
      CPython string kind instead of all four.
    - Rust-level (if criterion benches exist for the change surface):
@@ -44,12 +44,12 @@ neither needs `--profile-time`.
 ## Testing
 - Python: `pytest tests/`
 - Rust: `cargo test`
-- Rust changes require a rebuild before pytest will pick them up. You can trigger a rebuild with `bash scripts/install_dev.sh`.
+- Rust changes require a rebuild before pytest will pick them up. You can trigger a rebuild with `uv run maturin develop --release`.
 
 ## Benchmarking
-- Install deps: `uv sync --extra benchmark`
-- Compare against other libraries: `uv run python scripts/benchmark.py`
-- Compare across string lengths: `uv run python scripts/benchmark_by_length.py`
+- Scripts are self-contained (PEP 723 inline deps); no install step needed.
+- Compare against other libraries: `uv run scripts/benchmark.py`
+- Compare across string lengths: `uv run scripts/benchmark_by_length.py`
 - For performance-critical changes, run `benchmark.py` before and after,
   then diff `benchmark_results.json`.
 
