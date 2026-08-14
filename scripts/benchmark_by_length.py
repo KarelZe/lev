@@ -1,3 +1,18 @@
+#!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "matplotlib==3.11.0",
+#     "matplotx==0.3.10",
+#     "numpy==2.5.1",
+#     "polyleven==0.11.0",
+#     "rapidfuzz==3.14.5",
+#     "lev-rs",
+# ]
+#
+# [tool.uv.sources]
+# lev-rs = { path = "../", editable = true }
+# ///
 """
 Benchmark lev vs rapidfuzz across string lengths for each CPython encoding kind.
 
@@ -11,6 +26,7 @@ import timeit
 import matplotlib.pyplot as plt
 import matplotx
 import numpy as np
+import polyleven
 from rapidfuzz.distance import Levenshtein
 
 import lev as _lev
@@ -50,6 +66,7 @@ KINDS: dict[str, tuple[str, str]] = {
 LIBRARIES: dict[str, object] = {
     "lev [ours]": _lev.distance,
     "rapidfuzz": Levenshtein.distance,
+    "polyleven": polyleven.levenshtein,
 }
 
 # ---------------------------------------------------------------------------
