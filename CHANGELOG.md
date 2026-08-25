@@ -1,3 +1,9 @@
+## 0.2.4 (2026-08-25)
+
+### Perf
+
+- improve performance on long cjk and emoji strings🚀 (#136)
+
 ## 0.2.3 (2026-07-09)
 
 ### Fix
