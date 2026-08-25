@@ -77,10 +77,21 @@ jobs:
         run: |
           host="$(rustc -vV | sed -n 's/^host: //p')"
           llvm_profdata="$(rustc --print sysroot)/lib/rustlib/${host}/bin/llvm-profdata"
-          count="$("$llvm_profdata" show --all-functions "${{ github.workspace }}/merged.profdata" | grep -c '_ZN3lev' || true)"
+          names="$("$llvm_profdata" show --all-functions "${{ github.workspace }}/merged.profdata")"
+          # Match the crate path component rather than a mangling prefix: the
+          # crate name appears as `3lev` under both legacy mangling
+          # (_ZN3lev8distance17h..E) and v0 (_RNvCs<hash>_3lev8distance), and
+          # rustc's default flipped between them. Grepping for `_ZN3lev` alone
+          # silently reports zero symbols on any toolchain emitting v0.
+          count="$(printf '%s\n' "$names" | grep -c '3lev' || true)"
           echo "lev symbols in merged profile: ${count}"
           if [ "$count" -eq 0 ]; then
             echo "::error::Merged profile contains no lev symbols; training collected nothing."
+            echo "rustc: $(rustc --version)"
+            echo "--- profile summary ---"
+            "$llvm_profdata" show "${{ github.workspace }}/merged.profdata" | head -20
+            echo "--- first 20 function names ---"
+            printf '%s\n' "$names" | grep ':$' | head -20
             exit 1
           fi
 
