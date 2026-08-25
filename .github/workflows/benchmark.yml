@@ -28,9 +28,39 @@ jobs:
           allow-prereleases: true
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: llvm-tools
 
-      - name: Build and install extension
-        run: pip install maturin && maturin build --release && pip install target/wheels/*.whl
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Disable strip for this ephemeral CI build
+        # strip=true (the shipped default) silently discards the LLVM profiling
+        # runtime's ability to flush .profraw when this cdylib is dlopen'd by
+        # CPython -- the instrumented step below would train on zero samples
+        # without this. Only ever applied to this job's throwaway checkout;
+        # never affects the published wheel (release.yml keeps strip=true).
+        run: sed -i 's/^strip = true$/strip = false/' pyproject.toml
+
+      - name: Build instrumented (PGO training) wheel
+        run: RUSTFLAGS="-Cprofile-generate=${{ github.workspace }}/pgo-data" maturin build --release --out dist-pgo-instrumented
+
+      - name: Install instrumented wheel
+        run: pip install --force-reinstall --no-deps dist-pgo-instrumented/*.whl
+
+      - name: Train PGO profile
+        run: python scripts/pgo_train.py
+
+      - name: Merge PGO profile
+        run: |
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          llvm_profdata="$(rustc --print sysroot)/lib/rustlib/${host}/bin/llvm-profdata"
+          "$llvm_profdata" merge -o "${{ github.workspace }}/merged.profdata" "${{ github.workspace }}"/pgo-data/*.profraw
+
+      - name: Build optimized (PGO) wheel and install
+        run: |
+          RUSTFLAGS="-Cprofile-use=${{ github.workspace }}/merged.profdata -Cllvm-args=-pgo-warn-missing-function" maturin build --release --out dist-pgo-optimized
+          pip install --force-reinstall --no-deps dist-pgo-optimized/*.whl
 
       - name: Install benchmark deps
         run: pip install pytest pytest-codspeed pytest-cov
