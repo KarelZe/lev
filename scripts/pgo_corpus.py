@@ -1,14 +1,20 @@
 """
 Deterministic, network-free training corpus for PGO.
 
-Generates `(s1, s2)` string pairs shaped like real fuzzy-matching traffic —
-search-suggestion / autocomplete / contact-dedup / spell-check workloads —
-rather than synthetic worst-case inputs. The mix is heavily weighted toward
-short ASCII words with realistic typos (the dominant real-world case), with
-a proportionally small tail into Latin-1 names, CJK/emoji tokens, mixed-kind
-pairs, multi-word sentences, and very long strings, so every dispatch arm in
-`compute()` (src/lib.rs) gets *some* profile signal without distorting the
-corpus toward rare cases.
+Generates `(s1, s2)` string pairs with realistic typos, balanced evenly
+across the four CPython string kinds and stratified over the length bands
+`compute()` (src/lib.rs) branches on, so every dispatch arm gets real
+profile signal.
+
+The balance is deliberately *not* that of real fuzzy-matching traffic
+(search-suggestion / autocomplete / contact-dedup / spell-check), which is
+overwhelmingly short ASCII. An earlier version of this file followed that
+traffic shape — 78% ASCII, 1.5% CJK, 1.0% emoji, median length 7 and p90 17
+— and the resulting profile made UCS-2/UCS-4 strings of 48 characters and up
+5-13% *slower* than an unprofiled build, because LLVM spent its inlining
+budget on the UCS-1 arms and laid out the rest as cold. PGO consumes branch
+and call counts rather than semantics, so a corpus should cover the code,
+not mimic the traffic.
 
 No external wordlists, dictionaries, or network fetches: everything is a
 small hardcoded literal, matching the convention already used for the
@@ -298,31 +304,6 @@ EMOJI_WORDS = [
     "🙏",
 ]
 
-# A handful of full sentences/paragraphs for the multi-word (65-512 char) and
-# long-tail (>512 char) buckets -- realistic near-duplicate-detection inputs
-# (product reviews, support tickets, error messages), not padded filler.
-PROSE = [
-    "Customer support was fantastic today. The technician arrived on time, "
-    "diagnosed the issue within minutes, and had everything working again "
-    "before lunch. I would definitely recommend this service to a friend "
-    "or colleague.",
-    "The package arrived two days late and the box was slightly damaged, "
-    "but everything inside was intact. Customer service issued a partial "
-    "refund without any hassle, which I really appreciated given how "
-    "stressful the whole week had already been.",
-    "Error: connection to the database timed out after 30 seconds. Please "
-    "check that the server is reachable and that the configured credentials "
-    "are still valid, then retry the operation. If the problem persists, "
-    "contact your system administrator.",
-    "We are writing to confirm that your subscription has been renewed for "
-    "another twelve months. Your next billing date is scheduled for the "
-    "first of next month, and you can review or cancel your plan at any "
-    "time from the account settings page.",
-    "The new office is located just two blocks from the train station, "
-    "with plenty of parking nearby and a small café on the ground floor "
-    "that serves breakfast starting at seven in the morning every weekday.",
-]
-
 # ---------------------------------------------------------------------------
 # Typo injection
 # ---------------------------------------------------------------------------
@@ -362,85 +343,52 @@ def _inject_typos(rng: random.Random, s: str, alphabet: str, edit_ratio: float) 
     return "".join(chars)
 
 
-def _make_pair(rng: random.Random, base: str, alphabet: str, edit_ratio: float) -> tuple[str, str]:
-    return base, _inject_typos(rng, base, alphabet, edit_ratio)
-
-
 # ---------------------------------------------------------------------------
-# Category generators
+# Corpus shape
 # ---------------------------------------------------------------------------
 
-_ASCII_ALPHABET = "abcdefghijklmnopqrstuvwxyz"
-_LATIN1_ALPHABET = "".join(LATIN1_WORDS)
-_CJK_ALPHABET = "".join(CJK_WORDS)
-_EMOJI_ALPHABET = "".join(EMOJI_WORDS)
+# Source pool per CPython string kind, paired with the alphabet typos are
+# drawn from so a mutated string stays in the kind it started in.
+_POOLS: dict[str, tuple[list[str], str]] = {
+    "ascii": (ASCII_WORDS, "abcdefghijklmnopqrstuvwxyz"),
+    "latin1": (LATIN1_WORDS, "".join(LATIN1_WORDS)),
+    "cjk": (CJK_WORDS, "".join(CJK_WORDS)),
+    "emoji": (EMOJI_WORDS, "".join(EMOJI_WORDS)),
+}
+
+# Target lengths grouped into strata, with the share of the corpus each takes.
+# Retains a realistic short-string bias while actually covering the bands the
+# kernels branch on: mbleven, single-word Myers (<=64), multiword (>64), and
+# the banded fallback (>512).
+_STRATA: tuple[tuple[tuple[int, ...], float], ...] = (
+    ((4, 8, 12, 16), 0.35),
+    ((24, 32, 48, 56, 64, 72, 96, 128), 0.40),
+    ((192, 256, 384, 512, 640), 0.25),
+)
+
+# Share of the corpus given to pairs whose sides have different kinds, so the
+# `compute_sorted_mixed` arms get profile signal too.
+_MIXED_SHARE = 0.08
+
+# Share appended as `(s, s)` to weight the identity short-circuit.
+_IDENTICAL_SHARE = 0.025
 
 
-def _ascii_short_pairs(rng: random.Random, n: int) -> list[tuple[str, str]]:
-    pairs = []
-    for _ in range(n):
-        n_words = rng.choice((1, 1, 1, 2))
-        base = " ".join(rng.choice(ASCII_WORDS) for _ in range(n_words))
-        pairs.append(_make_pair(rng, base, _ASCII_ALPHABET, rng.uniform(0.10, 0.25)))
-    return pairs
+def _build(rng: random.Random, pool: list[str], target: int) -> str:
+    """
+    Concatenate words drawn from `pool` until `target` characters are reached.
 
+    Returns:
+        A string of exactly `target` characters.
 
-def _latin1_pairs(rng: random.Random, n: int) -> list[tuple[str, str]]:
-    pairs = []
-    for _ in range(n):
-        n_words = rng.choice((1, 1, 2))
-        base = " ".join(rng.choice(LATIN1_WORDS) for _ in range(n_words))
-        pairs.append(_make_pair(rng, base, _LATIN1_ALPHABET, rng.uniform(0.10, 0.25)))
-    return pairs
-
-
-def _short_phrase_pairs(rng: random.Random, n: int) -> list[tuple[str, str]]:
-    pairs = []
-    for _ in range(n):
-        base = " ".join(rng.choice(ASCII_WORDS) for _ in range(rng.randint(3, 6)))
-        pairs.append(_make_pair(rng, base, _ASCII_ALPHABET, rng.uniform(0.08, 0.18)))
-    return pairs
-
-
-def _multiword_sentence_pairs(rng: random.Random, n: int) -> list[tuple[str, str]]:
-    pairs = []
-    for _ in range(n):
-        base = rng.choice(PROSE)
-        pairs.append(_make_pair(rng, base, _ASCII_ALPHABET, rng.uniform(0.03, 0.10)))
-    return pairs
-
-
-def _cjk_pairs(rng: random.Random, n: int) -> list[tuple[str, str]]:
-    pairs = []
-    for _ in range(n):
-        base = "".join(rng.choice(CJK_WORDS) for _ in range(rng.randint(1, 3)))
-        pairs.append(_make_pair(rng, base, _CJK_ALPHABET, rng.uniform(0.10, 0.25)))
-    return pairs
-
-
-def _emoji_pairs(rng: random.Random, n: int) -> list[tuple[str, str]]:
-    pairs = []
-    for _ in range(n):
-        base = "".join(rng.choice(EMOJI_WORDS) for _ in range(rng.randint(1, 2)))
-        pairs.append(_make_pair(rng, base, _EMOJI_ALPHABET, rng.uniform(0.10, 0.25)))
-    return pairs
-
-
-def _mixed_kind_pairs(rng: random.Random, n: int) -> list[tuple[str, str]]:
-    pools = (ASCII_WORDS, LATIN1_WORDS, CJK_WORDS, EMOJI_WORDS)
-    pairs = []
-    for _ in range(n):
-        a_pool, b_pool = rng.sample(pools, 2)
-        pairs.append((rng.choice(a_pool), rng.choice(b_pool)))
-    return pairs
-
-
-def _long_pairs(rng: random.Random, n: int) -> list[tuple[str, str]]:
-    pairs = []
-    for _ in range(n):
-        base = " ".join(rng.choice(PROSE) for _ in range(rng.randint(2, 4)))
-        pairs.append(_make_pair(rng, base, _ASCII_ALPHABET, rng.uniform(0.02, 0.08)))
-    return pairs
+    """
+    out: list[str] = []
+    total = 0
+    while total < target:
+        word = rng.choice(pool)
+        out.append(word)
+        total += len(word)
+    return "".join(out)[:target]
 
 
 def _identical_pairs(rng: random.Random, pool: list[tuple[str, str]], n: int) -> list[tuple[str, str]]:
@@ -465,44 +413,40 @@ def _identical_pairs(rng: random.Random, pool: list[tuple[str, str]], n: int) ->
 
 def generate_pairs(seed: int = SEED, total: int = 10_000) -> list[tuple[str, str]]:
     """
-    Return a realistic, reproducible corpus of `(s1, s2)` pairs.
+    Return a kind-balanced, length-stratified corpus of `(s1, s2)` pairs.
 
-    Proportions approximate real fuzzy-matching traffic: dominated by short
-    ASCII words/phrases, with a small tail into Latin-1, CJK, emoji,
-    mixed-kind, multi-word, and very-long-string territory. `seed` and
-    `total` are exposed for testing; production callers should use the
-    defaults so the resulting profile is reproducible.
+    The four CPython string kinds get an even share rather than the
+    ASCII-dominated mix that real fuzzy-matching traffic shows. PGO consumes
+    branch and call counts, not semantics: under-representing a kind leaves
+    its kernels cold, and profile-driven layout then makes them measurably
+    *slower* than an unprofiled build. `seed` and `total` are exposed for
+    testing; production callers should use the defaults so the resulting
+    profile is reproducible.
 
     Returns:
         A list of `(s1, s2)` string pairs.
 
     """
     rng = random.Random(seed)
-
-    counts = {
-        "ascii": round(total * 0.78),
-        "latin1": round(total * 0.10),
-        "phrase": round(total * 0.05),
-        "sentence": round(total * 0.04),
-        "cjk": round(total * 0.015),
-        "emoji": round(total * 0.01),
-        "mixed": round(total * 0.005),
-        "long": round(total * 0.003),
-    }
-
     pairs: list[tuple[str, str]] = []
-    pairs += _ascii_short_pairs(rng, counts["ascii"])
-    pairs += _latin1_pairs(rng, counts["latin1"])
-    pairs += _short_phrase_pairs(rng, counts["phrase"])
-    pairs += _multiword_sentence_pairs(rng, counts["sentence"])
-    pairs += _cjk_pairs(rng, counts["cjk"])
-    pairs += _emoji_pairs(rng, counts["emoji"])
-    pairs += _mixed_kind_pairs(rng, counts["mixed"])
-    pairs += _long_pairs(rng, counts["long"])
 
-    # Identity short-circuit: ~2.5% of the corpus, sampled from what's built
-    # so far so it inherits the same kind/length distribution.
-    pairs += _identical_pairs(rng, pairs, round(len(pairs) * 0.025))
+    per_kind = round(total * (1.0 - _MIXED_SHARE) / len(_POOLS))
+    for pool, alphabet in _POOLS.values():
+        for lengths, share in _STRATA:
+            for _ in range(round(per_kind * share)):
+                base = _build(rng, pool, rng.choice(lengths))
+                pairs.append((base, _inject_typos(rng, base, alphabet, rng.uniform(0.05, 0.20))))
+
+    kinds = list(_POOLS)
+    strata_weights = [share for _lengths, share in _STRATA]
+    for _ in range(round(total * _MIXED_SHARE)):
+        a, b = rng.sample(kinds, 2)
+        lengths, _share = rng.choices(_STRATA, weights=strata_weights)[0]
+        target = rng.choice(lengths)
+        pairs.append((_build(rng, _POOLS[a][0], target), _build(rng, _POOLS[b][0], target)))
+
+    # Sampled from what's built so far, so it inherits the kind/length mix.
+    pairs += _identical_pairs(rng, pairs, round(len(pairs) * _IDENTICAL_SHARE))
 
     rng.shuffle(pairs)
     return pairs

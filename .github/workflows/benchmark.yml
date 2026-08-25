@@ -47,13 +47,42 @@ jobs:
         run: pip install --force-reinstall --no-deps dist-pgo-instrumented/*.whl
 
       - name: Train PGO profile
-        run: python scripts/pgo_train.py
+        # LLVM_PROFILE_FILE routes the training profile into its own
+        # subdirectory. Everything written directly into pgo-data/ came from
+        # build scripts and proc macros (syn, quote, pyo3-macros) executing
+        # during the compile above -- ~1.9 MB of compiler-run counters that
+        # would otherwise be merged in alongside ~100 KB of actual signal.
+        # pgo_train.py aborts if the installed extension isn't instrumented.
+        run: |
+          mkdir -p "${{ github.workspace }}/pgo-data/train"
+          LLVM_PROFILE_FILE="${{ github.workspace }}/pgo-data/train/lev-%p.profraw" python scripts/pgo_train.py
 
       - name: Merge PGO profile
         run: |
           host="$(rustc -vV | sed -n 's/^host: //p')"
           llvm_profdata="$(rustc --print sysroot)/lib/rustlib/${host}/bin/llvm-profdata"
-          "$llvm_profdata" merge -o "${{ github.workspace }}/merged.profdata" "${{ github.workspace }}"/pgo-data/*.profraw
+          shopt -s nullglob
+          profraw=("${{ github.workspace }}"/pgo-data/train/*.profraw)
+          if [ ${#profraw[@]} -eq 0 ]; then
+            echo "::error::Training run produced no .profraw files; the profile would be empty."
+            exit 1
+          fi
+          "$llvm_profdata" merge -o "${{ github.workspace }}/merged.profdata" "${profraw[@]}"
+
+      - name: Verify PGO profile covers the lev kernel
+        # Without this, a training run that collected zero samples still
+        # produces a valid-but-useless .profdata, -Cprofile-use still
+        # succeeds, and the "PGO" wheel below is silently just a release
+        # build. Fail loudly instead.
+        run: |
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          llvm_profdata="$(rustc --print sysroot)/lib/rustlib/${host}/bin/llvm-profdata"
+          count="$("$llvm_profdata" show --all-functions "${{ github.workspace }}/merged.profdata" | grep -c '_ZN3lev' || true)"
+          echo "lev symbols in merged profile: ${count}"
+          if [ "$count" -eq 0 ]; then
+            echo "::error::Merged profile contains no lev symbols; training collected nothing."
+            exit 1
+          fi
 
       - name: Build optimized (PGO) wheel and install
         run: |

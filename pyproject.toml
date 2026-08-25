@@ -31,7 +31,9 @@ dependencies = []
 [project.optional-dependencies]
 dev = [
   "commitizen",
-  "maturin",
+  # Keep in sync with `build-system.requires` so the CLI used for local
+  # `maturin develop` / PGO builds matches the backend that builds wheels.
+  "maturin>=1.14.1,<2.0",
   "prek",
   "pytest-codspeed",
   "pytest-cov",
