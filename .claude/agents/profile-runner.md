@@ -10,7 +10,7 @@ For each encoding kind in {ascii, latin1, cjk, emoji}:
 
 1. Profile the Python-level benchmark for that kind under samply:
      samply record -o profile-<kind>.json -- \
-       uv run python scripts/benchmark.py --kind <kind> --save /tmp/bench-<kind>.json
+       uv run scripts/benchmark.py --kind <kind> --save /tmp/bench-<kind>.json
    If samply is not installed, report and stop — do not try to install it.
 
 2. Profile the Rust-level criterion benches under cargo flamegraph, one

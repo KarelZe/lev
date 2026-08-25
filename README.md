@@ -37,7 +37,7 @@ For more details on the API see the [API Reference](https://karelze.github.io/le
 [edlib](https://github.com/Martinsos/edlib). We excluded slower implementations like
 [pylev](https://github.com/toastdriven/pylev/tree/main) and [python-Levenshtein](https://github.com/ztane/python-Levenshtein).
 
-> Benchmarks were run on an Apple Mac Mini M2 Pro (macOS 26.2) using Python 3.13. Each string pair is exactly 100 characters long. Results represent the total wall time for 1,000 repetitions using Python's `timeit`. To reproduce, run [`uv run python scripts/benchmark.py`](https://github.com/KarelZe/lev/blob/main/scripts/benchmark.py).
+> Benchmarks were run on an Apple Mac Mini M2 Pro (macOS 26.2) using Python 3.13. The ASCII, Latin-1, CJK, and Emoji pairs are exactly 100 characters long; the realistic-text pair is natural-length prose. Results represent the total wall time for 1,000 repetitions using Python's `timeit`. To reproduce, run [`uv run scripts/benchmark.py`](https://github.com/KarelZe/lev/blob/main/scripts/benchmark.py).
 
 ### ASCII
 
@@ -60,6 +60,12 @@ For more details on the API see the [API Reference](https://karelze.github.io/le
 #### Emoji
 
 ![Emoji benchmark – dark](https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_emoji_dark.svg)
+
+### Realistic Text
+
+This pair is a short customer support message with a handful of natural typos.
+
+![Realistic text benchmark – dark](https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_realistic_dark.svg)
 
 ## Contact
 

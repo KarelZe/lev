@@ -1,3 +1,18 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "lev-rs",
+#   "matplotlib>=3.10.9",
+#   "matplotx>=0.3.10",
+#   "numpy>=2.2.6",
+#   "polyleven>=0.11.0",
+#   "rapidfuzz>=3.14.5",
+# ]
+#
+# [tool.uv.sources]
+# lev-rs = { path = "..", editable = true }
+# ///
 """
 Benchmark lev vs rapidfuzz and polyleven across string lengths for each CPython encoding kind.
 
