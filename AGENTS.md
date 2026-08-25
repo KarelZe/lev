@@ -9,7 +9,7 @@ prefer Rust-side optimizations over Python wrappers.
 ## Environment Setup
 - Python >= 3.10
 - Install: `uv sync --all-extras`
-- After editing Rust, rebuild the extension: `bash scripts/install_dev.sh`
+- After editing Rust, rebuild the extension: `uv run maturin develop --release`
 
 ## Performance workflow
 
@@ -44,7 +44,7 @@ neither needs `--profile-time`.
 ## Testing
 - Python: `pytest tests/`
 - Rust: `cargo test`
-- Rust changes require a rebuild before pytest will pick them up. You can trigger a rebuild with `bash scripts/install_dev.sh`.
+- Rust changes require a rebuild before pytest will pick them up. You can trigger a rebuild with `uv run maturin develop --release`.
 
 ## Benchmarking
 - Install deps: `uv sync --extra benchmark`

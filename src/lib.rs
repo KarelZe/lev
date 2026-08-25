@@ -493,11 +493,10 @@ fn small_ub<T: CodeUnit>(short: &[T], long: &[T]) -> Option<usize> {
     let a = as_bytes(short);
     let b = &as_bytes(long)[..a.len()];
 
-    let mut chunks_a = a.chunks_exact(8);
-    let mut chunks_b = b.chunks_exact(8);
-    for (ca, cb) in chunks_a.by_ref().zip(chunks_b.by_ref()) {
-        let mut d =
-            u64::from_le_bytes(ca.try_into().unwrap()) ^ u64::from_le_bytes(cb.try_into().unwrap());
+    let (chunks_a, rem_a) = a.as_chunks::<8>();
+    let (chunks_b, _) = b.as_chunks::<8>();
+    for (ca, cb) in chunks_a.iter().zip(chunks_b.iter()) {
+        let mut d = u64::from_le_bytes(*ca) ^ u64::from_le_bytes(*cb);
         while d != 0 {
             ub += 1;
             if ub > MBLEVEN_MAX {
@@ -507,7 +506,7 @@ fn small_ub<T: CodeUnit>(short: &[T], long: &[T]) -> Option<usize> {
             d &= !(lane_mask << (lane * lane_bits));
         }
     }
-    for e in (a.len() - chunks_a.remainder().len()) / size..short.len() {
+    for e in (a.len() - rem_a.len()) / size..short.len() {
         if short[e].as_u64() != long[e].as_u64() {
             ub += 1;
             if ub > MBLEVEN_MAX {
