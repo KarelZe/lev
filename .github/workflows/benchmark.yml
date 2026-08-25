@@ -34,16 +34,14 @@ jobs:
       - name: Install maturin
         run: pip install maturin
 
-      - name: Disable strip for this ephemeral CI build
-        # strip=true (the shipped default) silently discards the LLVM profiling
-        # runtime's ability to flush .profraw when this cdylib is dlopen'd by
-        # CPython -- the instrumented step below would train on zero samples
-        # without this. Only ever applied to this job's throwaway checkout;
-        # never affects the published wheel (release.yml keeps strip=true).
-        run: sed -i 's/^strip = true$/strip = false/' pyproject.toml
-
       - name: Build instrumented (PGO training) wheel
-        run: RUSTFLAGS="-Cprofile-generate=${{ github.workspace }}/pgo-data" maturin build --release --out dist-pgo-instrumented
+        # --strip=false overrides pyproject.toml's strip=true for this build only:
+        # stripping silently discards the LLVM profiling runtime's ability to
+        # flush .profraw when this cdylib is dlopen'd by CPython, so the
+        # training step below would collect zero samples without it. The
+        # optimized build two steps down doesn't need to flush anything, so
+        # it keeps the real (stripped) default -- matching what release.yml ships.
+        run: RUSTFLAGS="-Cprofile-generate=${{ github.workspace }}/pgo-data" maturin build --release --strip=false --out dist-pgo-instrumented
 
       - name: Install instrumented wheel
         run: pip install --force-reinstall --no-deps dist-pgo-instrumented/*.whl
