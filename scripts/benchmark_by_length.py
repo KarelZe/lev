@@ -1,5 +1,5 @@
 """
-Benchmark lev vs rapidfuzz across string lengths for each CPython encoding kind.
+Benchmark lev vs rapidfuzz and polyleven across string lengths for each CPython encoding kind.
 
 Covers UCS-1 ASCII, UCS-1 Latin-1, UCS-2 CJK, and UCS-4 Emoji. Each subplot
 is a line-plot of median runtime (μs) vs. string length. Shaded bands show the
@@ -11,6 +11,7 @@ import timeit
 import matplotlib.pyplot as plt
 import matplotx
 import numpy as np
+import polyleven
 from rapidfuzz.distance import Levenshtein
 
 import lev as _lev
@@ -50,6 +51,7 @@ KINDS: dict[str, tuple[str, str]] = {
 LIBRARIES: dict[str, object] = {
     "lev [ours]": _lev.distance,
     "rapidfuzz": Levenshtein.distance,
+    "polyleven": polyleven.levenshtein,
 }
 
 # ---------------------------------------------------------------------------
