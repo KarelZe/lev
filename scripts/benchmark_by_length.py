@@ -21,7 +21,10 @@ is a line-plot of median runtime (μs) vs. string length. Shaded bands show the
 25th-75th percentile over N_REPEAT independent timeit runs.
 """
 
+import argparse
+import json
 import timeit
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import matplotx
@@ -128,6 +131,36 @@ def run_all() -> dict[str, dict[str, np.ndarray]]:
     return data
 
 
+def to_payload(data: dict[str, dict[str, np.ndarray]]) -> dict:
+    """
+    Reduce raw per-call timing arrays to median + 25th/75th percentile summaries.
+
+    Returns:
+        dict: JSON-serializable payload with a `meta` section (lengths,
+            repeat/number counts) and per-kind, per-library `median_us`,
+            `p25_us`, `p75_us` lists, one value per entry in `LENGTHS`.
+
+    """
+    results: dict[str, dict[str, dict[str, list[float]]]] = {}
+    for kind, per_lib in data.items():
+        results[kind] = {}
+        for lib, ys in per_lib.items():  # ys: (len(LENGTHS), N_REPEAT)
+            results[kind][lib] = {
+                "median_us": np.median(ys, axis=1).tolist(),
+                "p25_us": np.percentile(ys, 25, axis=1).tolist(),
+                "p75_us": np.percentile(ys, 75, axis=1).tolist(),
+            }
+    return {
+        "meta": {
+            "lengths": LENGTHS,
+            "n_repeat": N_REPEAT,
+            "n_number": N_NUMBER,
+            "kinds": list(data.keys()),
+        },
+        "results": results,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
@@ -184,8 +217,59 @@ def plot(
 # ---------------------------------------------------------------------------
 
 
-if __name__ == "__main__":
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """
+    Parse command-line arguments.
+
+    Returns:
+        Parsed namespace with `save`, `out`, and `plot`.
+
+    """
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument(
+        "--save",
+        type=Path,
+        default=None,
+        help="Write median/p25/p75 timings as JSON to this path (for A/B comparisons across builds).",
+    )
+    p.add_argument(
+        "--out",
+        type=str,
+        default="benchmark_by_length.png",
+        help="Output path for the PNG plot (default: benchmark_by_length.png).",
+    )
+    p.add_argument(
+        "--plot",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Render and save the PNG plot (default: True).",
+    )
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """
+    Run the benchmark, optionally save JSON, optionally plot.
+
+    Returns:
+        Process exit code (0 on success).
+
+    """
+    args = parse_args(argv)
     print(f"Benchmarking ({N_REPEAT} runs × {N_NUMBER:,} calls per data point) …")  # noqa: RUF001
     data = run_all()
-    print("Plotting …")
-    plot(data)
+
+    if args.save is not None:
+        payload = to_payload(data)
+        args.save.parent.mkdir(parents=True, exist_ok=True)
+        args.save.write_text(json.dumps(payload, indent=2))
+        print(f"wrote {args.save}")
+
+    if args.plot:
+        print("Plotting …")
+        plot(data, out=args.out)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
