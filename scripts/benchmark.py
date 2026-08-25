@@ -1,16 +1,33 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "lev-rs",
+#   "edlib",
+#   "editdistance>=0.8.1",
+#   "matplotlib>=3.10.9",
+#   "matplotx>=0.3.10",
+#   "polyleven>=0.11.0",
+#   "rapidfuzz>=3.14.5",
+# ]
+#
+# [tool.uv.sources]
+# lev-rs = { path = "..", editable = true }
+# ///
 """
 Benchmark lev against rapidfuzz, editdistance, edlib, and polyleven.
 
-Each pair is 100 characters long. Each measurement is the total wall time
-of `--repetitions` calls, measured with `timeit`.
+Each of the four CPython-string-kind pairs (ascii/latin1/cjk/emoji) is exactly
+100 characters long; the `realistic` pair is natural-length typo'd prose
+instead. Each measurement is the total wall time of `--repetitions` calls,
+measured with `timeit`.
 
 Examples:
     # default: all kinds, write JSON + light/dark SVGs to docs/assets/
-    uv run python scripts/benchmark.py
+    uv run scripts/benchmark.py
 
     # single kind, custom output, skip plotting (used by the performance workflow)
-    uv run python scripts/benchmark.py --kind ascii --save baselines/pre.json --no-plot
+    uv run scripts/benchmark.py --kind ascii --save baselines/pre.json --no-plot
 
 """
 
@@ -39,9 +56,10 @@ ASSETS_DIR = DEFAULT_OUTPUT.parent
 STRING_LEN = 100
 REPETITIONS_DEFAULT = 1_000
 
-# One representative pair per CPython string kind. Length is exactly
-# STRING_LEN code points in each case, and the pair differs by a handful
-# of edits so we exercise the DP rather than an early-exit path.
+# One representative pair per CPython string kind, plus a `realistic` pair of
+# natural-length typo'd prose. The four synthetic kinds are exactly STRING_LEN
+# code points each; every pair differs by a handful of edits so we exercise
+# the DP rather than an early-exit path.
 KINDS: dict[str, tuple[str, str]] = {
     # ASCII kind: max codepoint < 128
     "ascii": (
@@ -63,11 +81,37 @@ KINDS: dict[str, tuple[str, str]] = {
         ("😀🎉🚀✨🐍🦀📦🔥💡🌟" * 20)[:STRING_LEN],
         ("😀🎉🚀✨🐍🦀📦🔥💡⭐" * 20)[:STRING_LEN],
     ),
+    # Natural-length, real-world prose with a handful of realistic typos --
+    # the most common actual use case for Levenshtein distance (typo /
+    # near-duplicate detection). Deliberately not padded/truncated to
+    # STRING_LEN like the synthetic kinds above.
+    "realistic": (
+        "Customer support was fantastic today. The technician arrived on time, "
+        "diagnosed the issue within minutes, and had everything working again "
+        "before lunch. I would definitely recommend this service to a friend "
+        "or colleague.",
+        "Customer suport was fantastic today. The technician arived on time, "
+        "diagnosed the issue within mintues, and had everything working again "
+        "before lunch. I would definately recommend this service to a freind "
+        "or colleague.",
+    ),
 }
 
 # Human-readable title and filename slug per kind, for the SVG bar charts.
-KIND_LABELS: dict[str, str] = {"ascii": "ASCII", "latin1": "Latin-1", "cjk": "CJK", "emoji": "Emoji"}
-KIND_SLUGS: dict[str, str] = {"ascii": "ascii", "latin1": "latin_1", "cjk": "cjk", "emoji": "emoji"}
+KIND_LABELS: dict[str, str] = {
+    "ascii": "ASCII",
+    "latin1": "Latin-1",
+    "cjk": "CJK",
+    "emoji": "Emoji",
+    "realistic": "Realistic Text",
+}
+KIND_SLUGS: dict[str, str] = {
+    "ascii": "ascii",
+    "latin1": "latin_1",
+    "cjk": "cjk",
+    "emoji": "emoji",
+    "realistic": "realistic",
+}
 
 Contender = tuple[str, Callable[[str, str], int]]
 
@@ -106,7 +150,6 @@ def run(kinds: list[str], reps: int) -> dict:
     results: dict[str, dict[str, float]] = {}
     for kind in kinds:
         a, b = KINDS[kind]
-        assert len(a) == STRING_LEN and len(b) == STRING_LEN, f"{kind} pair not exactly {STRING_LEN} code points"
         per_lib: dict[str, float] = {}
         for name, fn in CONTENDERS:
             # sanity check: everyone should agree on the distance
@@ -121,7 +164,7 @@ def run(kinds: list[str], reps: int) -> dict:
         results[kind] = per_lib
     return {
         "meta": {
-            "string_len": STRING_LEN,
+            "string_len": {kind: len(KINDS[kind][0]) for kind in kinds},
             "repetitions": reps,
             "kinds": kinds,
         },
@@ -139,6 +182,7 @@ def plot_contenders(per_lib: dict[str, float], kind: str, reps: int) -> None:
     measures_ms = {name: secs * 1000 for name, secs in per_lib.items()}
     sorted_measures = dict(sorted(measures_ms.items(), key=lambda item: item[1], reverse=True))
     slug = KIND_SLUGS[kind]
+    str_len = len(KINDS[kind][0])
 
     def _render(theme: str) -> None:
         text_color = "white" if theme == "dark" else "black"
@@ -160,7 +204,7 @@ def plot_contenders(per_lib: dict[str, float], kind: str, reps: int) -> None:
             ax.grid(True, axis="x", ls="-")
             ax.grid(False, axis="y")
             ax.set_xlim(left=0, right=ax.get_xlim()[1] * 1.15)
-            ax.set_title(f"{KIND_LABELS[kind]} [{STRING_LEN} chars, n={reps}]")
+            ax.set_title(f"{KIND_LABELS[kind]} [{str_len} chars, n={reps}]")
             ax.set_xlabel("time [ms]")
             fig.savefig(ASSETS_DIR / f"benchmark_{slug}_{theme}.svg", bbox_inches="tight")
             plt.close(fig)

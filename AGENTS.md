@@ -18,9 +18,9 @@ measured on the same hardware, kept only if it wins.
 
 1. Pin a baseline before any change:
    - Python-level:
-     `uv run python scripts/benchmark.py --save baselines/<name>.json`
-     Add `--kind ascii` (or `latin1`, `cjk`, `emoji`) to baseline a single
-     CPython string kind instead of all four.
+     `uv run scripts/benchmark.py --save baselines/<name>.json`
+     Add `--kind ascii` (or `latin1`, `cjk`, `emoji`, `realistic`) to baseline a
+     single string kind instead of all five.
    - Rust-level (if criterion benches exist for the change surface):
      `cargo bench -- --save-baseline <name>`
 2. State a single, testable hypothesis before editing (e.g. "prefix/suffix
@@ -47,9 +47,8 @@ neither needs `--profile-time`.
 - Rust changes require a rebuild before pytest will pick them up. You can trigger a rebuild with `uv run maturin develop --release`.
 
 ## Benchmarking
-- Install deps: `uv sync --extra benchmark`
-- Compare against other libraries: `uv run python scripts/benchmark.py`
-- Compare across string lengths: `uv run python scripts/benchmark_by_length.py`
+- Compare against other libraries: `uv run scripts/benchmark.py`
+- Compare across string lengths: `uv run scripts/benchmark_by_length.py`
 - For performance-critical changes, run `benchmark.py` before and after,
   then diff `benchmark_results.json`.
 

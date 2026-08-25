@@ -18,6 +18,7 @@
         "pytest",
         "rapidfuzz",
         "résumé",
+        "standalone",
         "woulda",
         "xticklabels",
         "xticks",
