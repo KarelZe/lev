@@ -8,7 +8,7 @@ prefer Rust-side optimizations over Python wrappers.
 
 ## Environment Setup
 - Python >= 3.10
-- Install: `uv sync --all-extras`
+- Install: `uv sync`
 - After editing Rust, rebuild the extension: `uv run maturin develop --release`
 
 ## Performance workflow
@@ -53,7 +53,7 @@ neither needs `--profile-time`.
   then diff `benchmark_results.json`.
 
 ## Documentation
-- Serve locally: `uv run --extra docs zensical serve`, then access http://localhost:8000
+- Serve locally: `uv run zensical serve`, then access http://localhost:8000
 
 ## Code Style
 - Python: `ruff format .` and `ruff check . --fix`
