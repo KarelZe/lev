@@ -7,7 +7,8 @@ name = "lev-rs"
 authors = [{ name = "Markus Bilz", email = "github@markusbilz.com" }]
 description = "An extremely fast Python library for the Levenshtein distance and similarity ratio, written in Rust 🦀."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 version = "0.2.4"
 requires-python = ">=3.10"
 keywords = ["distance", "levenshtein", "strings"]
@@ -28,44 +29,26 @@ classifiers = [
 
 dependencies = []
 
-[project.optional-dependencies]
-dev = [
-  "commitizen",
-  "maturin",
-  "prek",
-  "pytest-codspeed",
-  "pytest-cov",
-  "pytest",
-  "ruff",
-]
-docs = ["zensical", "mkdocstrings[python]"]
-
 [project.urls]
 "Homepage" = "https://github.com/KarelZe/lev"
 "Bug Tracker" = "https://github.com/KarelZe/lev/issues"
 
-[tool.pytest.ini_options]
-minversion = 8.0
-addopts = "-ra -p no:warnings -v --cov --cov-report term-missing --doctest-modules"
-pythonpath = ["src"]
-testpaths = ["tests"]
-
-[tool.coverage.run]
-omit = ["debug_*.py", "tests/*"]
-branch = true
-
-[tool.coverage.report]
-exclude_also = [
-  "def __repr__",
-  "if self\\.debug",
-  "raise AssertionError",
-  "raise NotImplementedError",
-  "if 0:",
-  "if __name__ == .__main__.:",
-  "@(abc\\.)?abstractmethod",
-  "if self.verbose:",
+[dependency-groups]
+test = ["pytest", "pytest-codspeed>=5.0.1"]
+docs = ["zensical", "mkdocstrings[python]"]
+dev = [
+  { include-group = "test" },
+  { include-group = "docs" },
+  "commitizen",
+  "maturin>=1.14.1,<2.0",
+  "prek>=0.3.11",
+  "ruff",
 ]
-show_missing = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra -p no:warnings -v --doctest-modules"
+testpaths = ["tests"]
 
 [tool.commitizen]
 name = "cz_conventional_commits"
@@ -117,12 +100,6 @@ ignore = ["D203", "D212", "E501"]
 
 preview = true
 
-[tool.ruff.format]
-preview = true
-
-[dependency-groups]
-dev = ["prek>=0.3.11"]
-
 [tool.ruff.lint.isort]
 known-first-party = ["lev"]
 section-order = [
@@ -132,3 +109,6 @@ section-order = [
   "first-party",
   "local-folder",
 ]
+
+[tool.ruff.format]
+preview = true
