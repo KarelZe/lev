@@ -1,3 +1,7 @@
+## 0.2.5 (2026-09-03)
+
+- build: move dev and docs to project dependencies🔧 (#160)
+
 ## 0.2.4 (2026-08-25)
 
 ### Perf
