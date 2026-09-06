@@ -293,12 +293,17 @@ def test_distance_long(s1: str, s2: str, expected: int) -> None:
     [
         ("", "", 1.0),
         ("abc", "abc", 1.0),
-        ("abc", "xyz", 1.0 - 3.0 / 6.0),
-        ("kitten", "sitting", 1.0 - 3.0 / 13.0),
-        ("a", "b", 1.0 - 1.0 / 2.0),
+        # No common subsequence at all: the ratio bottoms out at exactly 0.0.
+        ("abc", "xyz", 0.0),
+        ("a", "b", 0.0),
+        # LCS "ittn" (4) => indel distance 6 + 7 - 8 = 5.
+        ("kitten", "sitting", 1.0 - 5.0 / 13.0),
         # Long strings.
         ("abc" * 40, "x" + "abc" * 40, 1.0 - 1.0 / 241.0),
         ("a" * 64, "a" * 65, 1.0 - 1.0 / 129.0),
+        # A substitution costs 2 under the indel metric, an indel costs 1.
+        ("abcdef", "abcXef", 1.0 - 2.0 / 12.0),
+        ("abcdef", "abcef", 1.0 - 1.0 / 11.0),
     ],
 )
 def test_ratio(s1: str, s2: str, expected: float) -> None:
@@ -312,12 +317,37 @@ def test_ratio(s1: str, s2: str, expected: float) -> None:
 
     """
     assert math.isclose(lev.ratio(s1, s2), expected, abs_tol=1e-12)
+    assert math.isclose(lev.ratio(s2, s1), expected, abs_tol=1e-12)  # symmetric
 
 
 def test_ratio_unicode_uses_code_points() -> None:
     """Test ratio implementation with unicode strings."""
-    # 6 + 6 code points; distance 2 => 1 - 2/12.
-    assert math.isclose(lev.ratio("résumé", "resume"), 1.0 - 2.0 / 12.0, abs_tol=1e-12)
+    # 6 + 6 code points; two substitutions => indel distance 4 => 1 - 4/12.
+    assert math.isclose(lev.ratio("résumé", "resume"), 1.0 - 4.0 / 12.0, abs_tol=1e-12)
+
+
+@pytest.mark.parametrize(
+    ("s1", "s2"),
+    [
+        ("kitten", "sitting"),
+        ("日本語のテスト", "日本語のテスト文字列"),
+        ("😀🎉🚀✨🐍", "😀🎉🚀✨🦀"),
+        ("café résumé", "cafe resume"),
+        ("a" * 100, "b" * 100),
+        ("abcdefghij" * 60, "abcdefghij" * 30 + "x" + "abcdefghij" * 30),
+    ],
+)
+def test_ratio_matches_indel_definition(s1: str, s2: str) -> None:
+    """
+    Test lev.ratio against the indel distance derived from a reference LCS.
+
+    Args:
+        s1 (str): First input string.
+        s2 (str): Second input string.
+
+    """
+    expected = 1.0 - naive_indel(s1, s2) / (len(s1) + len(s2))
+    assert math.isclose(lev.ratio(s1, s2), expected, abs_tol=1e-12)
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +363,23 @@ ALPHABETS = {
     "ucs4": "\U0001f600\U0001f601\U0001f602\U0001f603",
     "mixed": "abぁ\U0001f600",
 }
+
+
+def naive_indel(a: str, b: str) -> int:
+    """
+    Compute the indel distance (insertions and deletions only) with a DP.
+
+    Returns:
+        int: indel distance between a and b, i.e. len(a) + len(b) - 2 * LCS.
+
+    """
+    m, n = len(a), len(b)
+    dp = list(range(n + 1))
+    for i in range(1, m + 1):
+        prev, dp[0] = dp[0], i
+        for j in range(1, n + 1):
+            prev, dp[j] = dp[j], prev if a[i - 1] == b[j - 1] else min(dp[j], dp[j - 1]) + 1
+    return dp[n]
 
 
 def naive(a: str, b: str) -> int:
@@ -361,6 +408,32 @@ def test_small_strings_match_oracle(kind: str) -> None:
         a = "".join(rng.choice(alpha) for _ in range(rng.randrange(0, 14)))
         b = "".join(rng.choice(alpha) for _ in range(rng.randrange(0, 14)))
         assert lev.distance(a, b) == naive(a, b), (a, b)
+
+
+@pytest.mark.parametrize("kind", list(ALPHABETS))
+def test_ratio_small_strings_match_oracle(kind: str) -> None:
+    """Random small strings (length 0-13) across all string kinds."""
+    rng = random.Random(43)
+    alpha = ALPHABETS[kind]
+    for _ in range(1000):
+        a = "".join(rng.choice(alpha) for _ in range(rng.randrange(0, 14)))
+        b = "".join(rng.choice(alpha) for _ in range(rng.randrange(0, 14)))
+        total = len(a) + len(b)
+        expected = 1.0 if total == 0 else 1.0 - naive_indel(a, b) / total
+        assert math.isclose(lev.ratio(a, b), expected, abs_tol=1e-12), (a, b)
+
+
+@pytest.mark.parametrize("n", [63, 64, 65, 128, 300, 513, 700])
+def test_ratio_long_strings_match_oracle(n: int) -> None:
+    """Random long strings crossing the word, multi-word, and heap boundaries."""
+    alpha = "abcdefgh"
+    for edits in (1, 5, n // 4):
+        a = _rand_str(alpha, n, seed=n + edits)
+        b = _mutate(a, alpha, edits, seed=n * 7 + edits)
+        expected = 1.0 - naive_indel(a, b) / (len(a) + len(b))
+        assert math.isclose(lev.ratio(a, b), expected, abs_tol=1e-12), (n, edits)
+    # Disjoint alphabets: nothing in common, so the ratio bottoms out at 0.0.
+    assert math.isclose(lev.ratio("x" * n, "y" * n), 0.0, abs_tol=1e-12)
 
 
 def test_long_strings_with_affixes_match_oracle() -> None:
