@@ -67,6 +67,23 @@ neither needs `--profile-time`.
   - `feat: … ✨`  `fix: … 🐛`  `perf: … ⚡`
   - `docs: … 📝`  `test: … ✅`  `style: … 💄`  `build: … 🔧`
 
+## Releasing
+Tags are created by CI on the merged bump commit, never locally. `cz bump`
+insists on tagging and offers no way to turn that off, so `post_bump_hooks` in
+`pyproject.toml` deletes its tag immediately — that tag points at the pre-squash
+branch commit, which is unreachable from `main` once the PR is squash-merged,
+and GitHub would then generate the release notes from the wrong point in
+history.
+
+1. On a release branch: `uv run cz bump --changelog`
+2. Push the branch and open the PR
+3. Squash-merge it. `release.yml` triggers on the `version` file changing on
+   `main`, builds the wheels, publishes to PyPI, and creates the tag and the
+   GitHub release on that commit.
+
+Re-run a release with the `force` input on `release.yml` (workflow dispatch);
+without it the run stops early when the tag already exists.
+
 ## Project Structure
 - `src/` — Rust crate (core library + PyO3 bindings)
 - `lev.pyi` — Python type stubs

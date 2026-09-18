@@ -57,7 +57,16 @@ tag_format = "$version"
 version_files = ["Cargo.toml:version", "pyproject.toml:version", "version"]
 bump_message = "chore: bump version $current_version → $new_version 👒"
 update_changelog_on_bump = true
-annotated_tag = false
+# A lightweight tag fails outright under `tag.gpgsign = true`: git signs it, and
+# a signed tag needs a message, so `git tag <version>` aborts with "no tag
+# message?" and takes the whole bump with it. Annotated tags get `-m`.
+annotated_tag = true
+# `cz bump` always tags and offers no way to turn that off. Its tag would point
+# at the pre-squash branch commit, which is unreachable from main once the PR is
+# squash-merged, so GitHub would generate the release notes from the wrong point
+# in history. `release.yml` creates the real tag on the merged commit instead;
+# this drops the local one so it can never be pushed by accident.
+post_bump_hooks = ["git tag --delete $CZ_POST_CURRENT_TAG_VERSION"]
 
 [tool.maturin]
 # bindings = "bin"
