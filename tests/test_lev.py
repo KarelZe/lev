@@ -399,3 +399,75 @@ def test_banded_long_strings_match_oracle(n: int, edits: int) -> None:
     b = "x" + b[:-1]
     assert lev.distance(a, b) == naive(a, b)
     assert lev.distance(b, a) == naive(a, b)  # symmetric
+
+
+# ---------------------------------------------------------------------------
+# Very different lengths
+# ---------------------------------------------------------------------------
+
+# Short lengths hit every kernel regime (empty, tiny <= 8, single word,
+# multi-word, heap-backed > 512); long lengths are several times longer.
+_DISPARATE_LENGTHS = [
+    (0, 50),
+    (1, 200),
+    (5, 300),
+    (8, 120),
+    (9, 400),
+    (40, 800),
+    (64, 1300),
+    (65, 650),
+    (130, 1500),
+    (520, 1600),
+]
+
+
+def _embed(short: str, long_len: int, alpha: str, where: str, seed: int) -> str:
+    """
+    Pad `short` with random characters to `long_len`, placing it at `where`.
+
+    Returns:
+        str: the padded string, with `short` as a contiguous substring.
+
+    """
+    rng = random.Random(seed)
+    pad = "".join(rng.choice(alpha) for _ in range(long_len - len(short)))
+    cut = {"start": 0, "middle": len(pad) // 2, "end": len(pad)}[where]
+    return pad[:cut] + short + pad[cut:]
+
+
+@pytest.mark.parametrize(("m", "n"), _DISPARATE_LENGTHS)
+@pytest.mark.parametrize("where", ["start", "middle", "end"])
+def test_substring_of_much_longer_string(m: int, n: int, where: str) -> None:
+    """
+    A string inside a much longer one: exactly `n - m` deletions apart.
+
+    The ratio is then `2m / (m + n)`, whether it is normalized by the
+    Levenshtein or by the indel distance.
+
+    """
+    alpha = "abcdefgh"
+    short = _rand_str(alpha, m, seed=m)
+    long = _embed(short, n, alpha, where, seed=m + n)
+    assert lev.distance(short, long) == n - m
+    assert lev.distance(long, short) == n - m
+    expected = 1.0 if m + n == 0 else 2 * m / (m + n)
+    assert math.isclose(lev.ratio(short, long), expected, abs_tol=1e-12)
+    assert math.isclose(lev.ratio(long, short), expected, abs_tol=1e-12)
+
+
+@pytest.mark.parametrize(("m", "n"), _DISPARATE_LENGTHS)
+@pytest.mark.parametrize("kind", list(ALPHABETS))
+def test_very_different_lengths_match_oracle(m: int, n: int, kind: str) -> None:
+    """Distance of unrelated strings and of a mutated copy inside padding."""
+    if m * n > 250_000 and kind != "ascii":
+        pytest.skip("the pure-Python oracle is O(m * n); ascii covers these sizes")
+    alpha = ALPHABETS[kind]
+    short = _rand_str(alpha, m, seed=m + 1)
+    pairs = [
+        (short, _rand_str(alpha, n, seed=n + 2)),
+        (short, _embed(_mutate(short, alpha, max(1, m // 10), seed=m) if m else "", n, alpha, "middle", seed=n)),
+    ]
+    for a, b in pairs:
+        d = naive(a, b)
+        assert lev.distance(a, b) == d, (kind, m, n)
+        assert lev.distance(b, a) == d, (kind, m, n)
