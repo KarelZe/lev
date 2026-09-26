@@ -283,9 +283,12 @@ fn ratio(_py: Python<'_>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) ->
     }
 }
 
-/// A Python module implemented in Rust for the Levenshtein distance.
+/// The compiled extension backing the `lev` package.
+///
+/// Private: the public API is re-exported from `lev/__init__.py`, so the name
+/// is underscore-prefixed to keep it out of the package namespace.
 #[pymodule]
-fn lev(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _lev(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(distance, m)?)?;
     m.add_function(wrap_pyfunction!(ratio, m)?)?;
     Ok(())

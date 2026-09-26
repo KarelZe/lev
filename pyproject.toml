@@ -51,8 +51,8 @@ testpaths = ["tests"]
 
 [tool.maturin]
 # bindings = "bin"
-module-name = "lev"
-# python-source = "python"
+module-name = "lev._lev"
+python-source = "python"
 strip = true
 
 [tool.uv]
