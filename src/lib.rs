@@ -1784,4 +1784,53 @@ mod tests {
         assert!((r("kitten", "sitting") - (1.0 - 3.0 / 13.0)).abs() < 1e-12);
         assert!((r("abc", "xyz") - 0.5).abs() < 1e-12);
     }
+
+    /// Pairs whose lengths differ several-fold, in every length regime of the
+    /// shorter string: embedded unchanged (exactly `n - m` apart), unrelated,
+    /// and mutated inside random padding; ASCII and astral alphabets.
+    #[test]
+    fn very_different_lengths_match_oracle() {
+        let mut state = 0xD1FF_E4E7_0000_0001_u64;
+        let astral = |s: &str| -> String {
+            s.chars()
+                .map(|c| char::from_u32(0x1_0000 + c as u32).unwrap())
+                .collect()
+        };
+        for alpha in [&b"ab"[..], &b"abcdefghij"[..]] {
+            for &(m, n) in &[
+                (0usize, 40usize),
+                (1, 200),
+                (7, 300),
+                (9, 150),
+                (40, 900),
+                (64, 700),
+                (65, 1000),
+                (200, 1300),
+                (530, 1700),
+            ] {
+                let short = rand_string(&mut state, m, alpha);
+                let pad = rand_string(&mut state, n - m, alpha);
+                for cut in [0, pad.len() / 3, pad.len()] {
+                    let long = format!("{}{short}{}", &pad[..cut], &pad[cut..]);
+                    assert_eq!(levenshtein(&short, &long), n - m, "embedded m={m} n={n}");
+                }
+                let edited = if m > 0 {
+                    mutate(&mut state, &short, m / 10 + 1, alpha)
+                } else {
+                    String::new()
+                };
+                let unrelated = rand_string(&mut state, n, alpha);
+                let padded = format!("{}{edited}{}", &pad[..pad.len() / 2], &pad[pad.len() / 2..]);
+                for long in [unrelated, padded] {
+                    let (sc, lc): (Vec<char>, Vec<char>) =
+                        (short.chars().collect(), long.chars().collect());
+                    let d = naive(&sc, &lc);
+                    assert_eq!(levenshtein(&short, &long), d, "m={m} n={n}");
+                    assert_eq!(levenshtein(&long, &short), d, "m={m} n={n} swapped");
+                    let (sa, la) = (astral(&short), astral(&long));
+                    assert_eq!(levenshtein(&sa, &la), d, "astral m={m} n={n}");
+                }
+            }
+        }
+    }
 }
