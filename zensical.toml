@@ -9,6 +9,12 @@ edit_uri = "edit/main/docs/"
 
 nav = [{ Home = "index.md" }, { "API Reference" = "api.md" }]
 
+# MathJax, for the formulas typeset via `pymdownx.arithmatex` below.
+extra_javascript = [
+  "javascripts/mathjax.js",
+  { path = "https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js", async = true },
+]
+
 [project.theme]
 variant = "modern"
 language = "en"
@@ -65,6 +71,9 @@ inherited_members = true
 
 [project.markdown_extensions.toc]
 permalink = true
+
+[project.markdown_extensions.pymdownx.arithmatex]
+generic = true
 
 [project.markdown_extensions.pymdownx.highlight]
 anchor_linenums = true

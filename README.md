@@ -23,7 +23,8 @@ lev.distance("kitten", "sitting")   # 3
 lev.distance("résumé", "resume")    # 2
 lev.distance("日本語", "日本")       # 1
 
-lev.ratio("kitten", "sitting")      # 0.769...
+lev.ratio("kitten", "sitting")      # 0.615...
+lev.ratio("abc", "xyz")             # 0.0
 lev.ratio("", "")                   # 1.0
 ```
 
