@@ -451,7 +451,7 @@ fn compute_u8<const ASCII: bool>(a: &[u8], b: &[u8]) -> usize {
             hyrro_64_u8::<256>(a, b)
         }
     } else {
-        hyrro_multiword_bytes(a, b)
+        hyrro_multiword_bytes(a, b, if ASCII { 128 } else { 256 })
     }
 }
 
@@ -830,8 +830,11 @@ fn multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(m: usize, pm_i
     score as usize
 }
 
-/// Multi-word Hyyrö for UCS-1 slices.
-fn hyrro_multiword_bytes(short: &[u8], long: &[u8]) -> usize {
+/// Multi-word Hyyrö for UCS-1 slices.  Every byte must be below `slots`
+/// (128 for pure ASCII, 256 otherwise), which sizes the heap-backed peq table
+/// of very long patterns: zeroing it dominates when the banded kernels
+/// resolve a similar pair quickly.
+fn hyrro_multiword_bytes(short: &[u8], long: &[u8], slots: usize) -> usize {
     debug_assert!(short.len() > 64);
     let m = short.len();
     let w = m.div_ceil(64);
@@ -866,7 +869,8 @@ fn hyrro_multiword_bytes(short: &[u8], long: &[u8]) -> usize {
         7 => run!(7),
         8 => run!(8),
         _ => {
-            let mut peq = vec![0u64; 256 * w];
+            debug_assert!(short.iter().chain(long).all(|&c| (c as usize) < slots));
+            let mut peq = vec![0u64; slots * w];
             for (i, &c) in short.iter().enumerate() {
                 peq[c as usize * w + i / 64] |= 1u64 << (i % 64);
             }
@@ -1400,13 +1404,13 @@ mod tests {
         let check_ascii = |a: &[u8], b: &[u8]| {
             let (s, l) = if a.len() <= b.len() { (a, b) } else { (b, a) };
             assert!(s.len() > 64 && s.iter().all(|&c| c < 128) && l.iter().all(|&c| c < 128));
-            assert_eq!(hyrro_multiword_bytes(s, l), oracle(s, l));
+            assert_eq!(hyrro_multiword_bytes(s, l, 256), oracle(s, l));
         };
         // Latin-1 bytes: any u8 value allowed.
         let check_latin1 = |a: &[u8], b: &[u8]| {
             let (s, l) = if a.len() <= b.len() { (a, b) } else { (b, a) };
             assert!(s.len() > 64);
-            assert_eq!(hyrro_multiword_bytes(s, l), oracle(s, l));
+            assert_eq!(hyrro_multiword_bytes(s, l, 256), oracle(s, l));
         };
 
         // Benchmark-like: two long ASCII strings that diverge after a shared prefix.
@@ -1417,7 +1421,7 @@ mod tests {
         } else {
             (&s2[..], &s1[..])
         };
-        assert_eq!(hyrro_multiword_bytes(sh, lo), oracle(sh, lo));
+        assert_eq!(hyrro_multiword_bytes(sh, lo, 256), oracle(sh, lo));
 
         // Fully disjoint long ASCII strings.
         check_ascii(&b"a".repeat(100), &b"b".repeat(100));
@@ -1757,7 +1761,7 @@ mod tests {
         let mut sink = 0usize;
         let t0 = Instant::now();
         for _ in 0..n {
-            sink += hyrro_multiword_bytes(short, long);
+            sink += hyrro_multiword_bytes(short, long, 256);
         }
         let us = t0.elapsed().as_secs_f64() * 1e6 / n as f64;
         #[cfg(debug_assertions)]
