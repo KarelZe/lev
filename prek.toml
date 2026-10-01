@@ -34,11 +34,6 @@ hooks = [
 ]
 
 [[repos]]
-repo = "https://github.com/commitizen-tools/commitizen"
-rev = "v4.13.10"
-hooks = [{ id = "commitizen", stages = ["commit-msg"] }]
-
-[[repos]]
 repo = "https://github.com/ComPWA/taplo-pre-commit"
 rev = "v0.9.3"
 hooks = [{ id = "taplo-format" }]
