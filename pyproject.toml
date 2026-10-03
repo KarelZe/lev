@@ -9,7 +9,7 @@ description = "An extremely fast Python library for the Levenshtein distance and
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-version = "0.2.5"
+dynamic = ["version"]
 requires-python = ">=3.10"
 keywords = ["distance", "levenshtein", "strings"]
 classifiers = [
@@ -39,7 +39,6 @@ docs = ["zensical", "mkdocstrings[python]"]
 dev = [
   { include-group = "test" },
   { include-group = "docs" },
-  "commitizen",
   "maturin>=1.14.1,<2.0",
   "prek>=0.3.11",
   "ruff",
@@ -49,15 +48,6 @@ dev = [
 minversion = "8.0"
 addopts = "-ra -p no:warnings -v --doctest-modules"
 testpaths = ["tests"]
-
-[tool.commitizen]
-name = "cz_conventional_commits"
-version = "0.2.5"
-tag_format = "$version"
-version_files = ["Cargo.toml:version", "pyproject.toml:version", "version"]
-bump_message = "chore: bump version $current_version → $new_version 👒"
-update_changelog_on_bump = true
-annotated_tag = false
 
 [tool.maturin]
 # bindings = "bin"

@@ -67,6 +67,15 @@ neither needs `--profile-time`.
   - `feat: … ✨`  `fix: … 🐛`  `perf: … ⚡`
   - `docs: … 📝`  `test: … ✅`  `style: … 💄`  `build: … 🔧`
 
+## Releasing
+- The version lives only in `Cargo.toml`; maturin passes it to the Python package.
+- PRs are squash-merged, so the PR title becomes the commit on `main` and must be
+  a conventional commit (checked by `.github/workflows/pr-title.yml`).
+- release-please keeps a release PR open that bumps `Cargo.toml` and `CHANGELOG.md`.
+  Merging it tags the release, creates the GitHub Release and publishes to PyPI.
+- Never bump versions or push tags by hand. To rebuild an existing release, run
+  the `release` workflow manually with its tag.
+
 ## Project Structure
 - `src/` — Rust crate (core library + PyO3 bindings)
 - `lev.pyi` — Python type stubs
