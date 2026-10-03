@@ -38,6 +38,7 @@
 //!    Hamming-based upper bound keep the overhead on dissimilar strings to a
 //!    few percent before falling back to the full matrix.
 
+use std::mem::MaybeUninit;
 use std::os::raw::c_uint;
 
 use pyo3::ffi;
@@ -49,28 +50,24 @@ use pyo3::types::PyString;
 // ---------------------------------------------------------------------------
 
 /// Implemented by every code-unit type that can be used in the hash-based peq
-/// table.  `SENTINEL` is used to initialize the keys array; occupancy is
-/// tracked separately via the values array (where 0 indicates an empty slot).
+/// table.  Occupancy is tracked via the values array (where 0 indicates an
+/// empty slot), so keys need no sentinel.
 trait CodeUnit: Ord + Copy + Eq + Send + 'static {
-    const SENTINEL: Self;
     fn as_u64(self) -> u64;
 }
 impl CodeUnit for u8 {
-    const SENTINEL: Self = u8::MAX;
     #[inline(always)]
     fn as_u64(self) -> u64 {
         self as u64
     }
 }
 impl CodeUnit for u16 {
-    const SENTINEL: Self = u16::MAX;
     #[inline(always)]
     fn as_u64(self) -> u64 {
         self as u64
     }
 }
 impl CodeUnit for u32 {
-    const SENTINEL: Self = u32::MAX;
     #[inline(always)]
     fn as_u64(self) -> u64 {
         self as u64
@@ -680,7 +677,9 @@ fn hyrro_64_generic<K: CodeUnit, I: Iterator<Item = u64>>(pattern: &[K], text_it
 
     const SLOTS: usize = 128;
     const MASK: usize = SLOTS - 1;
-    let mut keys = [K::SENTINEL; SLOTS];
+    // A slot's key is written before its value becomes non-zero and read only
+    // after, so `vals` alone marks occupancy and `keys` needs no fill.
+    let mut keys = [const { MaybeUninit::<K>::uninit() }; SLOTS];
     let mut vals = [0u64; SLOTS];
 
     let shift = 64 - MASK.count_ones();
@@ -688,11 +687,12 @@ fn hyrro_64_generic<K: CodeUnit, I: Iterator<Item = u64>>(pattern: &[K], text_it
         let mut slot = hslot(c.as_u64(), shift);
         loop {
             if vals[slot] == 0 {
-                keys[slot] = c;
+                keys[slot].write(c);
                 vals[slot] = 1u64 << i;
                 break;
             }
-            if keys[slot] == c {
+            // SAFETY: vals[slot] != 0, so keys[slot] was written.
+            if unsafe { keys[slot].assume_init() } == c {
                 vals[slot] |= 1u64 << i;
                 break;
             }
@@ -709,7 +709,8 @@ fn hyrro_64_generic<K: CodeUnit, I: Iterator<Item = u64>>(pattern: &[K], text_it
                 if v == 0 {
                     return 0;
                 }
-                if unsafe { keys.get_unchecked(slot).as_u64() } == c {
+                // SAFETY: v != 0, so keys[slot] was written.
+                if unsafe { keys.get_unchecked(slot).assume_init().as_u64() } == c {
                     return v;
                 }
                 slot = (slot + 1) & MASK;
@@ -831,17 +832,26 @@ fn multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(m: usize, pm_i
 }
 
 /// Multi-word Hyyrö for UCS-1 slices.  Every byte must be below `slots`
-/// (128 for pure ASCII, 256 otherwise), which sizes the heap-backed peq table
-/// of very long patterns: zeroing it dominates when the banded kernels
-/// resolve a similar pair quickly.
+/// (128 for pure ASCII, 256 otherwise), which sizes the peq table: zeroing it
+/// dominates short pairs and similar pairs the banded kernels resolve quickly.
 fn hyrro_multiword_bytes(short: &[u8], long: &[u8], slots: usize) -> usize {
     debug_assert!(short.len() > 64);
+    debug_assert!(slots == 128 || slots == 256);
+    debug_assert!(short.iter().chain(long).all(|&c| (c as usize) < slots));
     let m = short.len();
     let w = m.div_ceil(64);
 
     macro_rules! run {
         ($W:literal) => {{
-            let mut peq = [0u64; 256 * $W];
+            // Only rows below `slots` are ever indexed, so zero just those.
+            let mut buf = MaybeUninit::<[u64; 256 * $W]>::uninit();
+            // SAFETY: slots * $W <= 256 * $W, and the prefix is zeroed before
+            // the slice is formed.
+            let peq = unsafe {
+                let p = buf.as_mut_ptr().cast::<u64>();
+                std::ptr::write_bytes(p, 0, slots * $W);
+                std::slice::from_raw_parts_mut(p, slots * $W)
+            };
             for (i, &c) in short.iter().enumerate() {
                 unsafe {
                     *peq.get_unchecked_mut(c as usize * $W + i / 64) |= 1u64 << (i % 64);
@@ -869,7 +879,6 @@ fn hyrro_multiword_bytes(short: &[u8], long: &[u8], slots: usize) -> usize {
         7 => run!(7),
         8 => run!(8),
         _ => {
-            debug_assert!(short.iter().chain(long).all(|&c| (c as usize) < slots));
             let mut peq = vec![0u64; slots * w];
             for (i, &c) in short.iter().enumerate() {
                 peq[c as usize * w + i / 64] |= 1u64 << (i % 64);
@@ -1404,6 +1413,7 @@ mod tests {
         let check_ascii = |a: &[u8], b: &[u8]| {
             let (s, l) = if a.len() <= b.len() { (a, b) } else { (b, a) };
             assert!(s.len() > 64 && s.iter().all(|&c| c < 128) && l.iter().all(|&c| c < 128));
+            assert_eq!(hyrro_multiword_bytes(s, l, 128), oracle(s, l));
             assert_eq!(hyrro_multiword_bytes(s, l, 256), oracle(s, l));
         };
         // Latin-1 bytes: any u8 value allowed.
