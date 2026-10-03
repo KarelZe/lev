@@ -2,6 +2,8 @@
 Integration tests for the `lev` extension module.
 
 Run after building the extension with `maturin develop` (see README).
+Expected distances come from rapidfuzz, which serves as the reference
+implementation.
 """
 
 from __future__ import annotations
@@ -10,63 +12,78 @@ import math
 import random
 
 import pytest
+from rapidfuzz.distance import Levenshtein
 
 import lev
+
+
+@pytest.fixture
+def expected(s1: str, s2: str) -> int:
+    """
+    Return the rapidfuzz distance of the parametrized pair.
+
+    Fixtures run during test setup, which CodSpeed does not measure.
+
+    Returns:
+        int: Levenshtein distance between s1 and s2.
+
+    """
+    return Levenshtein.distance(s1, s2)
+
 
 # ---------------------------------------------------------------------------
 # distance
 # ---------------------------------------------------------------------------
 
+_DISTANCE_PAIRS = [
+    ("", ""),
+    ("abc", ""),
+    ("", "abc"),
+    ("hello", "hello"),
+    ("kitten", "sitting"),
+    ("saturday", "sunday"),
+    ("flaw", "lawn"),
+    ("gumbo", "gambol"),
+    ("intention", "execution"),
+    ("a", "b"),
+    ("aaaa", "bbbb"),
+    # Common-affix stripping must not change the result.
+    ("xxx_kitten_yyy", "xxx_sitting_yyy"),
+    # Unicode: counted in code points, not bytes.
+    ("résumé", "resume"),
+    ("café", "cafe"),
+    ("日本語", "日本"),
+    ("🦀🐍", "🐍🦀"),
+    # pylev (duplicates from above removed)
+    # https://github.com/toastdriven/pylev/blob/700700ec1b3f637ef1a59bb46f1b2176def2886d/tests.py#L7
+    ("meilenstein", "levenshtein"),
+    ("levenshtein", "frankenstein"),
+    ("confide", "deceit"),
+    ("CUNsperrICY", "conspiracy"),
+    # Long strings: > 64 chars exercises the multi-word kernels.
+    ("abc" * 40, "x" + "abc" * 40),
+    ("abc" * 40, "abc" * 40 + "xyz"),
+    # 64-char boundary: a pattern of exactly one full word.
+    ("a" * 64, "a" * 64),
+    ("a" * 64, "a" * 65),
+    ("a" * 64, "b" + "a" * 63),
+    # Mixed internal encodings (ASCII, Latin-1, UCS-2, UCS-4).
+    ("abc", "abc\xff"),  # ASCII vs Latin-1
+    ("abc", "abc\u0400"),  # ASCII vs UCS-2
+    ("abc", "abc\U0001f400"),  # ASCII vs UCS-4
+    ("abc\xff", "abc\u0400"),  # Latin-1 vs UCS-2
+    ("abc\u0400", "abc\U0001f400"),  # UCS-2 vs UCS-4
+    # Mixed types with common affixes.
+    ("prefix_abc", "prefix_abc\xff"),
+    ("abc_suffix", "abc\xff_suffix"),
+    # Mixed types with multi-word patterns.
+    ("a" * 70, ("a" * 70)[:-1] + "\xff"),
+    ("a" * 70, ("a" * 70)[:-1] + "\u0400"),
+]
+
 
 @pytest.mark.benchmark
-@pytest.mark.parametrize(
-    ("s1", "s2", "expected"),
-    [
-        ("", "", 0),
-        ("abc", "", 3),
-        ("", "abc", 3),
-        ("hello", "hello", 0),
-        ("kitten", "sitting", 3),
-        ("saturday", "sunday", 3),
-        ("flaw", "lawn", 2),
-        ("gumbo", "gambol", 2),
-        ("intention", "execution", 5),
-        ("a", "b", 1),
-        ("aaaa", "bbbb", 4),
-        # Common-affix stripping must not change the result.
-        ("xxx_kitten_yyy", "xxx_sitting_yyy", 3),
-        # Unicode: counted in code points, not bytes.
-        ("résumé", "resume", 2),
-        ("café", "cafe", 1),
-        ("日本語", "日本", 1),
-        ("🦀🐍", "🐍🦀", 2),
-        # pylev (duplicates from above removed)
-        # https://github.com/toastdriven/pylev/blob/700700ec1b3f637ef1a59bb46f1b2176def2886d/tests.py#L7
-        ("meilenstein", "levenshtein", 4),
-        ("levenshtein", "frankenstein", 6),
-        ("confide", "deceit", 6),
-        ("CUNsperrICY", "conspiracy", 8),
-        # Long strings: > 64 chars exercises the fallback algorithm.
-        ("abc" * 40, "x" + "abc" * 40, 1),
-        ("abc" * 40, "abc" * 40 + "xyz", 3),
-        # 64-char boundary: pattern length exactly 64 hits the `m == 64` branch.
-        ("a" * 64, "a" * 64, 0),
-        ("a" * 64, "a" * 65, 1),
-        ("a" * 64, "b" + "a" * 63, 1),
-        # Mixed internal encodings (ASCII, Latin-1, UCS-2, UCS-4).
-        ("abc", "abc\xff", 1),  # ASCII vs Latin-1
-        ("abc", "abc\u0400", 1),  # ASCII vs UCS-2
-        ("abc", "abc\U0001f400", 1),  # ASCII vs UCS-4
-        ("abc\xff", "abc\u0400", 1),  # Latin-1 vs UCS-2
-        ("abc\u0400", "abc\U0001f400", 1),  # UCS-2 vs UCS-4
-        # Mixed types with common affixes.
-        ("prefix_abc", "prefix_abc\xff", 1),
-        ("abc_suffix", "abc\xff_suffix", 1),
-        # Mixed types with multi-word patterns.
-        ("a" * 70, ("a" * 70)[:-1] + "\xff", 1),
-        ("a" * 70, ("a" * 70)[:-1] + "\u0400", 1),
-    ],
-)
+@pytest.mark.parametrize(("s1", "s2"), _DISTANCE_PAIRS)
 def test_distance(s1: str, s2: str, expected: int) -> None:
     """
     Test and benchmark lev.distance.
@@ -89,7 +106,7 @@ def test_distance(s1: str, s2: str, expected: int) -> None:
 # keep the mixed-kind kernels (single-word, multiword, small-distance, and
 # affix stripping) busy at realistic lengths. One side of each pair contains
 # a character of a wider kind, so the two strings use different CPython
-# internal representations. Expected distances verified against rapidfuzz.
+# internal representations.
 
 
 def _substitute(s: str, positions: list[int], ch: str) -> str:
@@ -114,59 +131,51 @@ _MIXED_KIND_CASES = [
     pytest.param(
         _ASCII_100,
         _substitute(_ASCII_100, [0, 33, 66, 99], "😀"),
-        4,
         id="ascii-vs-emoji-100",
     ),
     pytest.param(
         _ASCII_100,
         _substitute(_ASCII_100, [0, 33, 66, 99], "日"),
-        4,
         id="ascii-vs-cjk-100",
     ),
     pytest.param(
         _ASCII_100,
         _substitute(_ASCII_100, [0, 33, 66, 99], "ÿ"),
-        4,
         id="ascii-vs-latin1-100",
     ),
     pytest.param(
         _LATIN1_100,
         _substitute(_LATIN1_100, [0, 33, 66, 99], "😀"),
-        4,
         id="latin1-vs-emoji-100",
     ),
     pytest.param(
         _CJK_100,
         _substitute(_CJK_100, [0, 33, 66, 99], "😀"),
-        4,
         id="cjk-vs-emoji-100",
     ),
     # Single-word mixed kernel (pattern <= 64 chars).
     pytest.param(
         _ASCII_100[:48],
         _substitute(_ASCII_100[:48], [0, 47], "😀"),
-        2,
         id="ascii-vs-emoji-48",
     ),
     # Near-identical mixed pair (small-distance fast path).
     pytest.param(
         _ASCII_100,
         _substitute(_ASCII_100, [50], "😀"),
-        1,
         id="ascii-vs-emoji-d1",
     ),
     # Long shared affixes around a mixed-kind difference.
     pytest.param(
         "x" * 80 + "middle" + "y" * 80,
         "x" * 80 + "m😀ddle" + "y" * 80,
-        1,
         id="mixed-affix-heavy",
     ),
 ]
 
 
 @pytest.mark.benchmark
-@pytest.mark.parametrize(("s1", "s2", "expected"), _MIXED_KIND_CASES)
+@pytest.mark.parametrize(("s1", "s2"), _MIXED_KIND_CASES)
 def test_distance_mixed_kind(s1: str, s2: str, expected: int) -> None:
     """
     Test and benchmark lev.distance on pairs with different internal encodings.
@@ -223,51 +232,44 @@ def _mutate(s: str, alphabet: str, edits: int, seed: int) -> str:
 _ASCII = "abcdefghij"
 _UCS2 = "ぁあぃいぅうぇえぉお"
 
-# Expected distances verified against rapidfuzz. Similar pairs resolve inside
-# a narrow Ukkonen band; dissimilar pairs measure the banded passes' overhead
+# Similar pairs resolve inside a narrow Ukkonen band; dissimilar pairs measure the banded passes' overhead
 # on top of the full-matrix fallback; moderate sits in between.
 _LONG_CASES = [
     pytest.param(
         _rand_str(_ASCII, 2048, seed=1),
         _mutate(_rand_str(_ASCII, 2048, seed=1), _ASCII, edits=4, seed=2),
-        4,
         id="ascii-2048-similar",
     ),
     pytest.param(
         _rand_str(_ASCII, 8192, seed=3),
         _mutate(_rand_str(_ASCII, 8192, seed=3), _ASCII, edits=8, seed=4),
-        7,
         id="ascii-8192-similar",
     ),
     pytest.param(
         _rand_str(_ASCII, 2048, seed=5),
         _mutate(_rand_str(_ASCII, 2048, seed=5), _ASCII, edits=205, seed=6),
-        186,
         id="ascii-2048-moderate",
     ),
     pytest.param(
         _rand_str(_ASCII, 2048, seed=7),
         _rand_str(_ASCII, 2048, seed=8),
-        1522,
         id="ascii-2048-dissimilar",
     ),
     pytest.param(
         _rand_str(_ASCII, 8192, seed=9),
         _rand_str(_ASCII, 8192, seed=10),
-        6069,
         id="ascii-8192-dissimilar",
     ),
     pytest.param(
         _rand_str(_UCS2, 2048, seed=11),
         _mutate(_rand_str(_UCS2, 2048, seed=11), _UCS2, edits=4, seed=12),
-        4,
         id="ucs2-2048-similar",
     ),
 ]
 
 
 @pytest.mark.benchmark
-@pytest.mark.parametrize(("s1", "s2", "expected"), _LONG_CASES)
+@pytest.mark.parametrize(("s1", "s2"), _LONG_CASES)
 def test_distance_long(s1: str, s2: str, expected: int) -> None:
     """
     Test and benchmark lev.distance on strings beyond the 512-char gate.
@@ -290,7 +292,7 @@ _LATIN1 = "àáâãäåæçèé"
 _UCS4 = "".join(chr(0x1F600 + i) for i in range(10))
 
 
-def _medium(alphabet: str, n: int, edits: int, seed: int, expected: int, id: str) -> object:  # noqa: A002
+def _medium(alphabet: str, n: int, edits: int, seed: int, id: str) -> object:  # noqa: A002
     """
     Build a mutated pair far enough apart that the mbleven path cannot fire.
 
@@ -299,33 +301,32 @@ def _medium(alphabet: str, n: int, edits: int, seed: int, expected: int, id: str
 
     """
     s = _rand_str(alphabet, n, seed=seed)
-    return pytest.param(s, _mutate(s, alphabet, edits=edits, seed=seed + 1), expected, id=id)
+    return pytest.param(s, _mutate(s, alphabet, edits=edits, seed=seed + 1), id=id)
 
 
-# Expected distances verified against rapidfuzz. 32/64-char UCS-2/4 pairs run
+# 32/64-char UCS-2/4 pairs run
 # the single-word hash kernel; 100/300-char pairs run the multi-word kernels
 # (stack peq for UCS-1, hash-indexed peq for UCS-2 and mixed kinds).
 _MEDIUM_CASES = [
-    _medium(_UCS2, 32, 8, seed=100, expected=8, id="ucs2-32"),
-    _medium(_UCS2, 64, 16, seed=102, expected=13, id="ucs2-64"),
-    _medium(_UCS4, 32, 8, seed=104, expected=6, id="ucs4-32"),
-    _medium(_UCS4, 64, 16, seed=106, expected=13, id="ucs4-64"),
-    _medium(_UCS2, 100, 25, seed=108, expected=22, id="ucs2-100"),
-    _medium(_ASCII, 100, 25, seed=110, expected=19, id="ascii-100"),
-    _medium(_ASCII, 300, 75, seed=112, expected=64, id="ascii-300"),
-    _medium(_LATIN1, 100, 25, seed=114, expected=18, id="latin1-100"),
-    _medium(_LATIN1, 300, 75, seed=116, expected=67, id="latin1-300"),
+    _medium(_UCS2, 32, 8, seed=100, id="ucs2-32"),
+    _medium(_UCS2, 64, 16, seed=102, id="ucs2-64"),
+    _medium(_UCS4, 32, 8, seed=104, id="ucs4-32"),
+    _medium(_UCS4, 64, 16, seed=106, id="ucs4-64"),
+    _medium(_UCS2, 100, 25, seed=108, id="ucs2-100"),
+    _medium(_ASCII, 100, 25, seed=110, id="ascii-100"),
+    _medium(_ASCII, 300, 75, seed=112, id="ascii-300"),
+    _medium(_LATIN1, 100, 25, seed=114, id="latin1-100"),
+    _medium(_LATIN1, 300, 75, seed=116, id="latin1-300"),
     pytest.param(
         _rand_str(_ASCII, 100, seed=130),
         _mutate(_rand_str(_ASCII, 100, seed=130), _UCS2, edits=25, seed=131),
-        20,
         id="mixed-100",
     ),
 ]
 
 
 @pytest.mark.benchmark
-@pytest.mark.parametrize(("s1", "s2", "expected"), _MEDIUM_CASES)
+@pytest.mark.parametrize(("s1", "s2"), _MEDIUM_CASES)
 def test_distance_medium(s1: str, s2: str, expected: int) -> None:
     """
     Test and benchmark lev.distance on strings between the tiny and banded paths.
@@ -345,41 +346,65 @@ def test_distance_medium(s1: str, s2: str, expected: int) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _ratio(s1: str, s2: str) -> float:
+    """
+    Compute the expected `lev.ratio` from the rapidfuzz distance.
+
+    Returns:
+        float: `1 - distance / (len(s1) + len(s2))`, or 1.0 for two empty strings.
+
+    """
+    total = len(s1) + len(s2)
+    return 1.0 if total == 0 else 1.0 - Levenshtein.distance(s1, s2) / total
+
+
+@pytest.fixture
+def expected_ratio(s1: str, s2: str) -> float:
+    """
+    Return the expected ratio of the parametrized pair during test setup.
+
+    Returns:
+        float: expected `lev.ratio(s1, s2)`.
+
+    """
+    return _ratio(s1, s2)
+
+
+_RATIO_PAIRS = [
+    ("", ""),
+    ("abc", "abc"),
+    ("abc", "xyz"),
+    ("kitten", "sitting"),
+    ("a", "b"),
+    # Long strings.
+    ("abc" * 40, "x" + "abc" * 40),
+    ("a" * 64, "a" * 65),
+]
+
+
 @pytest.mark.benchmark
-@pytest.mark.parametrize(
-    ("s1", "s2", "expected"),
-    [
-        ("", "", 1.0),
-        ("abc", "abc", 1.0),
-        ("abc", "xyz", 1.0 - 3.0 / 6.0),
-        ("kitten", "sitting", 1.0 - 3.0 / 13.0),
-        ("a", "b", 1.0 - 1.0 / 2.0),
-        # Long strings.
-        ("abc" * 40, "x" + "abc" * 40, 1.0 - 1.0 / 241.0),
-        ("a" * 64, "a" * 65, 1.0 - 1.0 / 129.0),
-    ],
-)
-def test_ratio(s1: str, s2: str, expected: float) -> None:
+@pytest.mark.parametrize(("s1", "s2"), _RATIO_PAIRS)
+def test_ratio(s1: str, s2: str, expected_ratio: float) -> None:
     """
     Test and benchmark lev.ratio.
 
     Args:
         s1 (str): First input string.
         s2 (str): Second input string.
-        expected (float): Expected ratio.
+        expected_ratio (float): Expected ratio.
 
     """
-    assert math.isclose(lev.ratio(s1, s2), expected, abs_tol=1e-12)
+    assert math.isclose(lev.ratio(s1, s2), expected_ratio, abs_tol=1e-12)
 
 
 def test_ratio_unicode_uses_code_points() -> None:
     """Test ratio implementation with unicode strings."""
     # 6 + 6 code points; distance 2 => 1 - 2/12.
-    assert math.isclose(lev.ratio("résumé", "resume"), 1.0 - 2.0 / 12.0, abs_tol=1e-12)
+    assert math.isclose(lev.ratio("résumé", "resume"), _ratio("résumé", "resume"), abs_tol=1e-12)
 
 
 # ---------------------------------------------------------------------------
-# randomized oracle tests: lev.distance vs a reference DP implementation
+# randomized oracle tests: lev.distance vs rapidfuzz
 # ---------------------------------------------------------------------------
 
 # Alphabets chosen to exercise every CPython string kind (PEP 393) plus
@@ -393,23 +418,6 @@ ALPHABETS = {
 }
 
 
-def naive(a: str, b: str) -> int:
-    """
-    Compute the Levenshtein distance with the textbook DP recurrence.
-
-    Returns:
-        int: edit distance between a and b.
-
-    """
-    m, n = len(a), len(b)
-    dp = list(range(n + 1))
-    for i in range(1, m + 1):
-        prev, dp[0] = dp[0], i
-        for j in range(1, n + 1):
-            prev, dp[j] = dp[j], min(dp[j] + 1, dp[j - 1] + 1, prev + (a[i - 1] != b[j - 1]))
-    return dp[n]
-
-
 @pytest.mark.parametrize("kind", list(ALPHABETS))
 def test_small_strings_match_oracle(kind: str) -> None:
     """Random small strings (length 0-13) across all string kinds."""
@@ -418,7 +426,7 @@ def test_small_strings_match_oracle(kind: str) -> None:
     for _ in range(1000):
         a = "".join(rng.choice(alpha) for _ in range(rng.randrange(0, 14)))
         b = "".join(rng.choice(alpha) for _ in range(rng.randrange(0, 14)))
-        assert lev.distance(a, b) == naive(a, b), (a, b)
+        assert lev.distance(a, b) == Levenshtein.distance(a, b), (a, b)
 
 
 def test_long_strings_with_affixes_match_oracle() -> None:
@@ -431,7 +439,7 @@ def test_long_strings_with_affixes_match_oracle() -> None:
         pre = "prefix" * rng.randrange(0, 4)
         suf = "suffix" * rng.randrange(0, 4)
         a, b = pre + core + suf, pre + mutated + suf
-        assert lev.distance(a, b) == naive(a, b), (a, b)
+        assert lev.distance(a, b) == Levenshtein.distance(a, b), (a, b)
 
 
 def test_affix_stripping_partial_element() -> None:
@@ -455,8 +463,8 @@ def test_banded_long_strings_match_oracle(n: int, edits: int) -> None:
     b = _mutate(a, _ASCII, edits, seed=n + edits)
     # A leading shift additionally defeats affix stripping and the Hamming bound.
     b = "x" + b[:-1]
-    assert lev.distance(a, b) == naive(a, b)
-    assert lev.distance(b, a) == naive(a, b)  # symmetric
+    assert lev.distance(a, b) == Levenshtein.distance(a, b)
+    assert lev.distance(b, a) == Levenshtein.distance(a, b)  # symmetric
 
 
 # ---------------------------------------------------------------------------
@@ -517,8 +525,6 @@ def test_substring_of_much_longer_string(m: int, n: int, where: str) -> None:
 @pytest.mark.parametrize("kind", list(ALPHABETS))
 def test_very_different_lengths_match_oracle(m: int, n: int, kind: str) -> None:
     """Distance of unrelated strings and of a mutated copy inside padding."""
-    if m * n > 250_000 and kind != "ascii":
-        pytest.skip("the pure-Python oracle is O(m * n); ascii covers these sizes")
     alpha = ALPHABETS[kind]
     short = _rand_str(alpha, m, seed=m + 1)
     pairs = [
@@ -526,6 +532,6 @@ def test_very_different_lengths_match_oracle(m: int, n: int, kind: str) -> None:
         (short, _embed(_mutate(short, alpha, max(1, m // 10), seed=m) if m else "", n, alpha, "middle", seed=n)),
     ]
     for a, b in pairs:
-        d = naive(a, b)
+        d = Levenshtein.distance(a, b)
         assert lev.distance(a, b) == d, (kind, m, n)
         assert lev.distance(b, a) == d, (kind, m, n)
