@@ -94,7 +94,11 @@ struct UniView {
 /// Read kind + ascii flag + data ptr + length from a Python string in one go.
 /// Subsequent dispatch matches on `(view1.kind, view2.kind)` without
 /// re-traversing pyo3's PyUnicode helpers.
-#[cfg(not(all(Py_3_14, target_endian = "little")))]
+#[cfg(not(all(
+    Py_3_14,
+    target_endian = "little",
+    not(all(Py_GIL_DISABLED, target_env = "msvc"))
+)))]
 #[inline(always)]
 unsafe fn view(s: &Bound<'_, PyString>) -> UniView {
     let ptr = s.as_ptr();
@@ -120,17 +124,27 @@ unsafe fn view(s: &Bound<'_, PyString>) -> UniView {
 /// CPython 3.14/3.15 (state bitfield: `interned:2, kind:3, compact:1, ascii:1`,
 /// LSB-first on little-endian targets — the same assumption pyo3-ffi itself
 /// makes up to 3.13), so decode the header directly.  kind/compact/ascii are
-/// immutable after string creation, which also makes this safe on
-/// free-threaded builds.  Debug builds cross-check against the C API.
-#[cfg(all(Py_3_14, target_endian = "little"))]
+/// immutable after string creation, so reading them needs no synchronization
+/// on free-threaded builds.  Debug builds cross-check against the C API.
+///
+/// Free-threaded builds store `interned` as a whole byte (it is accessed
+/// atomically), which moves the flags up to bit 8.  MSVC does not pack a
+/// bitfield into the byte before it, so its free-threaded `state` is wider
+/// than pyo3-ffi's `u32`; that combination takes the C-API path above.
+#[cfg(all(
+    Py_3_14,
+    target_endian = "little",
+    not(all(Py_GIL_DISABLED, target_env = "msvc"))
+))]
 #[inline(always)]
 unsafe fn view(s: &Bound<'_, PyString>) -> UniView {
+    const KIND_SHIFT: u32 = if cfg!(Py_GIL_DISABLED) { 8 } else { 2 };
     let ptr = s.as_ptr();
     let obj = ptr as *mut ffi::PyASCIIObject;
     let state = (*obj).state;
-    let kind = ((state >> 2) & 0b111) as c_uint;
-    let compact = (state >> 5) & 1 != 0;
-    let ascii = (state >> 6) & 1 != 0;
+    let kind = ((state >> KIND_SHIFT) & 0b111) as c_uint;
+    let compact = (state >> (KIND_SHIFT + 3)) & 1 != 0;
+    let ascii = (state >> (KIND_SHIFT + 4)) & 1 != 0;
     let data = if compact {
         if ascii {
             obj.add(1) as *const u8
