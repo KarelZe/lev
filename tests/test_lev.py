@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import random
+import threading
 
 import pytest
 from rapidfuzz.distance import Levenshtein
@@ -535,3 +536,34 @@ def test_very_different_lengths_match_oracle(m: int, n: int, kind: str) -> None:
         d = Levenshtein.distance(a, b)
         assert lev.distance(a, b) == d, (kind, m, n)
         assert lev.distance(b, a) == d, (kind, m, n)
+
+
+# ---------------------------------------------------------------------------
+# Concurrency (meaningful on free-threaded builds, harmless with the GIL)
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_calls_from_threads() -> None:
+    """Many threads share the same string objects; every result must stay exact."""
+    pairs = [
+        (_rand_str(ALPHABETS[kind], n, seed=n), _rand_str(ALPHABETS[kind], n + 7, seed=n + 1))
+        for kind in ALPHABETS
+        for n in (12, 70, 600)
+    ]
+    expected = [(Levenshtein.distance(a, b), lev.ratio(a, b)) for a, b in pairs]
+    barrier = threading.Barrier(8)
+    errors: list[tuple[str, str]] = []
+
+    def worker() -> None:
+        barrier.wait()
+        for _ in range(50):
+            for (a, b), (d, r) in zip(pairs, expected, strict=True):
+                if lev.distance(a, b) != d or lev.ratio(b, a) != r:
+                    errors.append((a, b))
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
