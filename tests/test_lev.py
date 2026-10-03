@@ -283,6 +283,64 @@ def test_distance_long(s1: str, s2: str, expected: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# distance: medium strings (9-512 chars, single- and multi-word kernels)
+# ---------------------------------------------------------------------------
+
+_LATIN1 = "àáâãäåæçèé"
+_UCS4 = "".join(chr(0x1F600 + i) for i in range(10))
+
+
+def _medium(alphabet: str, n: int, edits: int, seed: int, expected: int, id: str) -> object:  # noqa: A002
+    """
+    Build a mutated pair far enough apart that the mbleven path cannot fire.
+
+    Returns:
+        object: pytest param of (s1, s2, expected).
+
+    """
+    s = _rand_str(alphabet, n, seed=seed)
+    return pytest.param(s, _mutate(s, alphabet, edits=edits, seed=seed + 1), expected, id=id)
+
+
+# Expected distances verified against rapidfuzz. 32/64-char UCS-2/4 pairs run
+# the single-word hash kernel; 100/300-char pairs run the multi-word kernels
+# (stack peq for UCS-1, hash-indexed peq for UCS-2 and mixed kinds).
+_MEDIUM_CASES = [
+    _medium(_UCS2, 32, 8, seed=100, expected=8, id="ucs2-32"),
+    _medium(_UCS2, 64, 16, seed=102, expected=13, id="ucs2-64"),
+    _medium(_UCS4, 32, 8, seed=104, expected=6, id="ucs4-32"),
+    _medium(_UCS4, 64, 16, seed=106, expected=13, id="ucs4-64"),
+    _medium(_UCS2, 100, 25, seed=108, expected=22, id="ucs2-100"),
+    _medium(_ASCII, 100, 25, seed=110, expected=19, id="ascii-100"),
+    _medium(_ASCII, 300, 75, seed=112, expected=64, id="ascii-300"),
+    _medium(_LATIN1, 100, 25, seed=114, expected=18, id="latin1-100"),
+    _medium(_LATIN1, 300, 75, seed=116, expected=67, id="latin1-300"),
+    pytest.param(
+        _rand_str(_ASCII, 100, seed=130),
+        _mutate(_rand_str(_ASCII, 100, seed=130), _UCS2, edits=25, seed=131),
+        20,
+        id="mixed-100",
+    ),
+]
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize(("s1", "s2", "expected"), _MEDIUM_CASES)
+def test_distance_medium(s1: str, s2: str, expected: int) -> None:
+    """
+    Test and benchmark lev.distance on strings between the tiny and banded paths.
+
+    Args:
+        s1 (str): First input string.
+        s2 (str): Second input string.
+        expected (int): Expected Levenshtein distance.
+
+    """
+    assert lev.distance(s1, s2) == expected
+    assert lev.distance(s2, s1) == expected  # symmetric
+
+
+# ---------------------------------------------------------------------------
 # ratio
 # ---------------------------------------------------------------------------
 
