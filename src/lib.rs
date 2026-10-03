@@ -10,7 +10,8 @@
 //! See <https://en.wikipedia.org/wiki/Levenshtein_distance> for the distance
 //! definition.  Several optimizations are layered to minimise the constant factor:
 //!
-//! 1. **Identity short-circuit** – equal strings return immediately.
+//! 1. **Identity short-circuit** – the same object passed twice returns
+//!    immediately.
 //! 2. **Common-affix stripping** – shared leading and trailing code units are
 //!    removed before the main computation.
 //! 3. **Zero-copy CPython buffer access** – Python stores strings in one of
@@ -22,7 +23,7 @@
 //!      `[u64; 256]` (Latin-1) stack array — O(1) direct-index lookup.
 //!    - *UCS-2* (`u16`) and *UCS-4* (`u32`): peq is a 128-slot stack-allocated
 //!      open-addressing hash table with Fibonacci hashing — O(1) amortized
-//!      lookup at ≤ 50 % load.  Mixed-kind pairs upcast both sides to `u32`;
+//!      lookup at ≤ 50 % load.  Mixed-kind pairs compare code units in place;
 //!      no UTF-8 round-trip, lone surrogates preserved.
 //! 4. **Hyyrö's bit-parallel algorithm** – O(⌈m/w⌉ · n) time with w = 64;
 //!    see H. Hyyrö, "A Bit-Vector Algorithm for Computing Levenshtein and
@@ -59,37 +60,20 @@ use pyo3::prelude::*;
 use pyo3::types::PyString;
 
 // ---------------------------------------------------------------------------
-// Sealed trait unifying UCS-2 (u16) and UCS-4 (u32) as peq-key types.
+// Code units of the three CPython string kinds (UCS-1 / UCS-2 / UCS-4).
 // ---------------------------------------------------------------------------
 
-/// Implemented by every code-unit type that can be used in the hash-based peq
-/// table.  `SENTINEL` is used to initialize the keys array; occupancy is
-/// tracked separately via the values array (where 0 indicates an empty slot).
-trait CodeUnit: Ord + Copy + Eq + Send + 'static {
-    const SENTINEL: Self;
-    fn as_u64(self) -> u64;
-}
-impl CodeUnit for u8 {
-    const SENTINEL: Self = u8::MAX;
+/// A CPython code unit (`u8`, `u16` or `u32`).  Mixed-kind pairs compare
+/// code units widened to `u64`.
+trait CodeUnit: Copy + Eq + Into<u64> {
     #[inline(always)]
     fn as_u64(self) -> u64 {
-        self as u64
+        self.into()
     }
 }
-impl CodeUnit for u16 {
-    const SENTINEL: Self = u16::MAX;
-    #[inline(always)]
-    fn as_u64(self) -> u64 {
-        self as u64
-    }
-}
-impl CodeUnit for u32 {
-    const SENTINEL: Self = u32::MAX;
-    #[inline(always)]
-    fn as_u64(self) -> u64 {
-        self as u64
-    }
-}
+impl CodeUnit for u8 {}
+impl CodeUnit for u16 {}
+impl CodeUnit for u32 {}
 
 /// Fibonacci hash slot: maps a 64-bit key into `[0, mask]` where `mask = 2^k - 1`.
 ///
@@ -228,19 +212,11 @@ unsafe fn as_u32(v: &UniView) -> &[u32] {
 // call on CPython 3.11+ (PyO3 issue #6426).
 #[pyfunction]
 #[pyo3(pass_module, signature = (s1, s2, /))]
-fn distance(
-    _m: &Bound<'_, PyModule>,
-    s1: &Bound<'_, PyString>,
-    s2: &Bound<'_, PyString>,
-) -> PyResult<usize> {
+fn distance(_m: &Bound<'_, PyModule>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> usize {
     if s1.is(s2) {
-        return Ok(0);
+        return 0;
     }
-    unsafe {
-        let v1 = view(s1);
-        let v2 = view(s2);
-        Ok(compute::<Lev>(&v1, &v2))
-    }
+    unsafe { compute::<Lev>(&view(s1), &view(s2)) }
 }
 
 /// Calculate how similar two strings are, as a score from `0.0` to `1.0`.
@@ -278,22 +254,17 @@ fn distance(
 ///     1.0
 #[pyfunction]
 #[pyo3(pass_module, signature = (s1, s2, /))]
-fn ratio(
-    _m: &Bound<'_, PyModule>,
-    s1: &Bound<'_, PyString>,
-    s2: &Bound<'_, PyString>,
-) -> PyResult<f64> {
+fn ratio(_m: &Bound<'_, PyModule>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> f64 {
     if s1.is(s2) {
-        return Ok(1.0);
+        return 1.0;
     }
     unsafe {
-        let v1 = view(s1);
-        let v2 = view(s2);
+        let (v1, v2) = (view(s1), view(s2));
         let total = v1.len + v2.len;
         if total == 0 {
-            return Ok(1.0);
+            return 1.0;
         }
-        Ok(1.0 - compute::<Lcs>(&v1, &v2) as f64 / total as f64)
+        1.0 - compute::<Lcs>(&v1, &v2) as f64 / total as f64
     }
 }
 
@@ -332,19 +303,14 @@ unsafe fn compute<K: Kernel>(v1: &UniView, v2: &UniView) -> usize {
         }
         (K2, K2) => compute_sorted::<K, _>(as_u16(v1), as_u16(v2)),
         (K4, K4) => compute_sorted::<K, _>(as_u32(v1), as_u32(v2)),
-        // Mixed kinds: Iterate natively without any temporary buffer allocation.
+        // Mixed kinds compare code units in place, without a widened copy.
         (K1, K2) => compute_sorted_mixed::<K, _, _>(as_u8(v1), as_u16(v2)),
         (K1, K4) => compute_sorted_mixed::<K, _, _>(as_u8(v1), as_u32(v2)),
+        (K2, K1) => compute_sorted_mixed::<K, _, _>(as_u16(v1), as_u8(v2)),
         (K2, K4) => compute_sorted_mixed::<K, _, _>(as_u16(v1), as_u32(v2)),
-        _ => {
-            // Normalization ensures v1.len <= v2.len, but not v1.kind <= v2.kind.
-            match (v1.kind, v2.kind) {
-                (K2, K1) => compute_sorted_mixed::<K, _, _>(as_u16(v1), as_u8(v2)),
-                (K4, K1) => compute_sorted_mixed::<K, _, _>(as_u32(v1), as_u8(v2)),
-                (K4, K2) => compute_sorted_mixed::<K, _, _>(as_u32(v1), as_u16(v2)),
-                _ => unreachable!(),
-            }
-        }
+        (K4, K1) => compute_sorted_mixed::<K, _, _>(as_u32(v1), as_u8(v2)),
+        (K4, K2) => compute_sorted_mixed::<K, _, _>(as_u32(v1), as_u16(v2)),
+        _ => unreachable!("unknown PyUnicode kind"),
     }
 }
 
@@ -735,9 +701,9 @@ fn compute_sorted<K: Kernel, T: CodeUnit>(a: &[T], b: &[T]) -> usize {
         }
     }
     if a.len() <= 64 {
-        hyrro_64_sorted::<K, _>(a, b)
+        hyrro_64_hash::<K, _, _>(a, b)
     } else {
-        hyrro_multiword_sorted::<K, _>(a, b)
+        hyrro_multiword_hash::<K, _, _>(a, b)
     }
 }
 
@@ -757,9 +723,9 @@ fn compute_sorted_mixed<K: Kernel, T1: CodeUnit, T2: CodeUnit>(a: &[T1], b: &[T2
         }
     }
     if a.len() <= 64 {
-        hyrro_64_mixed::<K, _, _>(a, b)
+        hyrro_64_hash::<K, _, _>(a, b)
     } else {
-        hyrro_multiword_mixed::<K, _, _>(a, b)
+        hyrro_multiword_hash::<K, _, _>(a, b)
     }
 }
 
@@ -786,31 +752,18 @@ fn hyrro_64_u8<K: Kernel, const SLOTS: usize>(pattern: &[u8], text: &[u8]) -> us
     )
 }
 
-/// Single-word variant with a stack-allocated hash table.
+/// Single-word variant for UCS-2/4 and mixed kinds, with the peq table in a
+/// stack-allocated open-addressing hash.
 #[inline(always)]
-fn hyrro_64_sorted<K: Kernel, T: CodeUnit>(pattern: &[T], text: &[T]) -> usize {
-    hyrro_64_generic::<K, _, _>(pattern, text.len(), text.iter().map(|&c| c.as_u64()))
-}
-
-/// Single-word variant for mixed-kind.
-#[inline(always)]
-fn hyrro_64_mixed<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[T2]) -> usize {
-    hyrro_64_generic::<K, _, _>(pattern, text.len(), text.iter().map(|&c| c.as_u64()))
-}
-
-/// Core single-word builder and runner for non-UCS-1 strings.
-#[inline(always)]
-fn hyrro_64_generic<K: Kernel, C: CodeUnit, I: Iterator<Item = u64>>(
-    pattern: &[C],
-    n: usize,
-    text_iter: I,
-) -> usize {
+fn hyrro_64_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[T2]) -> usize {
     let m = pattern.len();
     debug_assert!((1..=64).contains(&m));
 
     const SLOTS: usize = 128;
     const MASK: usize = SLOTS - 1;
-    let mut keys = [C::SENTINEL; SLOTS];
+    // A slot's key is written before its value becomes non-zero and read only
+    // after, so `vals` alone marks occupancy and `keys` needs no fill.
+    let mut keys = [const { MaybeUninit::<T1>::uninit() }; SLOTS];
     let mut vals = [0u64; SLOTS];
 
     let shift = 64 - MASK.count_ones();
@@ -818,11 +771,12 @@ fn hyrro_64_generic<K: Kernel, C: CodeUnit, I: Iterator<Item = u64>>(
         let mut slot = hslot(c.as_u64(), shift);
         loop {
             if vals[slot] == 0 {
-                keys[slot] = c;
+                keys[slot].write(c);
                 vals[slot] = 1u64 << i;
                 break;
             }
-            if keys[slot] == c {
+            // SAFETY: vals[slot] != 0, so keys[slot] was written.
+            if unsafe { keys[slot].assume_init() } == c {
                 vals[slot] |= 1u64 << i;
                 break;
             }
@@ -832,15 +786,17 @@ fn hyrro_64_generic<K: Kernel, C: CodeUnit, I: Iterator<Item = u64>>(
 
     K::word(
         m,
-        n,
-        text_iter.map(|c| {
+        text.len(),
+        text.iter().map(|&c| {
+            let c = c.as_u64();
             let mut slot = hslot(c, shift);
             loop {
                 let v = unsafe { *vals.get_unchecked(slot) };
                 if v == 0 {
                     return 0;
                 }
-                if unsafe { keys.get_unchecked(slot).as_u64() } == c {
+                // SAFETY: v != 0, so keys[slot] was written.
+                if unsafe { keys.get_unchecked(slot).assume_init().as_u64() } == c {
                     return v;
                 }
                 slot = (slot + 1) & MASK;
@@ -1161,15 +1117,6 @@ impl Kernel for Lcs {
 // ---------------------------------------------------------------------------
 // Multi-word Hyyrö (m > 64)
 // ---------------------------------------------------------------------------
-
-/// Multi-word entry point for mixed kinds.
-#[inline(always)]
-fn hyrro_multiword_mixed<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
-    pattern: &[T1],
-    text: &[T2],
-) -> usize {
-    hyrro_multiword_sorted_generic::<K, _, _>(pattern, text)
-}
 
 /// Const-generic inner kernel over `m` pattern rows in `W` words. Unrolled
 /// for speed.  Returns the sum of the vertical deltas of these rows in the
@@ -1909,15 +1856,9 @@ fn scratch<'a, const N: usize>(
     }
 }
 
-/// Multi-word entry point for non-UCS-1 strings.
-fn hyrro_multiword_sorted<K: Kernel, T: CodeUnit>(short: &[T], long: &[T]) -> usize {
-    hyrro_multiword_sorted_generic::<K, _, _>(short, long)
-}
-
-fn hyrro_multiword_sorted_generic<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
-    short: &[T1],
-    long: &[T2],
-) -> usize {
+/// Multi-word entry point for UCS-2/4 and mixed kinds: the peq rows are
+/// indexed through an open-addressing hash of the pattern alphabet.
+fn hyrro_multiword_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2]) -> usize {
     debug_assert!(short.len() > 64);
     let m = short.len();
     let w = m.div_ceil(64);
@@ -1953,22 +1894,30 @@ fn hyrro_multiword_sorted_generic<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
         }
     }
     let n_keys = n_keys as usize;
+    let hash = &*hash;
+
+    // Dense row of a code unit; `n_keys` for units absent from the pattern.
+    let row_of = |key: u64| -> usize {
+        let mut slot = hslot(key, hshift);
+        loop {
+            let entry = unsafe { *hash.get_unchecked(slot) };
+            if entry == EMPTY {
+                return n_keys;
+            }
+            if entry & 0xFFFF_FFFF == key {
+                return (entry >> 32) as usize;
+            }
+            slot = (slot + 1) & hash_mask;
+        }
+    };
 
     // Rows sized by the actual alphabet; the trailing row stays all-zero and
     // serves text chars that do not occur in the pattern.
     let (mut data_stack, mut data_heap) = ([MaybeUninit::uninit(); (512 + 1) * STRIP], Vec::new());
     let data = scratch(&mut data_stack, &mut data_heap, (n_keys + 1) * w, 0);
     for (i, &c) in short.iter().enumerate() {
-        let key = c.as_u64();
-        let mut slot = hslot(key, hshift);
-        let ki = loop {
-            let entry = unsafe { *hash.get_unchecked(slot) };
-            debug_assert!(entry != EMPTY, "pattern key must already be inserted");
-            if entry & 0xFFFF_FFFF == key {
-                break (entry >> 32) as usize;
-            }
-            slot = (slot + 1) & hash_mask;
-        };
+        let ki = row_of(c.as_u64());
+        debug_assert!(ki < n_keys, "pattern key must already be inserted");
         data[ki * w + i / 64] |= 1u64 << (i % 64);
     }
 
@@ -1978,18 +1927,7 @@ fn hyrro_multiword_sorted_generic<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
                 m,
                 long.len(),
                 long.iter().map(|&c| {
-                    let key = c.as_u64();
-                    let mut slot = hslot(key, hshift);
-                    let base = loop {
-                        let entry = unsafe { *hash.get_unchecked(slot) };
-                        if entry == EMPTY {
-                            break n_keys * $W;
-                        }
-                        if entry & 0xFFFF_FFFF == key {
-                            break (entry >> 32) as usize * $W;
-                        }
-                        slot = (slot + 1) & hash_mask;
-                    };
+                    let base = row_of(c.as_u64()) * $W;
                     let mut row = [0u64; $W];
                     for k in 0..$W {
                         row[k] = unsafe { *data.get_unchecked(base + k) };
@@ -2008,24 +1946,7 @@ fn hyrro_multiword_sorted_generic<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
         7 => run!(7),
         8 => run!(8),
         _ => {
-            let zero_base = n_keys * w;
-            let bases: Vec<usize> = long
-                .iter()
-                .map(|&c| {
-                    let key = c.as_u64();
-                    let mut slot = hslot(key, hshift);
-                    loop {
-                        let entry = unsafe { *hash.get_unchecked(slot) };
-                        if entry == EMPTY {
-                            break zero_base;
-                        }
-                        if entry & 0xFFFF_FFFF == key {
-                            break (entry >> 32) as usize * w;
-                        }
-                        slot = (slot + 1) & hash_mask;
-                    }
-                })
-                .collect();
+            let bases: Vec<usize> = long.iter().map(|&c| row_of(c.as_u64()) * w).collect();
             K::large(
                 &LargeCtx {
                     m,
@@ -2308,7 +2229,7 @@ mod tests {
         check_latin1(&[200u8; 80], &[201u8; 80]);
     }
 
-    /// Directly exercise `hyrro_multiword_sorted` (m > 64) against the naive DP.
+    /// Directly exercise `hyrro_multiword_hash` (m > 64) against the naive DP.
     #[test]
     fn multiword_sorted_matches_oracle() {
         let check_u32 = |a: &[u32], b: &[u32]| {
@@ -2317,7 +2238,7 @@ mod tests {
                 s.len() > 64,
                 "test case must be long enough to hit multiword"
             );
-            let got = hyrro_multiword_sorted::<Lev, _>(s, l);
+            let got = hyrro_multiword_hash::<Lev, _, _>(s, l);
             let ac: Vec<char> = s
                 .iter()
                 .map(|&c| char::from_u32(c).unwrap_or('?'))
