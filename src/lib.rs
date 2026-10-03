@@ -723,52 +723,18 @@ fn hyrro_64_generic<K: CodeUnit, I: Iterator<Item = u64>>(pattern: &[K], text_it
 // Hyyrö's bit-parallel inner loop
 // ---------------------------------------------------------------------------
 
-/// Core Hyyrö loop. Specialized for m=64 to avoid masking.
+/// Core Hyyrö loop.  Bits above row `m` hold garbage but never matter: carries
+/// and shifts only move information upward, and the score reads row `m - 1`.
 #[inline(always)]
 fn hyrro_inner<I: Iterator<Item = u64>>(m: usize, pm_iter: I) -> usize {
-    if m == 64 {
-        hyrro_inner_64(pm_iter)
-    } else {
-        hyrro_inner_masked(m, pm_iter)
-    }
-}
-
-#[inline(always)]
-fn hyrro_inner_64<I: Iterator<Item = u64>>(pm_iter: I) -> usize {
+    let msb = 1u64 << (m - 1);
     let mut vp = !0u64;
     let mut vn = 0u64;
-    let mut score = 64isize;
-
-    for pm in pm_iter {
-        let x = pm | vn;
-        let (sum, _) = (x & vp).overflowing_add(vp);
-        let d0 = (sum ^ vp) | x;
-        let hp = vn | !(d0 | vp);
-        let hn = vp & d0;
-
-        score += (hp >> 63) as isize;
-        score -= (hn >> 63) as isize;
-
-        let hp_s = (hp << 1) | 1;
-        let hn_s = hn << 1;
-        vp = hn_s | !(d0 | hp_s);
-        vn = hp_s & d0;
-    }
-    score as usize
-}
-
-#[inline(always)]
-fn hyrro_inner_masked<I: Iterator<Item = u64>>(m: usize, pm_iter: I) -> usize {
-    let mask = (1u64 << m) - 1;
-    let mut vp = mask;
-    let mut vn = 0u64;
     let mut score = m as isize;
-    let msb = 1u64 << (m - 1);
 
     for pm in pm_iter {
         let x = pm | vn;
-        let (sum, _) = (x & vp).overflowing_add(vp);
-        let d0 = (sum ^ vp) | x;
+        let d0 = ((x & vp).wrapping_add(vp) ^ vp) | x;
         let hp = vn | !(d0 | vp);
         let hn = vp & d0;
 
@@ -777,8 +743,8 @@ fn hyrro_inner_masked<I: Iterator<Item = u64>>(m: usize, pm_iter: I) -> usize {
 
         let hp_s = (hp << 1) | 1;
         let hn_s = hn << 1;
-        vp = (hn_s | !(d0 | hp_s)) & mask;
-        vn = (hp_s & d0) & mask;
+        vp = hn_s | !(d0 | hp_s);
+        vn = hp_s & d0;
     }
     score as usize
 }
@@ -801,9 +767,6 @@ fn multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(m: usize, pm_i
 
     let mut vp = [!0u64; W];
     let mut vn = [0u64; W];
-    if last_bits < 64 {
-        vp[W - 1] = (1u64 << last_bits) - 1;
-    }
     let mut score = m as isize;
 
     for pm_row in pm_iter {
@@ -1019,13 +982,8 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
         debug_assert!(vp.len() >= w && vn.len() >= w);
         let last_bits = m - (w - 1) * 64;
         let top_mask = 1u64 << (last_bits - 1);
-        for k in 0..w {
-            vp[k] = !0;
-            vn[k] = 0;
-        }
-        if last_bits < 64 {
-            vp[w - 1] = (1u64 << last_bits) - 1;
-        }
+        vp[..w].fill(!0);
+        vn[..w].fill(0);
         let mut score = m as isize;
         for j in 0..n {
             let base = (self.base_of)(j);
