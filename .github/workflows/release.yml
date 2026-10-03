@@ -70,7 +70,7 @@ jobs:
           # aarch64 binaries on the x86_64 host.
           args: >-
             --release --out dist
-            -i python3.10 python3.11 python3.12 python3.13 python3.14
+            -i python3.10 python3.11 python3.12 python3.13 python3.14 python3.15
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wheels-linux-${{ matrix.target }}
@@ -92,6 +92,8 @@ jobs:
             3.12
             3.13
             3.14
+            3.15
+          allow-prereleases: true
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           target: x64
@@ -117,6 +119,8 @@ jobs:
             3.12
             3.13
             3.14
+            3.15
+          allow-prereleases: true
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           target: universal2-apple-darwin
