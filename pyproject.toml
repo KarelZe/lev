@@ -34,7 +34,7 @@ dependencies = []
 "Bug Tracker" = "https://github.com/KarelZe/lev/issues"
 
 [dependency-groups]
-test = ["pytest", "pytest-codspeed>=5.0.1"]
+test = ["pytest", "pytest-codspeed>=5.0.1", "rapidfuzz>=3.14.5"]
 docs = ["zensical", "mkdocstrings[python]"]
 dev = [
   { include-group = "test" },
