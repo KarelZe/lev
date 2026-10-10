@@ -2,6 +2,13 @@
 
 - build: move dev and docs to project dependencies🔧 (#160)
 
+## [0.3.0](https://github.com/KarelZe/lev/compare/0.2.6...0.3.0) (2026-10-10)
+
+
+### Features
+
+* support Python 3.15 ✨ ([#178](https://github.com/KarelZe/lev/issues/178)) ([7915158](https://github.com/KarelZe/lev/commit/7915158d287a550d4ad7882107842e18d3ff4024))
+
 ## [0.2.6](https://github.com/KarelZe/lev/compare/0.2.5...0.2.6) (2026-10-03)
 
 
