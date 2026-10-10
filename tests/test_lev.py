@@ -12,7 +12,7 @@ import math
 import random
 
 import pytest
-from rapidfuzz.distance import Levenshtein
+from rapidfuzz.distance import Indel, Levenshtein
 
 import lev
 
@@ -346,39 +346,34 @@ def test_distance_medium(s1: str, s2: str, expected: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _ratio(s1: str, s2: str) -> float:
-    """
-    Compute the expected `lev.ratio` from the rapidfuzz distance.
-
-    Returns:
-        float: `1 - distance / (len(s1) + len(s2))`, or 1.0 for two empty strings.
-
-    """
-    total = len(s1) + len(s2)
-    return 1.0 if total == 0 else 1.0 - Levenshtein.distance(s1, s2) / total
-
-
 @pytest.fixture
 def expected_ratio(s1: str, s2: str) -> float:
     """
-    Return the expected ratio of the parametrized pair during test setup.
+    Return the rapidfuzz indel similarity of the parametrized pair.
+
+    `lev.ratio` is `1 - indel / (len(s1) + len(s2))`, which rapidfuzz exposes
+    as `Indel.normalized_similarity`.
 
     Returns:
         float: expected `lev.ratio(s1, s2)`.
 
     """
-    return _ratio(s1, s2)
+    return Indel.normalized_similarity(s1, s2)
 
 
 _RATIO_PAIRS = [
     ("", ""),
     ("abc", "abc"),
+    # No common subsequence at all: the ratio bottoms out at exactly 0.0.
     ("abc", "xyz"),
     ("kitten", "sitting"),
     ("a", "b"),
     # Long strings.
     ("abc" * 40, "x" + "abc" * 40),
     ("a" * 64, "a" * 65),
+    # A substitution costs 2 under the indel metric, an indel costs 1.
+    ("abcdef", "abcXef"),
+    ("abcdef", "abcef"),
 ]
 
 
@@ -395,16 +390,36 @@ def test_ratio(s1: str, s2: str, expected_ratio: float) -> None:
 
     """
     assert math.isclose(lev.ratio(s1, s2), expected_ratio, abs_tol=1e-12)
+    assert math.isclose(lev.ratio(s2, s1), expected_ratio, abs_tol=1e-12)  # symmetric
 
 
-def test_ratio_unicode_uses_code_points() -> None:
-    """Test ratio implementation with unicode strings."""
-    # 6 + 6 code points; distance 2 => 1 - 2/12.
-    assert math.isclose(lev.ratio("résumé", "resume"), _ratio("résumé", "resume"), abs_tol=1e-12)
+@pytest.mark.parametrize(
+    ("s1", "s2"),
+    [
+        # Code points, not bytes: two substitutions => indel distance 4.
+        ("résumé", "resume"),
+        ("日本語のテスト", "日本語のテスト文字列"),
+        ("😀🎉🚀✨🐍", "😀🎉🚀✨🦀"),
+        ("café résumé", "cafe resume"),
+        ("a" * 100, "b" * 100),
+        ("abcdefghij" * 60, "abcdefghij" * 30 + "x" + "abcdefghij" * 30),
+    ],
+)
+def test_ratio_across_kinds_and_lengths(s1: str, s2: str, expected_ratio: float) -> None:
+    """
+    Test lev.ratio on Unicode and long inputs.
+
+    Args:
+        s1 (str): First input string.
+        s2 (str): Second input string.
+        expected_ratio (float): Expected ratio.
+
+    """
+    assert math.isclose(lev.ratio(s1, s2), expected_ratio, abs_tol=1e-12)
 
 
 # ---------------------------------------------------------------------------
-# randomized oracle tests: lev.distance vs rapidfuzz
+# randomized oracle tests: lev.distance and lev.ratio vs rapidfuzz
 # ---------------------------------------------------------------------------
 
 # Alphabets chosen to exercise every CPython string kind (PEP 393) plus
@@ -427,6 +442,29 @@ def test_small_strings_match_oracle(kind: str) -> None:
         a = "".join(rng.choice(alpha) for _ in range(rng.randrange(0, 14)))
         b = "".join(rng.choice(alpha) for _ in range(rng.randrange(0, 14)))
         assert lev.distance(a, b) == Levenshtein.distance(a, b), (a, b)
+
+
+@pytest.mark.parametrize("kind", list(ALPHABETS))
+def test_ratio_small_strings_match_oracle(kind: str) -> None:
+    """Random small strings (length 0-13) across all string kinds."""
+    rng = random.Random(43)
+    alpha = ALPHABETS[kind]
+    for _ in range(1000):
+        a = "".join(rng.choice(alpha) for _ in range(rng.randrange(0, 14)))
+        b = "".join(rng.choice(alpha) for _ in range(rng.randrange(0, 14)))
+        assert math.isclose(lev.ratio(a, b), Indel.normalized_similarity(a, b), abs_tol=1e-12), (a, b)
+
+
+@pytest.mark.parametrize("n", [63, 64, 65, 128, 300, 513, 700])
+def test_ratio_long_strings_match_oracle(n: int) -> None:
+    """Random long strings crossing the word, multi-word, and heap boundaries."""
+    alpha = "abcdefgh"
+    for edits in (1, 5, n // 4):
+        a = _rand_str(alpha, n, seed=n + edits)
+        b = _mutate(a, alpha, edits, seed=n * 7 + edits)
+        assert math.isclose(lev.ratio(a, b), Indel.normalized_similarity(a, b), abs_tol=1e-12), (n, edits)
+    # Disjoint alphabets: nothing in common, so the ratio bottoms out at 0.0.
+    assert math.isclose(lev.ratio("x" * n, "y" * n), 0.0, abs_tol=1e-12)
 
 
 def test_long_strings_with_affixes_match_oracle() -> None:
