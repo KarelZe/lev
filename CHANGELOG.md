@@ -2,6 +2,13 @@
 
 - build: move dev and docs to project dependencies🔧 (#160)
 
+## [0.4.0](https://github.com/KarelZe/lev/compare/0.3.0...0.4.0) (2026-10-14)
+
+
+### Features
+
+* support free-threaded Python builds ✨ ([#181](https://github.com/KarelZe/lev/issues/181)) ([8fa6d4c](https://github.com/KarelZe/lev/commit/8fa6d4cb768ea75c58fcb061d09367ffb0e523fe))
+
 ## [0.3.0](https://github.com/KarelZe/lev/compare/0.2.6...0.3.0) (2026-10-10)
 
 
