@@ -71,7 +71,7 @@ jobs:
           args: >-
             --release --out dist
             -i python3.10 python3.11 python3.12 python3.13 python3.14 python3.14t python3.15 python3.15t
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wheels-linux-${{ matrix.target }}
           path: dist/*.whl
@@ -100,7 +100,7 @@ jobs:
         with:
           target: x64
           args: --release --out dist --find-interpreter
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wheels-windows-x64
           path: dist/*.whl
@@ -129,7 +129,7 @@ jobs:
         with:
           target: universal2-apple-darwin
           args: --release --out dist --find-interpreter
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wheels-macos-universal2
           path: dist/*.whl
@@ -146,7 +146,7 @@ jobs:
         with:
           command: sdist
           args: --out dist
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wheels-sdist
           path: dist/*.tar.gz
