@@ -35,9 +35,8 @@
 //!      UCS-1 uses a `[[u64; W]; 128 or 256]` stack peq (O(1) lookup, no
 //!      heap).  UCS-2/4 use a peq data array addressed through the same kind
 //!      of open-addressing hash index, on the stack up to `m ≤ 512`.
-//!    - *Large* (`m > 512`): strips of a few words sweep the text one after
-//!      another with the const-width kernel, handing the per-column carry
-//!      and boundary bits upwards, so each strip's state stays in registers.
+//!    - *Large* (`m > 512`): one loop over all words per column, with the
+//!      state on the heap.
 //! 5. **Ukkonen banding** (`m > 512`) – similar strings are resolved by a
 //!    narrow diagonal band over Myers' blocked recurrence (O(n · d/w) instead
 //!    of O(n · m/w)).  Band widths double until one proves its result; each
@@ -900,22 +899,12 @@ fn lcs_inner_64<I: Iterator<Item = u64>>(pm_iter: I) -> usize {
     lcs_len(&s)
 }
 
-/// Multi-word LCS over `W` words; returns their share of the LCS length.
-/// With `carries`, the kernel is one strip of a taller pattern (see
-/// [`LargeCtx::lcs_full`]): it reads each column's incoming carry from there
-/// and writes the outgoing one back.
+/// Multi-word LCS over `W` words; returns the LCS length.
 #[inline(always)]
-fn lcs_multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(
-    pm_iter: I,
-    mut carries: Option<&mut [u8]>,
-) -> usize {
+fn lcs_multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(pm_iter: I) -> usize {
     let mut s = [!0u64; W];
-    for (j, pm_row) in pm_iter.enumerate() {
-        let carry_in = carries.as_ref().is_some_and(|c| c[j] != 0);
-        let carry = lcs_step(&mut s, carry_in, |k| pm_row[k]);
-        if let Some(c) = carries.as_deref_mut() {
-            c[j] = carry as u8;
-        }
+    for pm_row in pm_iter {
+        lcs_step(&mut s, false, |k| pm_row[k]);
     }
     lcs_len(&s)
 }
@@ -962,7 +951,7 @@ impl Kernel for Lev {
         n: usize,
         pm_iter: I,
     ) -> usize {
-        (n as isize + multiword_kernel::<W, I>(m, pm_iter, None)) as usize
+        (n as isize + multiword_kernel::<W, I>(m, pm_iter)) as usize
     }
 
     #[inline(always)]
@@ -990,7 +979,7 @@ impl Kernel for Lcs {
         n: usize,
         pm_iter: I,
     ) -> usize {
-        m + n - 2 * lcs_multiword_kernel::<W, I>(pm_iter, None)
+        m + n - 2 * lcs_multiword_kernel::<W, I>(pm_iter)
     }
 
     #[inline(always)]
@@ -1007,31 +996,17 @@ impl Kernel for Lcs {
 /// stack peq tables; longer patterns go through [`LargeCtx`].
 const MAX_W: usize = 8;
 
-/// Edge byte between stacked strips of a tall pattern (see
-/// [`LargeCtx::full`]): bit 0 is the carry of the column addition, bits 1
-/// and 2 the `+1`/`-1` horizontal delta leaving the strip's top row.
-/// Below row 0 the delta is `+1` and there is no carry.
-const EDGE_ROW0: u8 = 0b010;
-
 /// Const-generic inner kernel over `m` pattern rows in `W` words, unrolled
 /// for speed, in Hyyrö's form (bits shifted out of the top of one word are
 /// shifted in at the bottom of the next).  Returns the sum of the vertical
 /// deltas of these rows in the last text column, i.e. their contribution to
-/// the distance on top of `D(0, n) = n` (see [`hyrro_inner`]).  With
-/// `edges`, the kernel is one strip of a taller pattern: it reads each
-/// column's incoming edge from there and writes the outgoing one back.
+/// the distance on top of `D(0, n) = n` (see [`hyrro_inner`]).
 #[inline(always)]
-fn multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(
-    m: usize,
-    pm_iter: I,
-    mut edges: Option<&mut [u8]>,
-) -> isize {
+fn multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(m: usize, pm_iter: I) -> isize {
     let mut vp = [!0u64; W];
     let mut vn = [0u64; W];
-    for (j, pm_row) in pm_iter.enumerate() {
-        let e = edges.as_ref().map_or(EDGE_ROW0, |e| e[j]);
-        let mut carry = e & 1 != 0;
-        let (mut prev_hp, mut prev_hn) = ((e >> 1 & 1) as u64, (e >> 2) as u64);
+    for pm_row in pm_iter {
+        let (mut carry, mut prev_hp, mut prev_hn) = (false, 1u64, 0u64);
         for k in 0..W {
             let (pm, v_p, v_n) = (pm_row[k], vp[k], vn[k]);
             let x = pm | v_n;
@@ -1044,9 +1019,6 @@ fn multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(
             vp[k] = hn_s | !(d0 | hp_s);
             vn[k] = hp_s & d0;
             (prev_hp, prev_hn) = (hp >> 63, hn >> 63);
-        }
-        if let Some(e) = edges.as_deref_mut() {
-            e[j] = carry as u8 | (prev_hp as u8) << 1 | (prev_hn as u8) << 2;
         }
     }
     // Rows above the pattern in the top word hold garbage; mask them off.
@@ -1136,53 +1108,6 @@ fn band_blocks(t: usize) -> usize {
 #[inline(always)]
 fn lcs_band_words(slack: usize, t: usize) -> usize {
     (slack + 2 * t) / 64 + 2
-}
-
-/// Words per strip of the full-matrix kernels: a strip's state stays in
-/// registers while it sweeps the text, so it must fit 16 general-purpose
-/// registers next to the temporaries.  Levenshtein keeps two state words per
-/// pattern word, LCS one.
-const STRIP: usize = 4;
-const LCS_STRIP: usize = 8;
-
-/// Run `$kernel` with the const `W` bound to the width `$w` in `1..=8`.
-macro_rules! with_width {
-    ($w:expr, $W:ident => $kernel:expr) => {
-        match $w {
-            1 => {
-                const $W: usize = 1;
-                $kernel
-            }
-            2 => {
-                const $W: usize = 2;
-                $kernel
-            }
-            3 => {
-                const $W: usize = 3;
-                $kernel
-            }
-            4 => {
-                const $W: usize = 4;
-                $kernel
-            }
-            5 => {
-                const $W: usize = 5;
-                $kernel
-            }
-            6 => {
-                const $W: usize = 6;
-                $kernel
-            }
-            7 => {
-                const $W: usize = 7;
-                $kernel
-            }
-            _ => {
-                const $W: usize = 8;
-                $kernel
-            }
-        }
-    };
 }
 
 /// Shared context for the very-long-pattern kernels (w > MAX_W): `data` is
@@ -1284,30 +1209,33 @@ impl LargeCtx<'_> {
         }
     }
 
-    /// Peq rows restricted to words `w0..w0 + W`, one per text char.
-    #[inline(always)]
-    fn rows<const W: usize>(&self, w0: usize) -> impl Iterator<Item = [u64; W]> + '_ {
-        debug_assert!(w0 + W <= self.w);
-        self.bases
-            .iter()
-            .map(move |&base| std::array::from_fn(|k| self.peq(base, w0 + k)))
-    }
-
-    /// Full-matrix exact kernel (fallback for w > MAX_W).  The pattern is cut
-    /// into strips of [`STRIP`] words, bottom first, and each strip sweeps
-    /// the whole text, handing its per-column edges to the strip above.
+    /// Full-matrix exact kernel (fallback for w > MAX_W): one loop over all
+    /// words per column, with the state on the heap.
     fn full(&self) -> usize {
         let (m, w) = (self.m, self.w);
-        let mut edges = vec![EDGE_ROW0; self.n()];
-        let mut delta = 0isize;
-        for w0 in (0..w).step_by(STRIP) {
-            let rows = (m - 64 * w0).min(64 * STRIP);
-            let e = Some(&mut edges[..]);
-            delta += with_width!((w - w0).min(STRIP), W => {
-                multiword_kernel::<W, _>(rows, self.rows::<W>(w0), e)
-            });
+        let (mut vp, mut vn) = (vec![!0u64; w], vec![0u64; w]);
+        for &base in self.bases {
+            let (mut carry, mut prev_hp, mut prev_hn) = (false, 1u64, 0u64);
+            for (k, (vp_k, vn_k)) in vp.iter_mut().zip(vn.iter_mut()).enumerate() {
+                let (pm, v_p, v_n) = (self.peq(base, k), *vp_k, *vn_k);
+                let x = pm | v_n;
+                let (sum, nc) = (x & v_p).carrying_add(v_p, carry);
+                carry = nc;
+                let d0 = (sum ^ v_p) | x;
+                let hp = v_n | !(d0 | v_p);
+                let hn = v_p & d0;
+                let (hp_s, hn_s) = (hp << 1 | prev_hp, hn << 1 | prev_hn);
+                *vp_k = hn_s | !(d0 | hp_s);
+                *vn_k = hp_s & d0;
+                (prev_hp, prev_hn) = (hp >> 63, hn >> 63);
+            }
         }
-        (self.n() as isize + delta) as usize
+        // Distance = n + sum of the last column's vertical deltas (see
+        // `hyrro_inner`); rows above the pattern hold garbage.
+        vp[w - 1] &= u64::MAX >> (64 * w - m);
+        vn[w - 1] &= u64::MAX >> (64 * w - m);
+        let count = |v: &[u64]| v.iter().map(|x| x.count_ones() as usize).sum::<usize>();
+        self.n() + count(&vp) - count(&vn)
     }
 
     /// Bands of growing width before the full matrix.  Each pass aborts as
@@ -1325,18 +1253,14 @@ impl LargeCtx<'_> {
         self.full()
     }
 
-    /// Full-matrix LCS kernel (fallback for w > MAX_W), strip by strip like
-    /// [`Self::full`]; returns the LCS length.
+    /// Full-matrix LCS kernel (fallback for w > MAX_W), one loop over all
+    /// words per column like [`Self::full`]; returns the LCS length.
     fn lcs_full(&self) -> usize {
-        let mut carries = vec![0u8; self.n()];
-        let mut lcs = 0;
-        for w0 in (0..self.w).step_by(LCS_STRIP) {
-            let c = Some(&mut carries[..]);
-            lcs += with_width!((self.w - w0).min(LCS_STRIP), W => {
-                lcs_multiword_kernel::<W, _>(self.rows::<W>(w0), c)
-            });
+        let mut s = vec![!0u64; self.w];
+        for &base in self.bases {
+            lcs_step(&mut s, false, |k| self.peq(base, k));
         }
-        lcs
+        lcs_len(&s)
     }
 
     /// LCS over the matches on diagonals `j - i` in `[-t, n - m + t]`, rows
