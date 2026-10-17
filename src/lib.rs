@@ -35,13 +35,13 @@
 //!      UCS-1 uses a `[[u64; W]; 128 or 256]` stack peq (O(1) lookup, no
 //!      heap).  UCS-2/4 use a peq data array addressed through the same kind
 //!      of open-addressing hash index, on the stack up to `m ≤ 512`.
-//!    - *Tall* (`m > 512`): strips of up to eight words sweep the text one
-//!      after another with the const-width kernel, handing the per-column
-//!      carry and boundary bits upwards.
+//!    - *Large* (`m > 512`): strips of a few words sweep the text one after
+//!      another with the const-width kernel, handing the per-column carry
+//!      and boundary bits upwards, so each strip's state stays in registers.
 //! 5. **Ukkonen banding** (`m > 512`) – similar strings are resolved by a
 //!    narrow diagonal band over Myers' blocked recurrence (O(n · d/w) instead
-//!    of O(n · m/w)); an early-aborting optimistic pass plus a pass at a cheap
-//!    Hamming-based upper bound keep the overhead on dissimilar strings to a
+//!    of O(n · m/w)).  Band widths double until one proves its result; each
+//!    pass aborts early, which keeps the overhead on dissimilar strings to a
 //!    few percent before falling back to the full matrix.
 //!
 //! [`ratio`] reuses steps 1–3 verbatim and swaps step 4 for the bit-parallel
@@ -830,85 +830,27 @@ fn hyrro_64_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[
 /// shift, or an addition, so information only flows towards higher bits and
 /// garbage above the pattern never reaches the pattern rows.
 ///
-/// No score is tracked per column: `vp`/`vn` hold the vertical deltas of the
-/// current column and `D(0, j) = j`, so the distance after the last of the
-/// `n` columns is `n + popcount(vp) - popcount(vn)` over the pattern rows.
+/// The step is arranged for a short loop-carried chain: `vp & vn == 0` keeps
+/// `vn` out of the addition, and `(sum ^ vp) | vp == sum | vp` lets `ph` skip
+/// Myers' `xh`.  No score is tracked per column: `vp`/`vn` hold the vertical
+/// deltas of the current column and `D(0, j) = j`, so the distance after the
+/// last of the `n` columns is `n + popcount(vp) - popcount(vn)` over the
+/// pattern rows.
 #[inline(always)]
 fn hyrro_inner<I: Iterator<Item = u64>>(m: usize, n: usize, pm_iter: I) -> usize {
     debug_assert!((1..=64).contains(&m));
     let (mut vp, mut vn) = (!0u64, 0u64);
     for eq in pm_iter {
-        (_, _, vp, vn) = myers_step(eq, vp, vn);
+        let sum = (eq & vp).wrapping_add(vp);
+        let ph = vn | !(sum | (vp | eq));
+        let mh = vp & (eq | !sum);
+        let xv = eq | vn;
+        let ph_s = (ph << 1) | 1;
+        vp = (mh << 1) | !(xv | ph_s);
+        vn = ph_s & xv;
     }
     let rows = u64::MAX >> (64 - m);
     n + (vp & rows).count_ones() as usize - (vn & rows).count_ones() as usize
-}
-
-/// One column of Myers' recurrence: returns `(ph, mh, vp', vn')`.
-///
-/// Arranged for a short loop-carried chain: `vp & vn == 0` keeps `vn` out of
-/// the addition, and `(sum ^ vp) | vp == sum | vp` lets `ph` skip Myers'
-/// `xh`, so `vp | eq` and `xv | 1` are formed off the chain.  That leaves
-/// seven dependent ops from `vp` to `vp'`.
-#[cfg(any(test, not(target_arch = "aarch64")))]
-#[inline(always)]
-fn myers_step_portable(eq: u64, vp: u64, vn: u64) -> (u64, u64, u64, u64) {
-    let sum = (eq & vp).wrapping_add(vp);
-    let ph = vn | !(sum | (vp | eq));
-    let mh = vp & (eq | !sum);
-    let xv = eq | vn;
-    let ph_s = ph << 1;
-    (ph, mh, (mh << 1) | !((xv | 1) | ph_s), (ph_s | 1) & xv)
-}
-
-/// [`myers_step_portable`] with its schedule pinned.  On Apple cores a
-/// logical op with a shifted operand has twice the latency of a plain one,
-/// yet LLVM folds the shifts into the ops on the chain and reassociates the
-/// `| 1` back onto it (10 cycles instead of 7 per column).
-#[cfg(target_arch = "aarch64")]
-#[inline(always)]
-fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64, u64, u64) {
-    let (ph, mh): (u64, u64);
-    let (mut vp, mut vn) = (vp, vn);
-    // SAFETY: register-only arithmetic.  `vp`/`vn` are overwritten in place
-    // after their last read, which keeps loop-carried copies out of the loop.
-    unsafe {
-        std::arch::asm!(
-            "and  {sum}, {eq}, {vp}",
-            "orr  {t}, {eq}, {vp}",
-            "orr  {xv}, {eq}, {vn}",
-            "add  {sum}, {sum}, {vp}",
-            "orr  {t}, {t}, {sum}",
-            "orn  {ph}, {vn}, {t}",
-            "orn  {t}, {eq}, {sum}",
-            "and  {mh}, {t}, {vp}",
-            "orr  {xv1}, {xv}, #1",
-            "lsl  {phs}, {ph}, #1",
-            "lsl  {vp}, {mh}, #1",
-            "orr  {t}, {xv1}, {phs}",
-            "orn  {vp}, {vp}, {t}",
-            "orr  {phs}, {phs}, #1",
-            "and  {vn}, {phs}, {xv}",
-            eq = in(reg) eq,
-            vp = inout(reg) vp,
-            vn = inout(reg) vn,
-            sum = out(reg) _,
-            t = out(reg) _,
-            xv = out(reg) _,
-            xv1 = out(reg) _,
-            phs = out(reg) _,
-            ph = out(reg) ph,
-            mh = out(reg) mh,
-            options(pure, nomem, nostack, preserves_flags),
-        );
-    }
-    (ph, mh, vp, vn)
-}
-
-#[cfg(not(target_arch = "aarch64"))]
-#[inline(always)]
-fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64, u64, u64) {
-    myers_step_portable(eq, vp, vn)
 }
 
 // ---------------------------------------------------------------------------
@@ -926,127 +868,56 @@ fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64, u64, u64) {
 // never borrows.  Bits above the pattern length are never set in `pm`, so the
 // `| (s - u)` term always restores them to one; a carry from the addition can
 // disturb them only transiently and they never contribute to the popcount.
+// Over several words the addition is one big-integer addition, so the carry
+// is threaded from the low word upwards; `s - u` stays word-local.
 
-/// Core single-word LCS loop; returns the LCS length.
+/// One column of the LCS recurrence over the words `s`, with `pm(k)` giving
+/// the pattern-match bits of word `k`; returns the outgoing carry.
 #[inline(always)]
-fn lcs_inner_64<I: Iterator<Item = u64>>(pm_iter: I) -> usize {
-    let mut s = !0u64;
-    for pm in pm_iter {
-        let u = s & pm;
-        s = s.wrapping_add(u) | (s - u);
+fn lcs_step(s: &mut [u64], mut carry: bool, pm: impl Fn(usize) -> u64) -> bool {
+    for (k, sk) in s.iter_mut().enumerate() {
+        let u = *sk & pm(k);
+        let (sum, nc) = sk.carrying_add(u, carry);
+        carry = nc;
+        *sk = sum | (*sk - u);
     }
-    (!s).count_ones() as usize
+    carry
 }
 
-/// Multi-word LCS: the column step is one big-integer addition, so the carry
-/// is threaded from the low word upwards; `s - u` stays word-local.  Returns
-/// the LCS contribution of these `W` words.
+/// LCS length encoded in the state words `s`.
 #[inline(always)]
-fn lcs_multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>, E: StripEdge>(
+fn lcs_len(s: &[u64]) -> usize {
+    s.iter().map(|&x| (!x).count_ones() as usize).sum()
+}
+
+/// Single-word LCS loop; returns the LCS length.
+#[inline(always)]
+fn lcs_inner_64<I: Iterator<Item = u64>>(pm_iter: I) -> usize {
+    let mut s = [!0u64];
+    for pm in pm_iter {
+        lcs_step(&mut s, false, |_| pm);
+    }
+    lcs_len(&s)
+}
+
+/// Multi-word LCS over `W` words; returns their share of the LCS length.
+/// With `carries`, the kernel is one strip of a taller pattern (see
+/// [`LargeCtx::lcs_full`]): it reads each column's incoming carry from there
+/// and writes the outgoing one back.
+#[inline(always)]
+fn lcs_multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(
     pm_iter: I,
-    edge: &mut E,
+    mut carries: Option<&mut [u8]>,
 ) -> usize {
     let mut s = [!0u64; W];
     for (j, pm_row) in pm_iter.enumerate() {
-        let mut carry = edge.load(j).carry;
-        for k in 0..W {
-            let sk = s[k];
-            let u = sk & pm_row[k];
-            let (sum, nc) = sk.carrying_add(u, carry);
-            carry = nc;
-            s[k] = sum | (sk - u);
-        }
-        edge.store(
-            j,
-            Edge {
-                carry,
-                hp: 0,
-                hn: 0,
-            },
-        );
-    }
-    s.iter().map(|&w| (!w).count_ones() as usize).sum()
-}
-
-// ---------------------------------------------------------------------------
-// Strip boundaries for tall patterns
-// ---------------------------------------------------------------------------
-
-/// What the top word of one strip hands to the bottom word of the strip above
-/// it within the same text column: the carry of the column addition and, for
-/// Levenshtein, the horizontal-delta bits shifted out of the top row.
-#[derive(Clone, Copy)]
-struct Edge {
-    carry: bool,
-    hp: u64,
-    hn: u64,
-}
-
-impl Edge {
-    /// Boundary above pattern row 0: `D[0][j] - D[0][j - 1] = +1`, no carry.
-    const TOP: Edge = Edge {
-        carry: false,
-        hp: 1,
-        hn: 0,
-    };
-
-    #[inline(always)]
-    fn pack(self) -> u8 {
-        self.carry as u8 | (self.hp as u8) << 1 | (self.hn as u8) << 2
-    }
-
-    #[inline(always)]
-    fn unpack(b: u8) -> Edge {
-        Edge {
-            carry: b & 1 != 0,
-            hp: (b >> 1 & 1) as u64,
-            hn: (b >> 2 & 1) as u64,
+        let carry_in = carries.as_ref().is_some_and(|c| c[j] != 0);
+        let carry = lcs_step(&mut s, carry_in, |k| pm_row[k]);
+        if let Some(c) = carries.as_deref_mut() {
+            c[j] = carry as u8;
         }
     }
-}
-
-/// Source of the inbound and sink of the outbound [`Edge`] per text column.
-trait StripEdge {
-    /// Whether the kernel spans the whole pattern (row 0 below, nothing
-    /// above), so a score tracked in its top word is the distance itself.
-    const WHOLE: bool;
-    fn load(&self, j: usize) -> Edge;
-    fn store(&mut self, j: usize, e: Edge);
-}
-
-/// The kernel covers the whole pattern: row 0 below, nothing above.
-struct Whole;
-
-impl StripEdge for Whole {
-    const WHOLE: bool = true;
-    #[inline(always)]
-    fn load(&self, _j: usize) -> Edge {
-        Edge::TOP
-    }
-
-    #[inline(always)]
-    fn store(&mut self, _j: usize, _e: Edge) {}
-}
-
-/// One strip of a tall pattern: edges are exchanged with the strips below and
-/// above through one packed byte per text column.
-struct Stacked<'a>(&'a mut [u8]);
-
-impl StripEdge for Stacked<'_> {
-    const WHOLE: bool = false;
-    #[inline(always)]
-    fn load(&self, j: usize) -> Edge {
-        debug_assert!(j < self.0.len());
-        // SAFETY: callers size the buffer to the text length.
-        Edge::unpack(unsafe { *self.0.get_unchecked(j) })
-    }
-
-    #[inline(always)]
-    fn store(&mut self, j: usize, e: Edge) {
-        debug_assert!(j < self.0.len());
-        // SAFETY: as in `load`.
-        unsafe { *self.0.get_unchecked_mut(j) = e.pack() }
-    }
+    lcs_len(&s)
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,13 +936,13 @@ trait Kernel {
     /// Single-word kernel (`m <= 64`).
     fn word<I: Iterator<Item = u64>>(m: usize, n: usize, pm_iter: I) -> usize;
 
-    /// Multi-word kernel (`64 < m <= 512`), unrolled over `W = ceil(m / 64)`.
+    /// Multi-word kernel (`64 < m <= 64 * MAX_W`), unrolled over
+    /// `W = ceil(m / 64)`.
     fn words<const W: usize, I: Iterator<Item = [u64; W]>>(m: usize, n: usize, pm_iter: I)
         -> usize;
 
-    /// Heap-backed kernel for very long patterns (`w > 8`).  `ub` is evaluated
-    /// only by kernels that can exploit an upper bound.
-    fn large<U: FnOnce() -> usize>(ctx: &LargeCtx<'_>, ub: U) -> usize;
+    /// Heap-backed kernel for very long patterns (`w > MAX_W`).
+    fn large(ctx: &LargeCtx<'_>) -> usize;
 }
 
 /// Levenshtein distance (substitution, insertion, and deletion each cost 1).
@@ -1091,12 +962,12 @@ impl Kernel for Lev {
         n: usize,
         pm_iter: I,
     ) -> usize {
-        (n as isize + multiword_kernel::<W, I, _>(m, pm_iter, &mut Whole)) as usize
+        (n as isize + multiword_kernel::<W, I>(m, pm_iter, None)) as usize
     }
 
     #[inline(always)]
-    fn large<U: FnOnce() -> usize>(ctx: &LargeCtx<'_>, ub: U) -> usize {
-        ctx.run(ub())
+    fn large(ctx: &LargeCtx<'_>) -> usize {
+        ctx.run()
     }
 }
 
@@ -1119,12 +990,12 @@ impl Kernel for Lcs {
         n: usize,
         pm_iter: I,
     ) -> usize {
-        m + n - 2 * lcs_multiword_kernel::<W, I, _>(pm_iter, &mut Whole)
+        m + n - 2 * lcs_multiword_kernel::<W, I>(pm_iter, None)
     }
 
     #[inline(always)]
-    fn large<U: FnOnce() -> usize>(ctx: &LargeCtx<'_>, ub: U) -> usize {
-        ctx.m + ctx.n() - 2 * ctx.lcs_run(ub)
+    fn large(ctx: &LargeCtx<'_>) -> usize {
+        ctx.m + ctx.n() - 2 * ctx.lcs_run()
     }
 }
 
@@ -1132,119 +1003,56 @@ impl Kernel for Lcs {
 // Multi-word Hyyrö (m > 64)
 // ---------------------------------------------------------------------------
 
-/// Const-generic inner kernel over `m` pattern rows in `W` words. Unrolled
-/// for speed.  Returns the sum of the vertical deltas of these rows in the
-/// last text column (see `hyrro_inner`), i.e. their contribution to the
-/// distance on top of `D(0, n) = n`.
-#[inline(always)]
-fn multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>, E: StripEdge>(
-    m: usize,
-    pm_iter: I,
-    edge: &mut E,
-) -> isize {
-    multiword_kernel_form::<W, I, E, { cfg!(target_arch = "x86_64") }>(m, pm_iter, edge)
-}
+/// Widest pattern, in 64-bit words, handled by the const-width kernels with
+/// stack peq tables; longer patterns go through [`LargeCtx`].
+const MAX_W: usize = 8;
 
-/// [`multiword_kernel`] with the step formulation chosen explicitly
-/// (`HYYRO`: Hyyrö's textbook form, else the short-chain form); both are
-/// compiled on every target so tests cover each.
+/// Edge byte between stacked strips of a tall pattern (see
+/// [`LargeCtx::full`]): bit 0 is the carry of the column addition, bits 1
+/// and 2 the `+1`/`-1` horizontal delta leaving the strip's top row.
+/// Below row 0 the delta is `+1` and there is no carry.
+const EDGE_ROW0: u8 = 0b010;
+
+/// Const-generic inner kernel over `m` pattern rows in `W` words, unrolled
+/// for speed, in Hyyrö's form (bits shifted out of the top of one word are
+/// shifted in at the bottom of the next).  Returns the sum of the vertical
+/// deltas of these rows in the last text column, i.e. their contribution to
+/// the distance on top of `D(0, n) = n` (see [`hyrro_inner`]).  With
+/// `edges`, the kernel is one strip of a taller pattern: it reads each
+/// column's incoming edge from there and writes the outgoing one back.
 #[inline(always)]
-fn multiword_kernel_form<
-    const W: usize,
-    I: Iterator<Item = [u64; W]>,
-    E: StripEdge,
-    const HYYRO: bool,
->(
+fn multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(
     m: usize,
     pm_iter: I,
-    edge: &mut E,
+    mut edges: Option<&mut [u8]>,
 ) -> isize {
-    let last_bits = m - (W - 1) * 64; // 1..=64
     let mut vp = [!0u64; W];
     let mut vn = [0u64; W];
-
-    // Opaque zero on AArch64: keeps the constant row-0 boundary bits
-    // (`Whole`) from being folded into masks on the critical chain (see
-    // `myers_step`).  Elsewhere it would only cost a reload per column.
-    let zero = if cfg!(target_arch = "aarch64") {
-        std::hint::black_box(0u64)
-    } else {
-        0
-    };
-
-    // x86-64 only: from seven words on, LLVM's SLP vectorizer moves part of
-    // the state through SSE registers unless the loop also tracks the score
-    // of row `m` in the top word; tracking it there costs fewer instructions
-    // than the vectorized form (measured per column), below that the final
-    // popcount is cheaper.  Only meaningful when the kernel spans the whole
-    // pattern.
-    let track = HYYRO && W >= 7 && E::WHOLE;
-    let (mut score, mut columns) = (m as isize, 0isize);
     for (j, pm_row) in pm_iter.enumerate() {
-        columns += 1;
-        let edge_in = edge.load(j);
-        let mut carry = edge_in.carry;
-        // Two formulations of the same step, one per register file.  On
-        // AArch64 it is `myers_step_portable`'s short-chain form, with each
-        // bit shifted in at the bottom of a word taken as the top bit of the
-        // word below (or of the edge, placed at bit 63) so every shift-in is
-        // one funnel shift (`extr`).  On x86-64 that form keeps more values
-        // live than 16 registers hold and gets SLP-vectorized through SSE for
-        // W >= 5; Hyyrö's textbook form, shifting in 0/1 bits (one `lea`),
-        // executes fewer instructions there at every width.
-        let (top_hp, top_hn) = if !HYYRO {
-            let mut below_ph = (edge_in.hp << 63) | zero;
-            let mut below_mh = (edge_in.hn << 63) | zero;
-            for k in 0..W {
-                let (eq, v_p, v_n) = (pm_row[k], vp[k], vn[k]);
-                let (sum, nc) = (eq & v_p).carrying_add(v_p, carry);
-                carry = nc;
-                let ph = v_n | !(sum | (v_p | eq));
-                let mh = v_p & (eq | !sum);
-                let xv = eq | v_n;
-                let ph_s = ph << 1 | below_ph >> 63;
-                vp[k] = (mh << 1 | below_mh >> 63) | !(xv | ph_s);
-                vn[k] = ph_s & xv;
-                (below_ph, below_mh) = (ph, mh);
-            }
-            (below_ph >> 63, below_mh >> 63)
-        } else {
-            let (mut prev_hp, mut prev_hn) = (edge_in.hp | zero, edge_in.hn);
-            for k in 0..W {
-                let (pm, v_p, v_n) = (pm_row[k], vp[k], vn[k]);
-                let x = pm | v_n;
-                let (sum, nc) = (x & v_p).carrying_add(v_p, carry);
-                carry = nc;
-                let d0 = (sum ^ v_p) | x;
-                let hp = v_n | !(d0 | v_p);
-                let hn = v_p & d0;
-                if track && k == W - 1 {
-                    let top = last_bits - 1;
-                    score += ((hp >> top) & 1) as isize - ((hn >> top) & 1) as isize;
-                }
-                let (hp_s, hn_s) = (hp << 1 | prev_hp, hn << 1 | prev_hn);
-                vp[k] = hn_s | !(d0 | hp_s);
-                vn[k] = hp_s & d0;
-                (prev_hp, prev_hn) = (hp >> 63, hn >> 63);
-            }
-            (prev_hp, prev_hn)
-        };
-        edge.store(
-            j,
-            Edge {
-                carry,
-                hp: top_hp,
-                hn: top_hn,
-            },
-        );
-    }
-    if track {
-        // `score` is D(m, n); the contract is the delta over D(0, n) = n.
-        return score - columns;
+        let e = edges.as_ref().map_or(EDGE_ROW0, |e| e[j]);
+        let mut carry = e & 1 != 0;
+        let (mut prev_hp, mut prev_hn) = ((e >> 1 & 1) as u64, (e >> 2) as u64);
+        for k in 0..W {
+            let (pm, v_p, v_n) = (pm_row[k], vp[k], vn[k]);
+            let x = pm | v_n;
+            let (sum, nc) = (x & v_p).carrying_add(v_p, carry);
+            carry = nc;
+            let d0 = (sum ^ v_p) | x;
+            let hp = v_n | !(d0 | v_p);
+            let hn = v_p & d0;
+            let (hp_s, hn_s) = (hp << 1 | prev_hp, hn << 1 | prev_hn);
+            vp[k] = hn_s | !(d0 | hp_s);
+            vn[k] = hp_s & d0;
+            (prev_hp, prev_hn) = (hp >> 63, hn >> 63);
+        }
+        if let Some(e) = edges.as_deref_mut() {
+            e[j] = carry as u8 | (prev_hp as u8) << 1 | (prev_hn as u8) << 2;
+        }
     }
     // Rows above the pattern in the top word hold garbage; mask them off.
-    vp[W - 1] &= u64::MAX >> (64 - last_bits);
-    vn[W - 1] &= u64::MAX >> (64 - last_bits);
+    let rows = u64::MAX >> (64 * W - m);
+    vp[W - 1] &= rows;
+    vn[W - 1] &= rows;
     let count = |v: &[u64; W]| v.iter().map(|x| x.count_ones() as isize).sum::<isize>();
     count(&vp) - count(&vn)
 }
@@ -1292,120 +1100,101 @@ fn hyrro_multiword_bytes<K: Kernel, const SLOTS: usize>(short: &[u8], long: &[u8
                 peq[c as usize * w + i / 64] |= 1u64 << (i % 64);
             }
             let bases: Vec<usize> = long.iter().map(|&c| c as usize * w).collect();
-            K::large(
-                &LargeCtx {
-                    m,
-                    w,
-                    data: &peq,
-                    bases: &bases,
-                },
-                || hamming_ub(short, long),
-            )
+            let ctx = LargeCtx {
+                m,
+                w,
+                data: &peq,
+                bases: &bases,
+            };
+            K::large(&ctx)
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Banded multi-word Hyyrö (w > 8)
+// Banded multi-word kernels (w > MAX_W)
 // ---------------------------------------------------------------------------
 
-/// Cheap upper bound on the distance: substitute every mismatch of the
-/// length-aligned prefix, then insert the remaining tail of the longer string.
+/// Band parameter for the next pass after a band of parameter `t` gave up at
+/// text column `j` of `n`.  The band's bound on the distance grows about
+/// linearly with `j`, so extrapolating it to `n` (with a margin) estimates
+/// the distance; at least double `t` so that the passes grow geometrically.
 #[inline(always)]
-fn hamming_ub<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2]) -> usize {
-    // An under-estimate here would silently break the guaranteed banded pass,
-    // so violations of the caller's ordering must fail loudly, not saturate.
-    debug_assert!(short.len() <= long.len());
-    long.len() - short.len()
-        + short
-            .iter()
-            .zip(long.iter())
-            .filter(|(x, y)| x.as_u64() != y.as_u64())
-            .count()
+fn next_band(t: usize, j: usize, n: usize) -> usize {
+    (t * n / j * 5 / 4).max(2 * t)
 }
 
-/// Outcome of one LCS band pass (see [`LargeCtx::lcs_banded`]).
-enum Band {
-    /// Certified LCS length.
-    Exact(usize),
-    /// Not certified; the band's indel distance, a true upper bound.
-    Above(usize),
-    /// Gave up at this text column.
-    Aborted(usize),
-}
-
-/// Upper bound on the words an LCS band of parameter `t` (diagonals
-/// `[-t, slack + t]`) touches in one column.
-#[inline(always)]
-fn lcs_band_words(slack: usize, t: usize) -> usize {
-    (slack + 2 * t) / 64 + 2
-}
-
-/// Number of 64-row blocks a band of half-width `t` can touch in one column.
+/// Number of 64-row blocks a Levenshtein band of half-width `t` can touch in
+/// one column.
 #[inline(always)]
 fn band_blocks(t: usize) -> usize {
     2 * t / 64 + 2
 }
 
-/// Evaluate `$body` with the const `$W` bound to the runtime width `$w`,
-/// which must be in `1..=STRIP`.
+/// Number of words an LCS band of parameter `t` (diagonals `[-t, slack + t]`)
+/// can touch in one column.
+#[inline(always)]
+fn lcs_band_words(slack: usize, t: usize) -> usize {
+    (slack + 2 * t) / 64 + 2
+}
+
+/// Words per strip of the full-matrix kernels: a strip's state stays in
+/// registers while it sweeps the text, so it must fit 16 general-purpose
+/// registers next to the temporaries.  Levenshtein keeps two state words per
+/// pattern word, LCS one.
+const STRIP: usize = 4;
+const LCS_STRIP: usize = 8;
+
+/// Run `$kernel` with the const `W` bound to the width `$w` in `1..=8`.
 macro_rules! with_width {
-    ($w:expr, $W:ident => $body:expr) => {
+    ($w:expr, $W:ident => $kernel:expr) => {
         match $w {
             1 => {
                 const $W: usize = 1;
-                $body
+                $kernel
             }
             2 => {
                 const $W: usize = 2;
-                $body
+                $kernel
             }
             3 => {
                 const $W: usize = 3;
-                $body
+                $kernel
             }
             4 => {
                 const $W: usize = 4;
-                $body
+                $kernel
             }
             5 => {
                 const $W: usize = 5;
-                $body
+                $kernel
             }
             6 => {
                 const $W: usize = 6;
-                $body
+                $kernel
             }
             7 => {
                 const $W: usize = 7;
-                $body
+                $kernel
             }
-            8 => {
+            _ => {
                 const $W: usize = 8;
-                $body
+                $kernel
             }
-            _ => unreachable!("strip width must be in 1..=STRIP"),
         }
     };
 }
 
-/// Shared context for the very-long-pattern kernels (w > 8 words): `data` is
+/// Shared context for the very-long-pattern kernels (w > MAX_W): `data` is
 /// the flat peq table with stride `w`, and `bases[j]` is the offset of text
 /// char `j`'s row in it.  Resolving rows once pays off because the kernels
-/// below sweep the text several times (bands, strips).
+/// below may sweep the text several times.
 struct LargeCtx<'a> {
     m: usize,
     w: usize,
     data: &'a [u64],
     bases: &'a [usize],
 }
-
-/// Words per strip of the tall-pattern kernels.  A strip's `vp`/`vn` state
-/// must stay in registers: eight words (16 live state registers plus
-/// temporaries) fit AArch64's 31 general-purpose registers, but on x86-64's
-/// 16 they spill on every column and cost more instructions per word than
-/// the strips save, so there four words is the widest that fits.
-const STRIP: usize = if cfg!(target_arch = "x86_64") { 4 } else { 8 };
 
 impl LargeCtx<'_> {
     /// Text length.
@@ -1414,19 +1203,12 @@ impl LargeCtx<'_> {
         self.bases.len()
     }
 
-    /// Peq rows restricted to words `w0..w0 + W`, one per text char.
+    /// Peq word `k` of the row starting at `base`.
     #[inline(always)]
-    fn rows<const W: usize>(&self, w0: usize) -> impl Iterator<Item = [u64; W]> + '_ {
-        debug_assert!(w0 + W <= self.w);
-        self.bases.iter().map(move |&base| {
-            let mut row = [0u64; W];
-            for (k, r) in row.iter_mut().enumerate() {
-                // SAFETY: base + w0 + k < base + w, and every base is the
-                // start of a length-w row of `data`.
-                *r = unsafe { *self.data.get_unchecked(base + w0 + k) };
-            }
-            row
-        })
+    fn peq(&self, base: usize, k: usize) -> u64 {
+        debug_assert!(k < self.w && base + k < self.data.len());
+        // SAFETY: every base starts a length-w row of `data`, and k < w.
+        unsafe { *self.data.get_unchecked(base + k) }
     }
 
     /// Ukkonen band of half-width `t` over Myers' blocked recurrence: blocks
@@ -1437,30 +1219,27 @@ impl LargeCtx<'_> {
     /// block; `+1`-per-row extension above entering blocks), so every computed
     /// cell is `>=` its true value, while cells on any optimal path are exact
     /// whenever the true distance is `<= t` (such paths never leave the band).
-    /// Returns `Some(distance)` when the result proves itself (`score <= t`).
-    fn banded(&self, t: usize, pv: &mut [u64], mv: &mut [u64], abort: bool) -> Option<usize> {
+    /// Returns `Ok(distance)` when the result proves itself (`score <= t`),
+    /// else `Err(j)` with the text column where the band gave up.
+    fn banded(&self, t: usize, pv: &mut [u64], mv: &mut [u64]) -> Result<usize, usize> {
         let (m, n, w) = (self.m, self.n(), self.w);
         debug_assert!(n >= m);
         debug_assert!(t >= n - m);
-        debug_assert!(pv.len() >= w && mv.len() >= w);
+        let (pv, mv) = (&mut pv[..w], &mut mv[..w]);
         // Lowest row covered when `k` is the last live block.
         let bottom = |k: usize| (64 * (k + 1)).min(m);
         let mut last = (t / 64).min(w - 1);
         let mut first = 0usize;
-        for k in 0..=last {
-            pv[k] = !0;
-            mv[k] = 0;
-        }
+        pv[..=last].fill(!0);
+        mv[..=last].fill(0);
         let mut score = bottom(last) as isize;
         let mut top_bit = (bottom(last) - 1) & 63;
 
-        for j in 1..=n {
+        for (j, &base) in (1..=n).zip(self.bases) {
             let needed = ((j + t - 1) / 64).min(w - 1);
             if needed > last {
-                for k in last + 1..=needed {
-                    pv[k] = !0;
-                    mv[k] = 0;
-                }
+                pv[last + 1..=needed].fill(!0);
+                mv[last + 1..=needed].fill(0);
                 score += (bottom(needed) - bottom(last)) as isize;
                 last = needed;
                 top_bit = (bottom(last) - 1) & 63;
@@ -1468,15 +1247,10 @@ impl LargeCtx<'_> {
             if j > t + 1 {
                 first = ((j - t - 1) / 64).min(last);
             }
-            debug_assert!(first <= last);
-            // SAFETY: 1 <= j <= n.
-            let base = unsafe { *self.bases.get_unchecked(j - 1) };
             let mut hin: i32 = 1;
             for k in first..=last {
-                let eq = unsafe { *self.data.get_unchecked(base + k) };
-                // SAFETY: k <= last, and both `last` assignments clamp with
-                // .min(w - 1); pv/mv have length >= w (asserted at entry).
-                let (pv_k, mv_k) = unsafe { (*pv.get_unchecked(k), *mv.get_unchecked(k)) };
+                let eq = self.peq(base, k);
+                let (pv_k, mv_k) = (pv[k], mv[k]);
                 let xv = eq | mv_k;
                 let eq_in = eq | ((hin < 0) as u64);
                 let xh = ((eq_in & pv_k).wrapping_add(pv_k) ^ pv_k) | eq_in;
@@ -1488,11 +1262,8 @@ impl LargeCtx<'_> {
                 let hout = ((ph >> 63) & 1) as i32 - ((mh >> 63) & 1) as i32;
                 let ph_s = (ph << 1) | ((hin > 0) as u64);
                 let mh_s = (mh << 1) | ((hin < 0) as u64);
-                // SAFETY: same bound as the read above.
-                unsafe {
-                    *pv.get_unchecked_mut(k) = mh_s | !(xv | ph_s);
-                    *mv.get_unchecked_mut(k) = ph_s & xv;
-                }
+                pv[k] = mh_s | !(xv | ph_s);
+                mv[k] = ph_s & xv;
                 hin = hout;
             }
             // `score` never underestimates D[bottom(last)][j], and finishing
@@ -1500,172 +1271,108 @@ impl LargeCtx<'_> {
             // decreases along diagonal steps); once that exceeds `t` this band
             // can no longer prove a result, so bail out and let the caller
             // widen or fall back.
-            if abort {
-                let excess = (n - j) as isize - (m - bottom(last)) as isize;
-                if score - excess.max(0) > t as isize {
-                    return None;
-                }
+            let excess = (n - j) as isize - (m - bottom(last)) as isize;
+            if score - excess.max(0) > t as isize {
+                return Err(j);
             }
         }
         debug_assert_eq!(last, w - 1);
-        (score as usize <= t).then_some(score as usize)
+        if score as usize <= t {
+            Ok(score as usize)
+        } else {
+            Err(n)
+        }
     }
 
-    /// Full-matrix exact kernel (fallback for w > 8).
-    ///
-    /// On AArch64 the pattern is cut into strips of up to [`STRIP`] words,
-    /// bottom first, and each strip sweeps the whole text with the
-    /// const-width kernel, handing its per-column [`Edge`]s to the strip
-    /// above; that keeps the addition carry in flags between words.  On
-    /// x86-64 a strip's state does not fit the register file, so there one
-    /// loop over all `w` words per column, with the state in memory,
-    /// executes fewer instructions.
+    /// Peq rows restricted to words `w0..w0 + W`, one per text char.
+    #[inline(always)]
+    fn rows<const W: usize>(&self, w0: usize) -> impl Iterator<Item = [u64; W]> + '_ {
+        debug_assert!(w0 + W <= self.w);
+        self.bases
+            .iter()
+            .map(move |&base| std::array::from_fn(|k| self.peq(base, w0 + k)))
+    }
+
+    /// Full-matrix exact kernel (fallback for w > MAX_W).  The pattern is cut
+    /// into strips of [`STRIP`] words, bottom first, and each strip sweeps
+    /// the whole text, handing its per-column edges to the strip above.
     fn full(&self) -> usize {
-        if cfg!(target_arch = "x86_64") {
-            self.full_dynamic()
-        } else {
-            self.full_strips()
+        let (m, w) = (self.m, self.w);
+        let mut edges = vec![EDGE_ROW0; self.n()];
+        let mut delta = 0isize;
+        for w0 in (0..w).step_by(STRIP) {
+            let rows = (m - 64 * w0).min(64 * STRIP);
+            let e = Some(&mut edges[..]);
+            delta += with_width!((w - w0).min(STRIP), W => {
+                multiword_kernel::<W, _>(rows, self.rows::<W>(w0), e)
+            });
         }
+        (self.n() as isize + delta) as usize
     }
 
-    /// [`Self::full`] strip by strip.
-    fn full_strips(&self) -> usize {
-        let (m, w) = (self.m, self.w);
-        let mut edges = vec![Edge::TOP.pack(); self.n()];
-        let mut edge = Stacked(&mut edges);
-        let (mut w0, mut deltas) = (0, 0isize);
-        while w - w0 > STRIP {
-            deltas +=
-                multiword_kernel::<STRIP, _, _>(64 * STRIP, self.rows::<STRIP>(w0), &mut edge);
-            w0 += STRIP;
-        }
-        let rows = m - 64 * w0;
-        deltas += with_width!(w - w0, W => multiword_kernel::<W, _, _>(rows, self.rows::<W>(w0), &mut edge));
-        (self.n() as isize + deltas) as usize
-    }
-
-    /// [`Self::full`] as one loop over all words per column.
-    fn full_dynamic(&self) -> usize {
-        let (m, w) = (self.m, self.w);
-        let (mut vp, mut vn) = (vec![!0u64; w], vec![0u64; w]);
-        for &base in self.bases {
-            let (mut carry, mut prev_hp, mut prev_hn) = (false, 1u64, 0u64);
-            for k in 0..w {
-                // SAFETY: k < w; vp/vn have length w and `base` starts a
-                // length-w row of `data`.
-                unsafe {
-                    let pm = *self.data.get_unchecked(base + k);
-                    let (v_p, v_n) = (*vp.get_unchecked(k), *vn.get_unchecked(k));
-                    let x = pm | v_n;
-                    let (sum, nc) = (x & v_p).carrying_add(v_p, carry);
-                    carry = nc;
-                    let d0 = (sum ^ v_p) | x;
-                    let hp = v_n | !(d0 | v_p);
-                    let hn = v_p & d0;
-                    let (hp_s, hn_s) = (hp << 1 | prev_hp, hn << 1 | prev_hn);
-                    *vp.get_unchecked_mut(k) = hn_s | !(d0 | hp_s);
-                    *vn.get_unchecked_mut(k) = hp_s & d0;
-                    (prev_hp, prev_hn) = (hp >> 63, hn >> 63);
-                }
+    /// Bands of growing width before the full matrix.  Each pass aborts as
+    /// soon as it can no longer prove a result, so a miss on dissimilar
+    /// strings costs a few percent of the full kernel.
+    fn run(&self) -> usize {
+        let (mut pv, mut mv) = (vec![0u64; self.w], vec![0u64; self.w]);
+        let mut t = (self.n() - self.m + 32).max(64);
+        while band_blocks(t) * 3 <= self.w {
+            match self.banded(t, &mut pv, &mut mv) {
+                Ok(d) => return d,
+                Err(j) => t = next_band(t, j, self.n()),
             }
         }
-        // Distance = n + sum of the last column's vertical deltas (see
-        // `hyrro_inner`); rows above the pattern hold garbage.
-        vp[w - 1] &= u64::MAX >> (64 * w - m);
-        vn[w - 1] &= u64::MAX >> (64 * w - m);
-        let count = |v: &[u64]| v.iter().map(|x| x.count_ones() as usize).sum::<usize>();
-        self.n() + count(&vp) - count(&vn)
+        self.full()
     }
 
-    /// Full-matrix LCS kernel (fallback for w > 8), strip-mined like
-    /// [`Self::full`] on AArch64 and a single loop over the words on x86-64
-    /// for the same reason; returns the LCS length.
+    /// Full-matrix LCS kernel (fallback for w > MAX_W), strip by strip like
+    /// [`Self::full`]; returns the LCS length.
     fn lcs_full(&self) -> usize {
-        if cfg!(target_arch = "x86_64") {
-            self.lcs_full_dynamic()
-        } else {
-            self.lcs_full_strips()
+        let mut carries = vec![0u8; self.n()];
+        let mut lcs = 0;
+        for w0 in (0..self.w).step_by(LCS_STRIP) {
+            let c = Some(&mut carries[..]);
+            lcs += with_width!((self.w - w0).min(LCS_STRIP), W => {
+                lcs_multiword_kernel::<W, _>(self.rows::<W>(w0), c)
+            });
         }
-    }
-
-    /// [`Self::lcs_full`] as one loop over all words per column.
-    fn lcs_full_dynamic(&self) -> usize {
-        let w = self.w;
-        let mut s = vec![!0u64; w];
-        for &base in self.bases {
-            let mut carry = false;
-            for k in 0..w {
-                // SAFETY: k < w; s has length w and `base` starts a length-w
-                // row of `data`.
-                unsafe {
-                    let pm = *self.data.get_unchecked(base + k);
-                    let sk = *s.get_unchecked(k);
-                    let u = sk & pm;
-                    let (sum, nc) = sk.carrying_add(u, carry);
-                    carry = nc;
-                    *s.get_unchecked_mut(k) = sum | (sk - u);
-                }
-            }
-        }
-        s.iter().map(|&x| (!x).count_ones() as usize).sum()
-    }
-
-    /// [`Self::lcs_full`] strip by strip.
-    fn lcs_full_strips(&self) -> usize {
-        let w = self.w;
-        let mut edges = vec![Edge::TOP.pack(); self.n()];
-        let mut edge = Stacked(&mut edges);
-        let (mut lcs, mut w0) = (0, 0);
-        while w - w0 > STRIP {
-            lcs += lcs_multiword_kernel::<STRIP, _, _>(self.rows::<STRIP>(w0), &mut edge);
-            w0 += STRIP;
-        }
-        lcs + with_width!(w - w0, W => lcs_multiword_kernel::<W, _, _>(self.rows::<W>(w0), &mut edge))
+        lcs
     }
 
     /// LCS over the matches on diagonals `j - i` in `[-t, n - m + t]`, rows
     /// widened to whole words, computed by running only the words that
-    /// intersect that band in each column.
+    /// intersect that band in each column.  Returns `Ok(lcs)` when the band
+    /// certifies it, else `Err(j)` with the text column where it gave up.
     ///
     /// Skipping a word is the same as zeroing its pattern-match bits for that
     /// column: words below the band are still all ones, and all-ones words
     /// without matches only pass the carry through; words above it, without
     /// matches and with no carry from row 0, stay unchanged and emit no
-    /// carry.  The band only moves down, so the result `l` is the exact LCS
-    /// over a superset of the in-band matches, hence `l <= LLCS`.  An
-    /// alignment using any match off the band costs more than `n - m + 2t`
-    /// indels, so `l` is exact whenever `m + n - 2l <= n - m + 2t`.  With
-    /// `abort`, gives up once that is unreachable.
-    fn lcs_banded(&self, t: usize, s: &mut [u64], abort: bool) -> Band {
+    /// carry.  The band only moves down, so `l` is the exact LCS over a
+    /// superset of the in-band matches, hence `l <= LLCS`.  An alignment using
+    /// any match off the band costs more than `n - m + 2t` indels, so `l` is
+    /// exact whenever `m + n - 2l <= n - m + 2t`.
+    fn lcs_banded(&self, t: usize, s: &mut [u64]) -> Result<usize, usize> {
         let (m, n, w) = (self.m, self.n(), self.w);
-        debug_assert!(n >= m && s.len() >= w);
+        debug_assert!(n >= m);
         let slack = n - m;
-        s[..w].fill(!0);
-        let span = lcs_band_words(slack, t);
-        let swept = if span <= STRIP && span <= w {
-            with_width!(span, W => self.lcs_band_window::<W>(t, s, abort))
-        } else {
-            self.lcs_band_dynamic(t, s, abort)
-        };
-        if let Err(j) = swept {
-            return Band::Aborted(j);
+        let s = &mut s[..w];
+        s.fill(!0);
+        for (j, &base) in (1..=n).zip(self.bases) {
+            // Rows of the band in column j: `[j - 1 - slack - t, j - 1 + t]`.
+            let first = j.saturating_sub(slack + t + 1) / 64;
+            let last = ((j + t - 1) / 64).min(w - 1);
+            lcs_step(&mut s[first..=last], false, |k| self.peq(base, first + k));
+            if j % 32 == 0 && self.lcs_band_hopeless(j, t, s) {
+                return Err(j);
+            }
         }
-        let l = s[..w]
-            .iter()
-            .map(|&x| (!x).count_ones() as usize)
-            .sum::<usize>();
+        let l = lcs_len(s);
         if m + n - 2 * l <= slack + 2 * t {
-            Band::Exact(l)
+            Ok(l)
         } else {
-            Band::Above(m + n - 2 * l)
+            Err(n)
         }
-    }
-
-    /// Lowest word of the band in column `j` (1-based): its top row is
-    /// `j - 1 - slack - t`.
-    #[inline(always)]
-    fn lcs_band_first(&self, j: usize, t: usize) -> usize {
-        j.saturating_sub(self.n() - self.m + t + 1) / 64
     }
 
     /// Whether the band pass can no longer certify (see [`Self::lcs_banded`]).
@@ -1675,175 +1382,33 @@ impl LargeCtx<'_> {
     /// `P(r)` counts LCS increments in rows < r.  As P grows by at most one
     /// per row, the minimum over r sits at `r = j - slack`, where the bound
     /// is `2j - slack - 2 * P(j - slack)`; for `j < slack` it sits at row 0
-    /// and is just `slack`, which never exceeds the limit.  `word(k)` reads
-    /// the current state of word k.
-    #[inline(always)]
-    fn lcs_band_hopeless(&self, j: usize, t: usize, word: impl Fn(usize) -> u64) -> bool {
+    /// and is just `slack`, which never exceeds the limit.
+    fn lcs_band_hopeless(&self, j: usize, t: usize, s: &[u64]) -> bool {
         let slack = self.n() - self.m;
         let Some(c) = j.checked_sub(slack) else {
             return false;
         };
         let (full, part) = (c / 64, c % 64);
-        let mut p: usize = (0..full).map(|k| (!word(k)).count_ones() as usize).sum();
+        let mut p = lcs_len(&s[..full]);
         if part != 0 {
-            p += (!word(full) & ((1u64 << part) - 1)).count_ones() as usize;
+            p += (!s[full] & ((1u64 << part) - 1)).count_ones() as usize;
         }
         // p <= c, so this cannot underflow.
         2 * j - slack - 2 * p > slack + 2 * t
     }
 
-    /// Band sweep keeping a `W`-word window in registers.  The window starts
-    /// at `min(first, w - W)`, so both of its ends only move down and it
-    /// always covers the band (`W >= lcs_band_words`); a word leaving the
-    /// window is final and written back to `s`, and words it has not reached
-    /// yet are still all ones there.  Returns the column of an abort.
-    #[inline(always)]
-    fn lcs_band_window<const W: usize>(
-        &self,
-        t: usize,
-        s: &mut [u64],
-        abort: bool,
-    ) -> Result<(), usize> {
-        let (n, w) = (self.n(), self.w);
-        debug_assert!(W <= w);
-        let mut start = 0usize;
-        let mut win = [!0u64; W];
-        for j in 1..=n {
-            let want = self.lcs_band_first(j, t).min(w - W);
-            while start < want {
-                s[start] = win[0];
-                win.rotate_left(1);
-                win[W - 1] = !0;
-                start += 1;
-            }
-            // SAFETY: 1 <= j <= n, and start + W <= w within a length-w row.
-            let base = unsafe { *self.bases.get_unchecked(j - 1) } + start;
-            let mut carry = false;
-            for (k, sk) in win.iter_mut().enumerate() {
-                let pm = unsafe { *self.data.get_unchecked(base + k) };
-                let u = *sk & pm;
-                let (sum, nc) = sk.carrying_add(u, carry);
-                carry = nc;
-                *sk = sum | (*sk - u);
-            }
-            if abort
-                && j % 32 == 0
-                && self.lcs_band_hopeless(j, t, |k| match k.checked_sub(start) {
-                    None => s[k],
-                    Some(i) if i < W => win[i],
-                    Some(_) => !0,
-                })
-            {
-                return Err(j);
-            }
-        }
-        s[start..start + W].copy_from_slice(&win);
-        Ok(())
-    }
-
-    /// Band sweep for bands wider than [`STRIP`] words, state in `s`.
-    fn lcs_band_dynamic(&self, t: usize, s: &mut [u64], abort: bool) -> Result<(), usize> {
-        let (n, w) = (self.n(), self.w);
-        for j in 1..=n {
-            let first = self.lcs_band_first(j, t);
-            let last = ((j + t - 1) / 64).min(w - 1);
-            // SAFETY: 1 <= j <= n.
-            let base = unsafe { *self.bases.get_unchecked(j - 1) };
-            let mut carry = false;
-            for k in first..=last {
-                // SAFETY: k <= last <= w - 1 <= s.len() - 1, and base starts
-                // a length-w row of `data`.
-                unsafe {
-                    let pm = *self.data.get_unchecked(base + k);
-                    let sk = *s.get_unchecked(k);
-                    let u = sk & pm;
-                    let (sum, nc) = sk.carrying_add(u, carry);
-                    carry = nc;
-                    *s.get_unchecked_mut(k) = sum | (sk - u);
-                }
-            }
-            if abort && j % 32 == 0 && self.lcs_band_hopeless(j, t, |k| s[k]) {
-                return Err(j);
-            }
-        }
-        Ok(())
-    }
-
-    /// LCS length via narrow bands before paying for the full matrix.
-    /// `ub` yields [`hamming_ub`], i.e. `n - m + mismatches` of the
-    /// length-aligned prefix; it is evaluated only if a second band is
-    /// considered.
-    fn lcs_run(&self, ub: impl FnOnce() -> usize) -> usize {
-        let (m, n, w) = (self.m, self.n(), self.w);
-        let slack = n - m;
-        let blocks = |t: usize| lcs_band_words(slack, t);
-        let mut s = vec![0u64; w];
-        let t0 = 64;
-        if blocks(t0) * 2 > w {
-            return self.lcs_full();
-        }
-        // Band parameter whose certificate covers indel distance `d`.
-        let t_for = |d: usize| d.saturating_sub(slack).div_ceil(2);
-        let t1 = match self.lcs_banded(t0, &mut s, true) {
-            Band::Exact(l) => return l,
-            // A band at least this wide reproduces a result at least as
-            // good, so it certifies.
-            Band::Above(d) => t_for(d),
-            Band::Aborted(j) => {
-                // The aligned-prefix alignment (matches on diagonal 0) has
-                // `slack + 2 * mismatches` indels, so t = mismatches always
-                // certifies.  The abort bound grows roughly linearly in j,
-                // so extrapolating it with some margin estimates d too.
-                let t_est = t_for((slack + 2 * t0) * n / j * 5 / 4);
-                if blocks(t_est) * 4 > w * 3 {
-                    // Clearly dissimilar: skip the O(m) scan for `ub`.
-                    return self.lcs_full();
-                }
-                let t_ub = ub() - slack;
-                if t_ub <= t_est {
-                    t_ub
-                } else if blocks(t_est) * 4 <= w {
-                    match self.lcs_banded(t_est, &mut s, true) {
-                        Band::Exact(l) => return l,
-                        Band::Above(d) => t_for(d).min(t_ub),
-                        Band::Aborted(_) => t_ub,
-                    }
-                } else {
-                    t_ub
-                }
-            }
-        };
-        if blocks(t1) * 4 <= w * 3 {
-            match self.lcs_banded(t1, &mut s, false) {
-                Band::Exact(l) => return l,
-                _ => debug_assert!(false, "band at an upper bound must certify"),
+    /// LCS length via bands of growing width, like [`Self::run`].
+    fn lcs_run(&self) -> usize {
+        let slack = self.n() - self.m;
+        let mut s = vec![0u64; self.w];
+        let mut t = 64;
+        while lcs_band_words(slack, t) * 3 <= self.w {
+            match self.lcs_banded(t, &mut s) {
+                Ok(l) => return l,
+                Err(j) => t = next_band(t, j, self.n()),
             }
         }
         self.lcs_full()
-    }
-
-    /// Try narrow bands before paying for the full matrix.  `ub` must be a
-    /// true upper bound on the distance.
-    fn run(&self, ub: usize) -> usize {
-        let mut pv = vec![0u64; self.w];
-        let mut mv = vec![0u64; self.w];
-        // One optimistic pass; its early abort keeps the cost of a miss on
-        // dissimilar strings to a few percent of the full kernel.
-        let t0 = (self.n() - self.m + 32).max(64);
-        if band_blocks(t0) * 2 <= self.w {
-            if let Some(d) = self.banded(t0, &mut pv, &mut mv, true) {
-                return d;
-            }
-            // d > t0.  A band as wide as `ub` is guaranteed to succeed; take
-            // it while it is still clearly narrower than the matrix.
-            if ub > t0 && band_blocks(ub) * 4 <= self.w * 3 {
-                if let Some(d) = self.banded(ub, &mut pv, &mut mv, false) {
-                    return d;
-                }
-                debug_assert!(false, "band at the upper bound must succeed");
-            }
-        }
-        self.full()
     }
 }
 
@@ -1882,12 +1447,13 @@ fn hyrro_multiword_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(short: &[T1], lon
     // Code units fit in 32 bits and the dense index is bounded by the string
     // length, so no live entry can equal the EMPTY sentinel.
     const EMPTY: u64 = u64::MAX;
+    const STACK_M: usize = 64 * MAX_W;
     let hash_size = (m * 2).next_power_of_two();
     let hash_mask = hash_size - 1;
     let hshift = 64 - hash_mask.count_ones();
-    // Both tables fit on the stack for every const-width kernel (m <= 512);
-    // two heap round trips would cost as much as the kernel on ~100 chars.
-    let (mut hash_stack, mut hash_heap) = ([MaybeUninit::uninit(); 2 * 512], Vec::new());
+    // Both tables fit on the stack for every const-width kernel; two heap
+    // round trips would cost as much as the kernel on ~100 chars.
+    let (mut hash_stack, mut hash_heap) = ([MaybeUninit::uninit(); 2 * STACK_M], Vec::new());
     let hash = scratch(&mut hash_stack, &mut hash_heap, hash_size, EMPTY);
     let mut n_keys = 0u64;
     for &c in short {
@@ -1927,7 +1493,8 @@ fn hyrro_multiword_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(short: &[T1], lon
 
     // Rows sized by the actual alphabet; the trailing row stays all-zero and
     // serves text chars that do not occur in the pattern.
-    let (mut data_stack, mut data_heap) = ([MaybeUninit::uninit(); (512 + 1) * STRIP], Vec::new());
+    let (mut data_stack, mut data_heap) =
+        ([MaybeUninit::uninit(); (STACK_M + 1) * MAX_W], Vec::new());
     let data = scratch(&mut data_stack, &mut data_heap, (n_keys + 1) * w, 0);
     for (i, &c) in short.iter().enumerate() {
         let ki = row_of(c.as_u64());
@@ -1961,15 +1528,13 @@ fn hyrro_multiword_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(short: &[T1], lon
         8 => run!(8),
         _ => {
             let bases: Vec<usize> = long.iter().map(|&c| row_of(c.as_u64()) * w).collect();
-            K::large(
-                &LargeCtx {
-                    m,
-                    w,
-                    data,
-                    bases: &bases,
-                },
-                || hamming_ub(short, long),
-            )
+            let ctx = LargeCtx {
+                m,
+                w,
+                data,
+                bases: &bases,
+            };
+            K::large(&ctx)
         }
     }
 }
@@ -2672,72 +2237,19 @@ mod tests {
         }
     }
 
-    /// Every per-architecture variant must agree with the oracle on every
-    /// target, not only on the one that selects it: both multi-word step
-    /// formulations (with and without the in-loop score from seven words on)
-    /// and both full-matrix kernels for Levenshtein and LCS.
+    /// The very-long-pattern kernels must agree with the oracle on their own:
+    /// the full matrices, which the public path reaches only when banding
+    /// does not pay, and the band drivers, on similar and dissimilar pairs.
     #[test]
-    fn architecture_variants_match_oracle() {
+    fn large_kernels_match_oracle() {
         let mut state = 0xA5C3_0F0F_1234_5678_u64;
         let alpha = &b"abcdefgh"[..];
-        let mut pairs = Vec::new();
-        for &m in &[65usize, 100, 128, 129, 200, 300, 385, 420, 449, 500, 512] {
-            let a = rand_string(&mut state, m, alpha);
-            pairs.push((a.clone(), mutate(&mut state, &a, 3, alpha)));
-            pairs.push((a.clone(), rand_string(&mut state, m + m / 3, alpha)));
-        }
-        for (a, b) in &pairs {
-            let (s, l) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-            let (s, l) = (s.as_bytes(), l.as_bytes());
-            let (m, w) = (s.len(), s.len().div_ceil(64));
-            let expected = {
-                let (sc, lc): (Vec<char>, Vec<char>) = (
-                    s.iter().map(|&c| c as char).collect(),
-                    l.iter().map(|&c| c as char).collect(),
-                );
-                naive(&sc, &lc)
-            };
-            macro_rules! both_forms {
-                ($W:literal) => {{
-                    let mut peq = [[0u64; $W]; 256];
-                    for (i, &c) in s.iter().enumerate() {
-                        peq[c as usize][i / 64] |= 1 << (i % 64);
-                    }
-                    let rows = || l.iter().map(|&c| peq[c as usize]);
-                    let d_h = multiword_kernel_form::<$W, _, _, true>(m, rows(), &mut Whole);
-                    let d_s = multiword_kernel_form::<$W, _, _, false>(m, rows(), &mut Whole);
-                    (
-                        (l.len() as isize + d_h) as usize,
-                        (l.len() as isize + d_s) as usize,
-                    )
-                }};
-            }
-            let (hyyro, short_chain) = match w {
-                2 => both_forms!(2),
-                3 => both_forms!(3),
-                4 => both_forms!(4),
-                5 => both_forms!(5),
-                6 => both_forms!(6),
-                7 => both_forms!(7),
-                8 => both_forms!(8),
-                _ => unreachable!(),
-            };
-            assert_eq!(hyyro, expected, "Hyyro form, m={m} n={}", l.len());
-            assert_eq!(
-                short_chain,
-                expected,
-                "short-chain form, m={m} n={}",
-                l.len()
-            );
-        }
-
-        // Full-matrix kernels (w > 8), including a pattern that is not a
-        // multiple of the strip width and uneven lengths.
         for &(m, n, edits) in &[
             (530usize, 530usize, 5usize),
             (700, 900, 0),
             (1030, 1100, 60),
             (600, 2000, 0),
+            (2000, 2000, 40),
         ] {
             let a = rand_string(&mut state, m, alpha);
             let b = if edits > 0 {
@@ -2768,46 +2280,12 @@ mod tests {
                 l.iter().map(|&c| c as char).collect(),
             );
             let (d, e) = (naive(&sc, &lc), naive_indel(&sc, &lc));
-            assert_eq!(
-                ctx.full_dynamic(),
-                d,
-                "full_dynamic m={} n={}",
-                s.len(),
-                l.len()
-            );
-            assert_eq!(
-                ctx.full_strips(),
-                d,
-                "full_strips m={} n={}",
-                s.len(),
-                l.len()
-            );
             let llcs = (s.len() + l.len() - e) / 2;
-            assert_eq!(
-                ctx.lcs_full_dynamic(),
-                llcs,
-                "lcs_full_dynamic m={}",
-                s.len()
-            );
-            assert_eq!(ctx.lcs_full_strips(), llcs, "lcs_full_strips m={}", s.len());
-        }
-    }
-
-    /// The hand-scheduled aarch64 step must match its portable reference on
-    /// every reachable state (`vp & vn == 0`).
-    #[test]
-    fn myers_step_matches_portable() {
-        let mut x = 0x9E37_79B9_7F4A_7C15u64;
-        let mut next = move || {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            x
-        };
-        for _ in 0..200_000 {
-            let (eq, vp) = (next(), next());
-            let vn = next() & !vp;
-            assert_eq!(myers_step(eq, vp, vn), myers_step_portable(eq, vp, vn));
+            let msg = format!("m={} n={}", s.len(), l.len());
+            assert_eq!(ctx.full(), d, "full {msg}");
+            assert_eq!(ctx.run(), d, "run {msg}");
+            assert_eq!(ctx.lcs_full(), llcs, "lcs_full {msg}");
+            assert_eq!(ctx.lcs_run(), llcs, "lcs_run {msg}");
         }
     }
 
