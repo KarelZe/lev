@@ -53,10 +53,12 @@
 
 use std::mem::MaybeUninit;
 use std::os::raw::c_uint;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::OnceLock;
 
 use pyo3::ffi;
 use pyo3::prelude::*;
-use pyo3::types::PyString;
+use pyo3::types::{PyCFunction, PyString};
 
 // ---------------------------------------------------------------------------
 // Code units of the three CPython string kinds (UCS-1 / UCS-2 / UCS-4).
@@ -111,8 +113,7 @@ struct UniView {
     not(all(Py_GIL_DISABLED, target_env = "msvc"))
 )))]
 #[inline(always)]
-unsafe fn view(s: &Bound<'_, PyString>) -> UniView {
-    let ptr = s.as_ptr();
+unsafe fn view(ptr: *mut ffi::PyObject) -> UniView {
     let kind = ffi::PyUnicode_KIND(ptr);
     UniView {
         kind,
@@ -148,9 +149,8 @@ unsafe fn view(s: &Bound<'_, PyString>) -> UniView {
     not(all(Py_GIL_DISABLED, target_env = "msvc"))
 ))]
 #[inline(always)]
-unsafe fn view(s: &Bound<'_, PyString>) -> UniView {
+unsafe fn view(ptr: *mut ffi::PyObject) -> UniView {
     const KIND_SHIFT: u32 = if cfg!(Py_GIL_DISABLED) { 8 } else { 2 };
-    let ptr = s.as_ptr();
     let obj = ptr as *mut ffi::PyASCIIObject;
     let state = (*obj).state;
     let kind = ((state >> KIND_SHIFT) & 0b111) as c_uint;
@@ -226,10 +226,17 @@ unsafe fn as_u32(v: &UniView) -> &[u32] {
 #[pyfunction]
 #[pyo3(pass_module, signature = (s1, s2, /))]
 fn distance(_m: &Bound<'_, PyModule>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> usize {
-    if s1.is(s2) {
+    // SAFETY: both are `str` objects.
+    unsafe { distance_of(s1.as_ptr(), s2.as_ptr()) }
+}
+
+/// [`distance`] of two `str` objects.
+#[inline(always)]
+unsafe fn distance_of(s1: *mut ffi::PyObject, s2: *mut ffi::PyObject) -> usize {
+    if s1 == s2 {
         return 0;
     }
-    unsafe { compute::<Lev>(&view(s1), &view(s2)) }
+    compute::<Lev>(&view(s1), &view(s2))
 }
 
 /// Calculate how similar two strings are, as a score from `0.0` to `1.0`.
@@ -268,17 +275,125 @@ fn distance(_m: &Bound<'_, PyModule>, s1: &Bound<'_, PyString>, s2: &Bound<'_, P
 #[pyfunction]
 #[pyo3(pass_module, signature = (s1, s2, /))]
 fn ratio(_m: &Bound<'_, PyModule>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> f64 {
-    if s1.is(s2) {
+    // SAFETY: both are `str` objects.
+    unsafe { ratio_of(s1.as_ptr(), s2.as_ptr()) }
+}
+
+/// [`ratio`] of two `str` objects.
+#[inline(always)]
+unsafe fn ratio_of(s1: *mut ffi::PyObject, s2: *mut ffi::PyObject) -> f64 {
+    if s1 == s2 {
         return 1.0;
     }
-    unsafe {
-        let (v1, v2) = (view(s1), view(s2));
-        let total = v1.len + v2.len;
-        if total == 0 {
-            return 1.0;
-        }
-        1.0 - compute::<Lcs>(&v1, &v2) as f64 / total as f64
+    let (v1, v2) = (view(s1), view(s2));
+    let total = v1.len + v2.len;
+    if total == 0 {
+        return 1.0;
     }
+    1.0 - compute::<Lcs>(&v1, &v2) as f64 / total as f64
+}
+
+// ---------------------------------------------------------------------------
+// Fast entry points
+// ---------------------------------------------------------------------------
+//
+// Python calls `METH_FASTCALL` functions that handle the common call, two
+// positional `str` arguments, themselves.  Every other call (wrong arity,
+// keywords, other types) and any panic is forwarded to the PyO3 functions
+// above, which raise their usual errors.  This skips PyO3's generic argument
+// extraction and per-call attach bookkeeping, about 9 ns of a ~30 ns call on
+// short strings.  Name, docstring and text signature are PyO3's.
+
+/// The PyO3 functions the fast entry points fall back to.
+static SLOW_DISTANCE: OnceLock<Py<PyCFunction>> = OnceLock::new();
+static SLOW_RATIO: OnceLock<Py<PyCFunction>> = OnceLock::new();
+
+/// The arguments of a vectorcall when they are exactly two positional `str`s.
+#[inline(always)]
+unsafe fn str_pair(
+    args: *const *mut ffi::PyObject,
+    nargs: ffi::Py_ssize_t,
+    kwnames: *mut ffi::PyObject,
+) -> Option<(*mut ffi::PyObject, *mut ffi::PyObject)> {
+    if nargs != 2 || !kwnames.is_null() {
+        return None;
+    }
+    let (s1, s2) = (*args, *args.add(1));
+    (ffi::PyUnicode_Check(s1) != 0 && ffi::PyUnicode_Check(s2) != 0).then_some((s1, s2))
+}
+
+/// Hand a call the fast path does not take to the PyO3 function in `slow`.
+#[cold]
+#[inline(never)]
+unsafe fn forward(
+    slow: &OnceLock<Py<PyCFunction>>,
+    args: *const *mut ffi::PyObject,
+    nargs: ffi::Py_ssize_t,
+    kwnames: *mut ffi::PyObject,
+) -> *mut ffi::PyObject {
+    // Set before the fast function exists (see `add_fast`).
+    let slow = slow.get().map_or(std::ptr::null_mut(), Py::as_ptr);
+    ffi::PyObject_Vectorcall(slow, args, nargs as usize, kwnames)
+}
+
+unsafe extern "C" fn distance_fast(
+    _m: *mut ffi::PyObject,
+    args: *const *mut ffi::PyObject,
+    nargs: ffi::Py_ssize_t,
+    kwnames: *mut ffi::PyObject,
+) -> *mut ffi::PyObject {
+    if let Some((s1, s2)) = str_pair(args, nargs, kwnames) {
+        if let Ok(d) = catch_unwind(AssertUnwindSafe(|| distance_of(s1, s2))) {
+            return ffi::PyLong_FromSize_t(d);
+        }
+    }
+    forward(&SLOW_DISTANCE, args, nargs, kwnames)
+}
+
+unsafe extern "C" fn ratio_fast(
+    _m: *mut ffi::PyObject,
+    args: *const *mut ffi::PyObject,
+    nargs: ffi::Py_ssize_t,
+    kwnames: *mut ffi::PyObject,
+) -> *mut ffi::PyObject {
+    if let Some((s1, s2)) = str_pair(args, nargs, kwnames) {
+        if let Ok(r) = catch_unwind(AssertUnwindSafe(|| ratio_of(s1, s2))) {
+            return ffi::PyFloat_FromDouble(r);
+        }
+    }
+    forward(&SLOW_RATIO, args, nargs, kwnames)
+}
+
+/// Add `fast` to `m` under the name and docstring of the PyO3 function
+/// `slow`, which it falls back to.
+fn add_fast(
+    m: &Bound<'_, PyModule>,
+    slow: Bound<'_, PyCFunction>,
+    slow_cell: &'static OnceLock<Py<PyCFunction>>,
+    fast: ffi::PyCFunctionFastWithKeywords,
+) -> PyResult<()> {
+    // SAFETY: `slow` is a PyCFunction, whose method def is a PyO3 static, so
+    // its name and docstring pointers live for the whole process.
+    let slow_def = unsafe { &*(*slow.as_ptr().cast::<ffi::PyCFunctionObject>()).m_ml };
+    let def = Box::leak(Box::new(ffi::PyMethodDef {
+        ml_name: slow_def.ml_name,
+        ml_meth: ffi::PyMethodDefPointer {
+            PyCFunctionFastWithKeywords: fast,
+        },
+        ml_flags: ffi::METH_FASTCALL | ffi::METH_KEYWORDS,
+        ml_doc: slow_def.ml_doc,
+    }));
+    let name = slow.getattr("__name__")?;
+    slow_cell.get_or_init(|| slow.unbind());
+    // SAFETY: `def` is leaked, so it outlives the function; `m` and its name
+    // are valid objects.
+    let fast = unsafe {
+        Bound::from_owned_ptr_or_err(
+            m.py(),
+            ffi::PyCFunction_NewEx(def, m.as_ptr(), m.name()?.as_ptr()),
+        )?
+    };
+    m.add(name.cast_into::<PyString>()?, fast)
 }
 
 /// The compiled extension backing the `lev` package.
@@ -287,8 +402,13 @@ fn ratio(_m: &Bound<'_, PyModule>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PySt
 /// is underscore-prefixed to keep it out of the package namespace.
 #[pymodule]
 fn _lev(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(distance, m)?)?;
-    m.add_function(wrap_pyfunction!(ratio, m)?)?;
+    add_fast(
+        m,
+        wrap_pyfunction!(distance, m)?,
+        &SLOW_DISTANCE,
+        distance_fast,
+    )?;
+    add_fast(m, wrap_pyfunction!(ratio, m)?, &SLOW_RATIO, ratio_fast)?;
     Ok(())
 }
 
