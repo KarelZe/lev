@@ -35,10 +35,10 @@
 //!      UCS-1 uses a `[[u64; W]; 128 or 256]` stack peq (O(1) lookup, no
 //!      heap).  UCS-2/4 use a peq data array addressed through the same kind
 //!      of open-addressing hash index, on the stack up to `m ≤ 512`.
-//!    - *Large* (`m > 512`): one loop over all words per column; on AArch64,
-//!      strips of eight words sweep the text one after another with the
-//!      const-width kernel instead, handing the per-column carry and
-//!      boundary bits upwards, so each strip's state stays in registers.
+//!    - *Large* (`m > 512`): one loop over all words per column; on Apple
+//!      silicon, strips of eight words sweep the text one after another
+//!      with the const-width kernel instead, handing the per-column carry
+//!      and boundary bits upwards, so each strip's state stays in registers.
 //! 5. **Ukkonen banding** (`m > 512`) – similar strings are resolved by a
 //!    narrow diagonal band over Myers' blocked recurrence (O(n · d/w) instead
 //!    of O(n · m/w)).  Band widths double until one proves its result; each
@@ -849,7 +849,10 @@ fn hyrro_inner<I: Iterator<Item = u64>>(m: usize, n: usize, pm_iter: I) -> usize
 }
 
 /// One column of [`hyrro_inner`]: returns the new `(vp, vn)`.
-#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+#[cfg_attr(
+    all(target_arch = "aarch64", target_vendor = "apple"),
+    allow(dead_code)
+)]
 #[inline(always)]
 fn myers_step_portable(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
     let sum = (eq & vp).wrapping_add(vp);
@@ -863,8 +866,10 @@ fn myers_step_portable(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
 /// [`myers_step_portable`] with its schedule pinned.  On Apple cores a
 /// logical op with a shifted operand has twice the latency of a plain one,
 /// yet LLVM folds the shifts into the ops on the chain and reassociates the
-/// `| 1` back onto it (10 cycles instead of 7 per column).
-#[cfg(target_arch = "aarch64")]
+/// `| 1` back onto it (10 cycles instead of 7 per column).  Other AArch64
+/// cores (Neoverse, Windows on ARM) were never measured and keep the
+/// portable step.
+#[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
 #[inline(always)]
 fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
     let (mut vp, mut vn) = (vp, vn);
@@ -903,7 +908,7 @@ fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
     (vp, vn)
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(not(all(target_arch = "aarch64", target_vendor = "apple")))]
 #[inline(always)]
 fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
     myers_step_portable(eq, vp, vn)
@@ -1059,6 +1064,12 @@ impl Kernel for Lcs {
 // Multi-word Hyyrö (m > 64)
 // ---------------------------------------------------------------------------
 
+/// Whether the kernels tuned on Apple M-series cores are used: the pinned
+/// [`myers_step`], the funnel-shift [`multiword_kernel_form`] and the strips
+/// of [`LargeCtx::full`].  They were never measured on other AArch64 cores,
+/// which take the portable kernels like every other target.
+const APPLE_SILICON: bool = cfg!(all(target_arch = "aarch64", target_vendor = "apple"));
+
 /// Widest pattern, in 64-bit words, handled by the const-width kernels with
 /// stack peq tables; longer patterns go through [`LargeCtx`].
 const MAX_W: usize = 8;
@@ -1081,7 +1092,7 @@ fn multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(
     pm_iter: I,
     edges: Option<&mut [u8]>,
 ) -> isize {
-    multiword_kernel_form::<W, I, { cfg!(target_arch = "aarch64") }>(m, pm_iter, edges)
+    multiword_kernel_form::<W, I, APPLE_SILICON>(m, pm_iter, edges)
 }
 
 /// [`multiword_kernel`] with the step formulation chosen explicitly; both
@@ -1093,7 +1104,8 @@ fn multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(
 ///   the bit shifted in at the bottom of a word taken as the top bit of the
 ///   word below, so every shift-in is one funnel shift (`extr` on AArch64).
 ///   On x86-64 this form keeps more values live than 16 registers hold and
-///   gets SLP-vectorized from five words on, so it is used on AArch64 only.
+///   gets SLP-vectorized from five words on, so it is used on Apple silicon
+///   only, the one AArch64 target it was measured on.
 #[inline(always)]
 fn multiword_kernel_form<const W: usize, I: Iterator<Item = [u64; W]>, const FUNNEL: bool>(
     m: usize,
@@ -1231,10 +1243,11 @@ fn lcs_band_words(slack: usize, t: usize) -> usize {
     (slack + 2 * t) / 64 + 2
 }
 
-/// Words per strip of the AArch64 full-matrix kernels: a strip's state stays
-/// in registers while it sweeps the text.  Eight words (16 state registers
-/// for Levenshtein plus temporaries) fit AArch64's 31 general-purpose
-/// registers; on x86-64's 16 they would spill on every column.
+/// Words per strip of the Apple silicon full-matrix kernels: a strip's state
+/// stays in registers while it sweeps the text.  Eight words (16 state
+/// registers for Levenshtein plus temporaries) fit AArch64's 31
+/// general-purpose registers; on x86-64's 16 they would spill on every
+/// column.
 const STRIP: usize = 8;
 
 /// Run `$kernel` with the const `W` bound to the width `$w` in `1..=8`.
@@ -1385,10 +1398,10 @@ impl LargeCtx<'_> {
             .map(move |&base| std::array::from_fn(|k| self.peq(base, w0 + k)))
     }
 
-    /// Full-matrix exact kernel (fallback for w > MAX_W): strips on AArch64,
-    /// one loop over all words elsewhere.
+    /// Full-matrix exact kernel (fallback for w > MAX_W): strips on Apple
+    /// silicon, one loop over all words elsewhere.
     fn full(&self) -> usize {
-        if cfg!(target_arch = "aarch64") {
+        if APPLE_SILICON {
             self.full_strips()
         } else {
             self.full_single()
@@ -1459,7 +1472,7 @@ impl LargeCtx<'_> {
     /// Full-matrix LCS kernel (fallback for w > MAX_W), split like
     /// [`Self::full`]; returns the LCS length.
     fn lcs_full(&self) -> usize {
-        if cfg!(target_arch = "aarch64") {
+        if APPLE_SILICON {
             self.lcs_full_strips()
         } else {
             self.lcs_full_single()
