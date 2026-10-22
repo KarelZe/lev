@@ -3,7 +3,7 @@
 ## Project Overview
 `lev` is a Python library exposing Levenshtein distance and similarity ratio.
 The hot path is implemented in Rust via PyO3; Python bindings live in `src/lib.rs`
-and type stubs in `lev.pyi`. Performance is the primary design constraint —
+and type stubs in `python/lev/_lev.pyi`. Performance is the primary design constraint —
 prefer Rust-side optimizations over Python wrappers.
 
 ## Environment Setup
@@ -78,7 +78,8 @@ neither needs `--profile-time`.
 
 ## Project Structure
 - `src/` — Rust crate (core library + PyO3 bindings)
-- `lev.pyi` — Python type stubs
+- `python/lev/` — Python package: `__init__.py` re-exports the private `_lev`
+  extension, `_lev.pyi` holds its type stubs
 - `tests/` — pytest suite
 - `scripts/` — build and benchmark scripts
 - `docs/` — Zensical documentation source
