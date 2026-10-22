@@ -13,8 +13,11 @@ window.MathJax = {
   },
 };
 
-// Re-typeset after instant navigation swaps the page content.
+// Re-typeset after instant navigation swaps the page content.  The bundle
+// loads async, so on the first page it may not have replaced the config
+// above yet; it typesets that page itself once it starts.
 document$.subscribe(() => {
+  if (!MathJax.startup?.output) return;
   MathJax.startup.output.clearCache();
   MathJax.typesetClear();
   MathJax.texReset();
