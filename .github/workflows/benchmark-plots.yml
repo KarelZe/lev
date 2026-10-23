@@ -1,0 +1,65 @@
+name: Benchmark plots
+
+# Generates the README/docs benchmark figures (docs/assets/benchmark_*.svg) on
+# GitHub-hosted runners, so they are reproducible and free of local noise.
+# The workflow only uploads artifacts; to refresh the figures, run it and commit
+# the linux-x86-64 artifact into docs/assets/. Per-PR performance is checked by
+# ab-benchmark.yml, not here.
+on:
+  pull_request:
+    paths:
+      - 'scripts/benchmark.py'
+      - '.github/workflows/benchmark-plots.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-plots-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plots:
+    name: Plots (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Published figures: Linux x86-64 is where almost all PyPI downloads run.
+          - { name: linux-x86-64, os: ubuntu-24.04 }
+          # Reference only: Apple Silicon, like the figures before this workflow.
+          - { name: macos-arm64, os: macos-15 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.13"
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      # Builds lev from this checkout (maturin, release profile) and installs the
+      # competitors into the script environment, outside the timed step.
+      - name: Build lev and benchmark dependencies
+        run: uv sync -v --script scripts/benchmark.py
+
+      - name: Hardware
+        run: |
+          { echo '```'; if [ "$RUNNER_OS" = Linux ]; then lscpu; else sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize; fi; echo '```'; } \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Run benchmark
+        run: |
+          # Pin to one core on Linux so the scheduler does not migrate the timed process.
+          pin=$([ "$RUNNER_OS" = Linux ] && echo "taskset -c 1" || true)
+          $pin uv run scripts/benchmark.py --repetitions 1000 --best-of 25 | tee benchmark.txt
+          { echo '```'; cat benchmark.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: benchmark-plots-${{ matrix.name }}
+          path: |
+            docs/assets/benchmark_*.svg
+            docs/assets/benchmark_results.json

@@ -20,7 +20,7 @@ Benchmark lev against rapidfuzz, editdistance, edlib, and polyleven.
 Each of the four CPython-string-kind pairs (ascii/latin1/cjk/emoji) is exactly
 100 characters long; the `realistic` pair is natural-length typo'd prose
 instead. Each measurement is the total wall time of `--repetitions` calls,
-measured with `timeit`.
+measured with `timeit`; the fastest of `--best-of` such runs is kept.
 
 Examples:
     # default: all kinds, write JSON + light/dark SVGs to docs/assets/
@@ -35,9 +35,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import platform
+import subprocess
 import sys
 import timeit
 from collections.abc import Callable
+from importlib.metadata import version
 from pathlib import Path
 
 import editdistance
@@ -55,6 +58,7 @@ ASSETS_DIR = DEFAULT_OUTPUT.parent
 
 STRING_LEN = 100
 REPETITIONS_DEFAULT = 1_000
+BEST_OF_DEFAULT = 5
 
 # One representative pair per CPython string kind, plus a `realistic` pair of
 # natural-length typo'd prose. The four synthetic kinds are exactly STRING_LEN
@@ -124,18 +128,59 @@ CONTENDERS: list[Contender] = [
 ]
 
 
-def _measure(fn: Callable[[str, str], int], a: str, b: str, reps: int) -> float:
+PACKAGES = ["lev-rs", "rapidfuzz", "editdistance", "edlib", "polyleven"]
+
+
+def _cpu_model() -> str:
     """
-    Time `reps` calls to fn(a, b).
+    Best-effort CPU model name, e.g. `AMD EPYC 7763 64-Core Processor`.
 
     Returns:
-        Total wall time in seconds.
+        The CPU model, or `platform.processor()` if it cannot be read.
 
     """
-    return timeit.timeit(lambda: fn(a, b), number=reps)
+    try:
+        if sys.platform == "linux":
+            for line in Path("/proc/cpuinfo").read_text().splitlines():
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+        elif sys.platform == "darwin":
+            out = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True)
+            if out.returncode == 0 and out.stdout.strip():
+                return out.stdout.strip()
+    except OSError:
+        pass
+    return platform.processor() or "unknown CPU"
 
 
-def run(kinds: list[str], reps: int) -> dict:
+def machine_info() -> dict[str, str]:
+    """
+    Describe the machine and interpreter the benchmark runs on.
+
+    Returns:
+        CPU model, OS, architecture, and Python version.
+
+    """
+    return {
+        "cpu": _cpu_model(),
+        "os": platform.system(),
+        "arch": platform.machine(),
+        "python": f"{platform.python_implementation()} {platform.python_version()}",
+    }
+
+
+def _measure(fn: Callable[[str, str], int], a: str, b: str, reps: int, best_of: int) -> float:
+    """
+    Time `reps` calls to fn(a, b), `best_of` times.
+
+    Returns:
+        Fastest total wall time in seconds.
+
+    """
+    return min(timeit.repeat(lambda: fn(a, b), number=reps, repeat=best_of))
+
+
+def run(kinds: list[str], reps: int, best_of: int) -> dict:
     """
     Benchmark every contender on each string kind.
 
@@ -160,19 +205,22 @@ def run(kinds: list[str], reps: int) -> dict:
                     f"warning: {name} disagrees on {kind}: {got} != {expected}",
                     file=sys.stderr,
                 )
-            per_lib[name] = _measure(fn, a, b, reps)
+            per_lib[name] = _measure(fn, a, b, reps, best_of)
         results[kind] = per_lib
     return {
         "meta": {
             "string_len": {kind: len(KINDS[kind][0]) for kind in kinds},
             "repetitions": reps,
+            "best_of": best_of,
             "kinds": kinds,
+            "machine": machine_info(),
+            "versions": {pkg: version(pkg) for pkg in PACKAGES},
         },
         "results": results,
     }
 
 
-def plot_contenders(per_lib: dict[str, float], kind: str, reps: int) -> None:
+def plot_contenders(per_lib: dict[str, float], kind: str, meta: dict) -> None:
     """
     Plot a horizontal bar chart comparing all contenders for one string kind.
 
@@ -183,6 +231,8 @@ def plot_contenders(per_lib: dict[str, float], kind: str, reps: int) -> None:
     sorted_measures = dict(sorted(measures_ms.items(), key=lambda item: item[1], reverse=True))
     slug = KIND_SLUGS[kind]
     str_len = len(KINDS[kind][0])
+    reps, machine = meta["repetitions"], meta["machine"]
+    subtitle = f"{machine['cpu']}, {machine['os']} {machine['arch']}, {machine['python']}"
 
     def _render(theme: str) -> None:
         text_color = "white" if theme == "dark" else "black"
@@ -204,8 +254,8 @@ def plot_contenders(per_lib: dict[str, float], kind: str, reps: int) -> None:
             ax.grid(True, axis="x", ls="-")
             ax.grid(False, axis="y")
             ax.set_xlim(left=0, right=ax.get_xlim()[1] * 1.15)
-            ax.set_title(f"{KIND_LABELS[kind]} [{str_len} chars, n={reps}]")
-            ax.set_xlabel("time [ms]")
+            ax.set_title(f"{KIND_LABELS[kind]} [{str_len} chars, n={reps}, best of {meta['best_of']}]")
+            ax.set_xlabel(f"time [ms]\n{subtitle}")
             fig.savefig(ASSETS_DIR / f"benchmark_{slug}_{theme}.svg", bbox_inches="tight")
             plt.close(fig)
 
@@ -218,7 +268,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     Parse command-line arguments.
 
     Returns:
-        Parsed namespace with `kind`, `save`, `repetitions`, and `plot`.
+        Parsed namespace with `kind`, `save`, `repetitions`, `best_of`, and `plot`.
 
     """
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -241,6 +291,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"timeit repetitions per measurement (default: {REPETITIONS_DEFAULT}).",
     )
     p.add_argument(
+        "--best-of",
+        type=int,
+        default=BEST_OF_DEFAULT,
+        help=f"Measurements per library and kind; the fastest is kept (default: {BEST_OF_DEFAULT}).",
+    )
+    p.add_argument(
         "--plot",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -260,7 +316,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     kinds = list(KINDS.keys()) if args.kind == "all" else [args.kind]
 
-    payload = run(kinds, args.repetitions)
+    payload = run(kinds, args.repetitions, args.best_of)
 
     args.save.parent.mkdir(parents=True, exist_ok=True)
     args.save.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -269,10 +325,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.plot:
         ASSETS_DIR.mkdir(parents=True, exist_ok=True)
         for kind, per_lib in payload["results"].items():
-            plot_contenders(per_lib, kind, args.repetitions)
+            plot_contenders(per_lib, kind, payload["meta"])
         print(f"wrote {len(payload['results'])} light/dark SVG pairs to {ASSETS_DIR}")
 
     # Human-readable summary
+    print("\n" + ", ".join(payload["meta"]["machine"].values()))
+    print(", ".join(f"{pkg} {ver}" for pkg, ver in payload["meta"]["versions"].items()))
     for kind, per_lib in payload["results"].items():
         print(f"\n{kind}:")
         for name, secs in sorted(per_lib.items(), key=lambda kv: kv[1]):
