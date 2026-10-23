@@ -7,7 +7,10 @@ use crate::{lcs_len, lcs_step, LargeCtx};
 /// One column of the single-word Levenshtein recurrence: returns the new
 /// `(vp, vn)`.
 #[cfg_attr(
-    all(target_arch = "aarch64", target_vendor = "apple"),
+    any(
+        all(target_arch = "aarch64", target_vendor = "apple"),
+        target_arch = "x86_64"
+    ),
     allow(dead_code)
 )]
 #[inline(always)]

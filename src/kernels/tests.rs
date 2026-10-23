@@ -2,7 +2,7 @@
 //! on every target, not only on the one that selects it.
 
 use super::aarch64::apple;
-use super::x86_64::bmi1;
+use super::x86_64::{self, bmi1};
 use super::{myers_step, portable, EDGE_ROW0};
 use crate::tests::{lcg, mutate, naive, naive_indel, rand_string};
 use crate::LargeCtx;
@@ -188,8 +188,9 @@ fn multiword_forms_match_oracle() {
     }
 }
 
-/// The hand-scheduled aarch64 step must match its portable reference on
-/// every reachable state (`vp & vn == 0`).
+/// The selected step and the x86-64 one must match the portable reference
+/// on every reachable state (`vp & vn == 0`), the x86-64 one on every
+/// target.
 #[test]
 fn myers_step_matches_portable() {
     let mut x = 0x9E37_79B9_7F4A_7C15u64;
@@ -199,9 +200,14 @@ fn myers_step_matches_portable() {
         x ^= x << 17;
         x
     };
-    for _ in 0..200_000 {
+    let edges = [(0, !0, 0), (!0, !0, 0), (0, 0, !0), (!0, 0, 0), (0, 0, 0)];
+    let random = (0..200_000).map(|_| {
         let (eq, vp) = (next(), next());
-        let vn = next() & !vp;
-        assert_eq!(myers_step(eq, vp, vn), portable::myers_step(eq, vp, vn));
+        (eq, vp, next() & !vp)
+    });
+    for (eq, vp, vn) in edges.into_iter().chain(random) {
+        let expected = portable::myers_step(eq, vp, vn);
+        assert_eq!(myers_step(eq, vp, vn), expected);
+        assert_eq!(x86_64::myers_step(eq, vp, vn), expected);
     }
 }

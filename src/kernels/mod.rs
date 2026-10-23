@@ -6,6 +6,9 @@
 //! - [`portable`]: the reference form of every kernel below.  Plain Rust,
 //!   correct on every target and the fallback wherever nothing else is
 //!   selected.
+//! - `<target_arch>`: forms that use only the architecture's baseline ISA
+//!   and pay on all of its cores, such as [`x86_64::myers_step`] (x86-64
+//!   has no or-not).  Selected at compile time by `cfg`.
 //! - `<target_arch>/<feature>`: forms that need an ISA extension, named
 //!   after the `target_feature` they enable (e.g. [`x86_64::bmi1`], later
 //!   `x86_64::avx2`, `aarch64::neon`).  Selected by runtime feature
@@ -59,11 +62,18 @@ const APPLE_SILICON: bool = cfg!(all(target_arch = "aarch64", target_vendor = "a
 const EDGE_ROW0: u8 = 0b010;
 
 /// One column of the single-word Levenshtein recurrence (see
-/// [`crate::hyrro_inner`]): returns the new `(vp, vn)`.
+/// [`crate::hyrro_inner`]): returns the new `(vp, vn)`.  Apple silicon runs
+/// [`aarch64::apple::myers_step`], x86-64 [`x86_64::myers_step`], every
+/// other target [`portable::myers_step`].
 #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
 pub(crate) use aarch64::apple::myers_step;
-#[cfg(not(all(target_arch = "aarch64", target_vendor = "apple")))]
+#[cfg(not(any(
+    all(target_arch = "aarch64", target_vendor = "apple"),
+    target_arch = "x86_64"
+)))]
 pub(crate) use portable::myers_step;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use x86_64::myers_step;
 
 /// Multi-word Levenshtein kernel over `m` pattern rows in `W` words.
 /// Returns the sum of the vertical deltas of these rows in the last text
