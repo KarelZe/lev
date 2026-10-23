@@ -72,6 +72,8 @@ pub(crate) fn full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
 }
 
 /// [`crate::kernels::lcs_full`] strip by strip.
+// Selected on AArch64 only; the tests run this form on every target.
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub(crate) fn lcs_full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
     let mut carries = vec![0u8; ctx.n];
     let mut lcs = 0;
