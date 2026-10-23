@@ -12,6 +12,7 @@ of work. Correctness lives in `test_lev.py`.
 
 from __future__ import annotations
 
+import os
 import random
 from collections import deque
 from itertools import repeat
@@ -174,12 +175,16 @@ _LONG = [
 # Fixed calls per batch, so that base and head always run the same work: the
 # DP-size rule for pairs whose cost follows their size, explicit counts where
 # affix stripping or banding makes a pair far cheaper than its size.
+# CodSpeed rejects the same benchmark name from two jobs of one workflow, so the
+# jobs that measure another architecture prefix their names (e.g. "aarch64-").
+_PREFIX = os.environ.get("LEV_BENCH_PREFIX", "")
+
 _CASES = [
-    *[pytest.param(*p.values, _batch_size(*p.values), id=f"short-{p.id}") for p in _SHORT],
-    *[pytest.param(*p.values, _batch_size(*p.values), id=f"medium-{p.id}") for p in _MEDIUM],
-    *[pytest.param(*p.values, _batch_size(*p.values), id=f"mixed-{p.id}") for p in _MIXED],
-    *[pytest.param(*p.values, 2_000, id=f"affix-{p.id}") for p in _AFFIX],
-    *[pytest.param(*p.values, 4, id=f"long-{p.id}") for p in _LONG],
+    *[pytest.param(*p.values, _batch_size(*p.values), id=f"{_PREFIX}short-{p.id}") for p in _SHORT],
+    *[pytest.param(*p.values, _batch_size(*p.values), id=f"{_PREFIX}medium-{p.id}") for p in _MEDIUM],
+    *[pytest.param(*p.values, _batch_size(*p.values), id=f"{_PREFIX}mixed-{p.id}") for p in _MIXED],
+    *[pytest.param(*p.values, 2_000, id=f"{_PREFIX}affix-{p.id}") for p in _AFFIX],
+    *[pytest.param(*p.values, 4, id=f"{_PREFIX}long-{p.id}") for p in _LONG],
 ]
 
 

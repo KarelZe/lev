@@ -13,12 +13,19 @@ on:
 
 jobs:
   benchmarks:
-    name: CodSpeed benchmarks (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: CodSpeed benchmarks (${{ matrix.arch }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.13", "3.14", "3.15"]
+        include:
+          - { arch: x86-64, runner: ubuntu-latest, python-version: "3.13" }
+          - { arch: x86-64, runner: ubuntu-latest, python-version: "3.14" }
+          - { arch: x86-64, runner: ubuntu-latest, python-version: "3.15" }
+          # AArch64 kernels (src/kernels/aarch64) never run on x86-64. Its
+          # benchmark names carry a prefix, since CodSpeed rejects a name
+          # reported by two jobs.
+          - { arch: aarch64, runner: ubuntu-24.04-arm, python-version: "3.13", prefix: aarch64- }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -40,3 +47,5 @@ jobs:
           mode: simulation
           token: ${{ secrets.CODSPEED_TOKEN }}
           run: pytest tests/test_bench.py --codspeed
+        env:
+          LEV_BENCH_PREFIX: ${{ matrix.prefix }}
