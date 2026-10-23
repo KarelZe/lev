@@ -6,10 +6,7 @@ use crate::{lcs_len, lcs_step, LargeCtx};
 
 /// One column of the single-word Levenshtein recurrence: returns the new
 /// `(vp, vn)`.
-#[cfg_attr(
-    all(target_arch = "aarch64", target_vendor = "apple"),
-    allow(dead_code)
-)]
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
 #[inline(always)]
 pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
     let sum = (eq & vp).wrapping_add(vp);
@@ -22,10 +19,7 @@ pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
 
 /// [`super::multiword`] in Hyyrö's form, shifting each word's top bits into
 /// the next word as 0/1 values.
-#[cfg_attr(
-    all(target_arch = "aarch64", target_vendor = "apple"),
-    allow(dead_code)
-)]
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
 #[inline(always)]
 pub(crate) fn multiword<const W: usize, I: Iterator<Item = [u64; W]>>(
     m: usize,

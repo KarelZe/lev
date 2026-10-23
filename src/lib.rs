@@ -35,8 +35,8 @@
 //!      UCS-1 uses a `[[u64; W]; 128 or 256]` stack peq (O(1) lookup, no
 //!      heap).  UCS-2/4 use a peq data array addressed through the same kind
 //!      of open-addressing hash index, on the stack up to `m ≤ 512`.
-//!    - *Large* (`m > 512`): one loop over all words per column; on Apple
-//!      silicon, strips of eight words sweep the text one after another
+//!    - *Large* (`m > 512`): one loop over all words per column; on
+//!      AArch64, strips of eight words sweep the text one after another
 //!      with the const-width kernel instead, handing the per-column carry
 //!      and boundary bits upwards, so each strip's state stays in registers.
 //!    - Steps with target-specific forms live in [`kernels`], one module per
