@@ -45,11 +45,16 @@ For more details on the API see the [API Reference](api.md).
 [pylev](https://github.com/toastdriven/pylev/tree/main) and [python-Levenshtein](https://github.com/ztane/python-Levenshtein).
 
 !!! example "Benchmarks"
-    Benchmarks were run on an Apple Mac Mini M2 Pro (macOS 27.0) using Python 3.13.
+    Benchmarks were run by the [`benchmark-plots`](https://github.com/KarelZe/lev/blob/main/.github/workflows/benchmark-plots.yml) workflow
+    on a GitHub-hosted `ubuntu-24.04` runner (AMD EPYC 7763, x86-64, pinned to one core) using Python 3.13.
     The ASCII, Latin-1, CJK, and Emoji pairs are exactly 100 characters long;
     the realistic-text pair is natural-length prose.
-    Results represent the total wall time for 1,000 repetitions using Python's `timeit`.
-    To reproduce, run [`uv run scripts/benchmark.py`](https://github.com/KarelZe/lev/blob/main/scripts/benchmark.py).
+    Results represent the total wall time for 1,000 repetitions using Python's `timeit`, best of 25 runs.
+    To refresh the figures, run `gh workflow run benchmark-plots.yml`
+    and commit the `benchmark-plots-linux-x86-64` artifact to `docs/assets/`.
+    To reproduce locally, run [`uv run scripts/benchmark.py`](https://github.com/KarelZe/lev/blob/main/scripts/benchmark.py).
+    The performance of each pull request is checked by the
+    [A/B benchmark](https://github.com/KarelZe/lev/blob/main/.github/workflows/ab-benchmark.yml) workflow.
 
 ### ASCII
 
