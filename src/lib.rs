@@ -735,9 +735,9 @@ fn compute_u8<K: Kernel, const ASCII: bool>(a: &[u8], b: &[u8]) -> usize {
         }
     } else {
         if ASCII {
-            hyrro_multiword_bytes::<K, 128>(a, b)
+            hyrro_multiword_direct::<K, 128, _, _>(a, b)
         } else {
-            hyrro_multiword_bytes::<K, 256>(a, b)
+            hyrro_multiword_direct::<K, 256, _, _>(a, b)
         }
     }
 }
@@ -918,7 +918,10 @@ fn compute_sorted<K: Kernel, T: CodeUnit>(a: &[T], b: &[T]) -> usize {
     }
 }
 
-/// Strip affixes and run kernel `K` for mixed-kind strings.
+/// Strip affixes and run kernel `K` for mixed-kind strings.  A pair with a
+/// UCS-1 side can only match below U+0100, so multi-word patterns take the
+/// direct-table kernel instead of hashing every text char; single-word ones
+/// keep the hash, whose 1 KiB table is cheaper to set up than 257 rows.
 #[inline(always)]
 fn compute_sorted_mixed<K: Kernel, T1: CodeUnit, T2: CodeUnit>(a: &[T1], b: &[T2]) -> usize {
     let (a, b) = strip_affix_mixed(a, b);
@@ -935,6 +938,8 @@ fn compute_sorted_mixed<K: Kernel, T1: CodeUnit, T2: CodeUnit>(a: &[T1], b: &[T2
     }
     if a.len() <= 64 {
         hyrro_64_hash::<K, _, _>(a, b)
+    } else if std::mem::size_of::<T1>() == 1 || std::mem::size_of::<T2>() == 1 {
+        hyrro_multiword_direct::<K, 257, _, _>(a, b)
     } else {
         hyrro_multiword_hash::<K, _, _>(a, b)
     }
@@ -943,6 +948,20 @@ fn compute_sorted_mixed<K: Kernel, T1: CodeUnit, T2: CodeUnit>(a: &[T1], b: &[T2
 // ---------------------------------------------------------------------------
 // Hyyrö single-word variants
 // ---------------------------------------------------------------------------
+
+/// Row of code unit `c` in the direct peq table of [`hyrro_multiword_direct`].  UCS-1 units
+/// index it as they are (the caller guarantees they are below `ROWS`).
+/// Wider units occur only on the wide side of a mixed-kind pair with a
+/// UCS-1 side, where `ROWS` is 257: units above U+00FF can never match
+/// there, so they share row 256, which the text side never fills.
+#[inline(always)]
+fn direct_row<T: CodeUnit, const ROWS: usize>(c: T) -> usize {
+    if std::mem::size_of::<T>() == 1 {
+        c.as_u64() as usize
+    } else {
+        c.as_u64().min(ROWS as u64 - 1) as usize
+    }
+}
 
 /// Single-word variant for byte patterns (UCS-1).
 #[inline(always)]
@@ -1358,9 +1377,13 @@ fn multiword_kernel_form<const W: usize, I: Iterator<Item = [u64; W]>, const FUN
     count(&vp) - count(&vn)
 }
 
-/// Multi-word entry point for UCS-1 slices; every byte must be below `SLOTS`
-/// (128 for pure ASCII, 256 otherwise), which sizes the peq table.
-fn hyrro_multiword_bytes<K: Kernel, const SLOTS: usize>(short: &[u8], long: &[u8]) -> usize {
+/// Multi-word entry point with a direct peq table of `ROWS` rows: UCS-1
+/// pairs (128 rows for pure ASCII, 256 for Latin-1) and mixed-kind pairs
+/// with a UCS-1 side (257 rows, see [`direct_row`]).
+fn hyrro_multiword_direct<K: Kernel, const ROWS: usize, T1: CodeUnit, T2: CodeUnit>(
+    short: &[T1],
+    long: &[T2],
+) -> usize {
     debug_assert!(short.len() > 64);
     let m = short.len();
     let w = m.div_ceil(64);
@@ -1369,21 +1392,21 @@ fn hyrro_multiword_bytes<K: Kernel, const SLOTS: usize>(short: &[u8], long: &[u8
         ($W:literal) => {{
             // An array-of-arrays literal is zeroed row by row in a loop;
             // `zeroed` lowers to one `bzero` call.
-            // SAFETY: all-zero bytes are a valid `[[u64; W]; SLOTS]`.
-            let mut peq: [[u64; $W]; SLOTS] = unsafe { std::mem::zeroed() };
+            // SAFETY: all-zero bytes are a valid `[[u64; W]; ROWS]`.
+            let mut peq: [[u64; $W]; ROWS] = unsafe { std::mem::zeroed() };
             for (i, &c) in short.iter().enumerate() {
-                // SAFETY: c < SLOTS (caller contract) and i / 64 < $W.
+                // SAFETY: direct_row < ROWS and i / 64 < $W.
                 unsafe {
-                    *peq.get_unchecked_mut(c as usize).get_unchecked_mut(i / 64) |=
-                        1u64 << (i % 64);
+                    *peq.get_unchecked_mut(direct_row::<_, ROWS>(c))
+                        .get_unchecked_mut(i / 64) |= 1u64 << (i % 64);
                 }
             }
             K::words::<$W, _>(
                 m,
                 long.len(),
-                // SAFETY: c < SLOTS (caller contract).
+                // SAFETY: direct_row < ROWS.
                 long.iter()
-                    .map(|&c| unsafe { *peq.get_unchecked(c as usize) }),
+                    .map(|&c| unsafe { *peq.get_unchecked(direct_row::<_, ROWS>(c)) }),
             )
         }};
     }
@@ -1396,9 +1419,9 @@ fn hyrro_multiword_bytes<K: Kernel, const SLOTS: usize>(short: &[u8], long: &[u8
         7 => run!(7),
         8 => run!(8),
         _ => {
-            let mut peq = vec![0u64; SLOTS * w];
+            let mut peq = vec![0u64; ROWS * w];
             for (i, &c) in short.iter().enumerate() {
-                peq[c as usize * w + i / 64] |= 1u64 << (i % 64);
+                peq[direct_row::<_, ROWS>(c) * w + i / 64] |= 1u64 << (i % 64);
             }
             K::large(&LargeCtx {
                 m,
@@ -1406,7 +1429,7 @@ fn hyrro_multiword_bytes<K: Kernel, const SLOTS: usize>(short: &[u8], long: &[u8
                 w,
                 data: &peq,
                 // SAFETY: the kernels only ask for j < n.
-                base_of: |j: usize| unsafe { *long.get_unchecked(j) } as usize * w,
+                base_of: |j: usize| direct_row::<_, ROWS>(unsafe { *long.get_unchecked(j) }) * w,
             })
         }
     }
@@ -2149,7 +2172,7 @@ mod tests {
         check(&a, &c, 3);
     }
 
-    /// Directly exercise `hyrro_multiword_bytes` (m > 64) against the naive DP.
+    /// Directly exercise `hyrro_multiword_direct` (m > 64) against the naive DP.
     #[test]
     fn multiword_bytes_matches_oracle() {
         let oracle = |a: &[u8], b: &[u8]| -> usize {
@@ -2161,13 +2184,13 @@ mod tests {
         let check_ascii = |a: &[u8], b: &[u8]| {
             let (s, l) = if a.len() <= b.len() { (a, b) } else { (b, a) };
             assert!(s.len() > 64 && s.iter().all(|&c| c < 128) && l.iter().all(|&c| c < 128));
-            assert_eq!(hyrro_multiword_bytes::<Lev, 256>(s, l), oracle(s, l));
+            assert_eq!(hyrro_multiword_direct::<Lev, 256, _, _>(s, l), oracle(s, l));
         };
         // Latin-1 bytes: any u8 value allowed.
         let check_latin1 = |a: &[u8], b: &[u8]| {
             let (s, l) = if a.len() <= b.len() { (a, b) } else { (b, a) };
             assert!(s.len() > 64);
-            assert_eq!(hyrro_multiword_bytes::<Lev, 256>(s, l), oracle(s, l));
+            assert_eq!(hyrro_multiword_direct::<Lev, 256, _, _>(s, l), oracle(s, l));
         };
 
         // Benchmark-like: two long ASCII strings that diverge after a shared prefix.
@@ -2178,7 +2201,10 @@ mod tests {
         } else {
             (&s2[..], &s1[..])
         };
-        assert_eq!(hyrro_multiword_bytes::<Lev, 256>(sh, lo), oracle(sh, lo));
+        assert_eq!(
+            hyrro_multiword_direct::<Lev, 256, _, _>(sh, lo),
+            oracle(sh, lo)
+        );
 
         // Fully disjoint long ASCII strings.
         check_ascii(&b"a".repeat(100), &b"b".repeat(100));
@@ -2204,6 +2230,41 @@ mod tests {
 
         // Latin-1 disjoint.
         check_latin1(&[200u8; 80], &[201u8; 80]);
+    }
+
+    /// Mixed-kind pairs with a UCS-1 side take the direct-table kernel with
+    /// wide units folded into row 256; check both orientations, including a
+    /// wide pattern whose units above U+00FF land in that row.
+    #[test]
+    fn mixed_direct_matches_oracle() {
+        let mut state = 0x0123_4567_89AB_CDEF_u64;
+        let narrow = ['a', 'b', 'é', '\u{ff}', ' '];
+        let wide = ['a', 'é', '\u{100}', '\u{2019}', '\u{ffff}'];
+        let mut gen = |alpha: &[char], len: usize| -> Vec<char> {
+            (0..len)
+                .map(|_| alpha[lcg(&mut state) % alpha.len()])
+                .collect()
+        };
+        for &(m, n) in &[(65usize, 65usize), (100, 130), (300, 300), (520, 700)] {
+            // UCS-1 pattern, UCS-2 text.
+            let (a, b) = (gen(&narrow, m), gen(&wide, n));
+            let a8: Vec<u8> = a.iter().map(|&c| c as u8).collect();
+            let b16: Vec<u16> = b.iter().map(|&c| c as u16).collect();
+            assert_eq!(compute_sorted_mixed::<Lev, _, _>(&a8, &b16), naive(&a, &b));
+            assert_eq!(
+                compute_sorted_mixed::<Lcs, _, _>(&a8, &b16),
+                naive_indel(&a, &b)
+            );
+            // UCS-2 pattern, UCS-1 text.
+            let (a, b) = (gen(&wide, m), gen(&narrow, n));
+            let a16: Vec<u16> = a.iter().map(|&c| c as u16).collect();
+            let b8: Vec<u8> = b.iter().map(|&c| c as u8).collect();
+            assert_eq!(compute_sorted_mixed::<Lev, _, _>(&a16, &b8), naive(&a, &b));
+            assert_eq!(
+                compute_sorted_mixed::<Lcs, _, _>(&a16, &b8),
+                naive_indel(&a, &b)
+            );
+        }
     }
 
     /// Directly exercise `hyrro_multiword_hash` (m > 64) against the naive DP.
@@ -2564,13 +2625,13 @@ mod tests {
         let mut sink = 0usize;
         let t0 = Instant::now();
         for _ in 0..n {
-            sink += hyrro_multiword_bytes::<Lev, 256>(short, long);
+            sink += hyrro_multiword_direct::<Lev, 256, _, _>(short, long);
         }
         let us = t0.elapsed().as_secs_f64() * 1e6 / n as f64;
         #[cfg(debug_assertions)]
         eprintln!("NOTE: debug build — release will be ~10-20x faster");
         eprintln!(
-            "raw Rust hyrro_multiword_bytes: {:.3} μs/call  (sink={})",
+            "raw Rust hyrro_multiword_direct: {:.3} μs/call  (sink={})",
             us, sink
         );
         assert!(sink > 0); // prevent DCE
