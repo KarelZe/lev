@@ -38,10 +38,13 @@
 //!
 //! # Selection
 //!
-//! Every dispatcher selects with `#[cfg(...)]` on its statements, so a
+//! The dispatchers select with `#[cfg(...)]` on their statements, so a
 //! build instantiates only the forms its target can select (with both
 //! AArch64 forms of [`multiword`] instantiated in one function, LLVM
-//! allocated the registers of the strips differently).  ISA features are
+//! allocated the registers of the strips differently).  [`full`] keeps
+//! `if cfg!(...)`: with `#[cfg]`, the x86-64 code of the distance kernels
+//! that call it changed size, and the shifted layout cost `ratio` 17% on
+//! 800-character UCS-4 pairs on Linux x86-64.  ISA features are
 //! checked with `is_x86_feature_detected!` on every call, not through a
 //! cached function pointer, which would keep [`multiword`] from being
 //! inlined into the short-pattern path.  std caches the result, so each
@@ -143,10 +146,12 @@ pub(crate) fn multiword<const W: usize, I: Iterator<Item = [u64; W]>>(
 /// words of [`portable::full`] elsewhere (strips lose on x86-64, see
 /// *Measured and rejected*).
 pub(crate) fn full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
-    #[cfg(target_arch = "aarch64")]
-    return aarch64::full(ctx);
-    #[cfg(not(target_arch = "aarch64"))]
-    portable::full(ctx)
+    // `if cfg!` rather than `#[cfg]`: see *Selection*.
+    if cfg!(target_arch = "aarch64") {
+        aarch64::full(ctx)
+    } else {
+        portable::full(ctx)
+    }
 }
 
 /// Full-matrix LCS length (fallback for `w > MAX_W`).  Selects strips on
