@@ -67,11 +67,17 @@ use pyo3::types::{PyCFunction, PyString};
 // ---------------------------------------------------------------------------
 
 /// A CPython code unit (`u8`, `u16` or `u32`).  Mixed-kind pairs compare
-/// code units widened to `u64`.
-trait CodeUnit: Copy + Eq + Into<u64> {
+/// code units widened to `u64`, or to `u32` where blocks of them are
+/// compared as vectors.
+trait CodeUnit: Copy + Eq + Into<u64> + Into<u32> {
     #[inline(always)]
     fn as_u64(self) -> u64 {
-        self.into()
+        Into::<u64>::into(self)
+    }
+
+    #[inline(always)]
+    fn as_u32(self) -> u32 {
+        Into::<u32>::into(self)
     }
 }
 impl CodeUnit for u8 {}
@@ -453,29 +459,60 @@ unsafe fn compute<K: Kernel>(v1: &UniView, v2: &UniView) -> usize {
 // Affix stripping
 // ---------------------------------------------------------------------------
 
-/// Strip common prefix and suffix from two slices of different types.
+/// Code units compared per branch by the mixed-kind scans.
+const MIXED_BLOCK: usize = 16;
+
+/// Number of positions where two blocks of different code-unit types
+/// differ.  No early exit, so LLVM widens and compares the block as vectors.
+#[inline(always)]
+fn block_mismatches<T1: CodeUnit, T2: CodeUnit>(x: &[T1], y: &[T2]) -> usize {
+    let x: &[T1; MIXED_BLOCK] = x.try_into().unwrap();
+    let y: &[T2; MIXED_BLOCK] = y.try_into().unwrap();
+    x.iter()
+        .zip(y)
+        .map(|(p, q)| (p.as_u32() != q.as_u32()) as usize)
+        .sum()
+}
+
+/// Strip common prefix and suffix from two slices of different types: whole
+/// blocks first, then code unit by code unit from the first differing block.
 #[inline(always)]
 fn strip_affix_mixed<'a, T1: CodeUnit, T2: CodeUnit>(
     a: &'a [T1],
     b: &'a [T2],
 ) -> (&'a [T1], &'a [T2]) {
-    let prefix = a
-        .iter()
-        .zip(b.iter())
-        .position(|(x, y)| x.as_u64() != y.as_u64())
-        .unwrap_or_else(|| a.len().min(b.len()));
+    let n = a.len().min(b.len());
+    let mut prefix = 0;
+    while prefix + MIXED_BLOCK <= n
+        && block_mismatches(
+            &a[prefix..prefix + MIXED_BLOCK],
+            &b[prefix..prefix + MIXED_BLOCK],
+        ) == 0
+    {
+        prefix += MIXED_BLOCK;
+    }
+    while prefix < n && a[prefix].as_u64() == b[prefix].as_u64() {
+        prefix += 1;
+    }
 
     let a = &a[prefix..];
     let b = &b[prefix..];
 
-    let suffix = a
-        .iter()
-        .rev()
-        .zip(b.iter().rev())
-        .position(|(x, y)| x.as_u64() != y.as_u64())
-        .unwrap_or_else(|| a.len().min(b.len()));
+    let (n, la, lb) = (n - prefix, a.len(), b.len());
+    let mut suffix = 0;
+    while suffix + MIXED_BLOCK <= n
+        && block_mismatches(
+            &a[la - suffix - MIXED_BLOCK..la - suffix],
+            &b[lb - suffix - MIXED_BLOCK..lb - suffix],
+        ) == 0
+    {
+        suffix += MIXED_BLOCK;
+    }
+    while suffix < n && a[la - suffix - 1].as_u64() == b[lb - suffix - 1].as_u64() {
+        suffix += 1;
+    }
 
-    (&a[..a.len() - suffix], &b[..b.len() - suffix])
+    (&a[..la - suffix], &b[..lb - suffix])
 }
 
 /// Reinterpret a code-unit slice as raw bytes (sound: u8/u16/u32 are plain data).
@@ -767,8 +804,8 @@ fn small_ub<T: CodeUnit>(short: &[T], long: &[T]) -> Option<usize> {
     Some(ub)
 }
 
-/// [`small_ub`] for mixed-kind slices: plain element-wise scan with early
-/// abort (mixed pairs have no byte-comparable representation).
+/// [`small_ub`] for mixed-kind slices (no byte-comparable representation):
+/// mismatches are counted a block at a time, aborting between blocks.
 #[inline(always)]
 fn small_ub_mixed<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2]) -> Option<usize> {
     debug_assert!(short.len() <= long.len());
@@ -776,7 +813,14 @@ fn small_ub_mixed<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2]) -> Opti
     if ub > MBLEVEN_MAX || short.len() > MBLEVEN_MAX_LEN {
         return None;
     }
-    for (x, y) in short.iter().zip(long.iter()) {
+    let blocks = short.len() / MIXED_BLOCK * MIXED_BLOCK;
+    for i in (0..blocks).step_by(MIXED_BLOCK) {
+        ub += block_mismatches(&short[i..i + MIXED_BLOCK], &long[i..i + MIXED_BLOCK]);
+        if ub > MBLEVEN_MAX {
+            return None;
+        }
+    }
+    for (x, y) in short[blocks..].iter().zip(long[blocks..].iter()) {
         if x.as_u64() != y.as_u64() {
             ub += 1;
             if ub > MBLEVEN_MAX {
@@ -2299,6 +2343,27 @@ mod tests {
             let ac: Vec<char> = a.chars().collect();
             let bc: Vec<char> = b.chars().collect();
             assert_eq!(levenshtein(&a, &b), naive(&ac, &bc), "({a:?}, {b:?})");
+        }
+    }
+
+    /// The mixed-kind block scans must find a difference at every offset
+    /// inside, at and past a block boundary, from either end, and count
+    /// mismatches like the element-wise definition.
+    #[test]
+    fn mixed_scans_find_every_mismatch() {
+        for n in [15usize, 16, 17, 31, 32, 33, 50] {
+            let a: Vec<u8> = (0..n).map(|i| b'a' + (i % 26) as u8).collect();
+            let wide: Vec<u16> = a.iter().map(|&c| c as u16).collect();
+            assert_eq!(strip_affix_mixed(&a, &wide).0.len(), 0);
+            for pos in 0..n {
+                let mut b = wide.clone();
+                b[pos] |= 0x100;
+                let (sa, sb) = strip_affix_mixed(&a, &b);
+                assert_eq!((sa, sb), (&a[pos..=pos], &b[pos..=pos]), "n={n}");
+                assert_eq!(small_ub_mixed(&a, &b), Some(1), "n={n} pos={pos}");
+            }
+            let all: Vec<u16> = wide.iter().map(|&c| c | 0x100).collect();
+            assert_eq!(small_ub_mixed(&a, &all), None, "n={n}");
         }
     }
 
