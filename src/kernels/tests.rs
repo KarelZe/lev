@@ -117,6 +117,12 @@ fn large_kernels_match_oracle() {
         assert_eq!(ctx.run(), d, "run {msg}");
         assert_eq!(aarch64::lcs_full(&ctx), llcs, "aarch64::lcs_full {msg}");
         assert_eq!(portable::lcs_full(&ctx), llcs, "portable::lcs_full {msg}");
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("bmi1") && std::is_x86_feature_detected!("popcnt") {
+            // SAFETY: both target features were just detected.
+            let l = unsafe { bmi1::lcs_full(&ctx) };
+            assert_eq!(l, llcs, "bmi1::lcs_full {msg}");
+        }
         assert_eq!(ctx.lcs_run(), llcs, "lcs_run {msg}");
     }
 }

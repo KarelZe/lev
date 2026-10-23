@@ -2,6 +2,8 @@
 //! 2013), selected by runtime feature detection.
 
 use crate::kernels::delta;
+#[cfg(target_arch = "x86_64")]
+use crate::{lcs_multiword_kernel, LargeCtx};
 
 /// [`multiword_andn`] compiled with `bmi1` and `popcnt`, which run each
 /// `!a & b` as one `andn`.  The kernel is throughput-bound from two words
@@ -48,4 +50,34 @@ pub(crate) fn multiword_andn<const W: usize, I: Iterator<Item = [u64; W]>>(
         }
     }
     delta(vp, vn, m)
+}
+
+/// Words per strip of [`lcs_full`]: a strip's state and the operands of its
+/// carry chain fit x86-64's 16 registers.
+#[cfg(target_arch = "x86_64")]
+const LCS_STRIP: usize = 4;
+
+/// [`crate::kernels::lcs_full`] strip by strip, like
+/// [`crate::kernels::aarch64::apple::lcs_full`] but four words wide.  The
+/// portable loop over all words keeps the state in memory and, as every
+/// logic op clobbers the flags, moves the carry between the flags and a
+/// register on each word (`setb`, `bt`), a serial chain through the whole
+/// column; a strip runs its words as one `adc` chain.  The LCS step has no
+/// negation for BMI1 to fold, so the strips pay on their own; they share the
+/// module and its detection with [`multiword`] for POPCNT.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "bmi1,popcnt")]
+pub(crate) unsafe fn lcs_full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
+    let mut carries = vec![0u8; ctx.n];
+    let mut lcs = 0;
+    for w0 in (0..ctx.w).step_by(LCS_STRIP) {
+        let c = Some(&mut carries[..]);
+        lcs += match ctx.w - w0 {
+            1 => lcs_multiword_kernel::<1, _>(ctx.rows::<1>(w0), c),
+            2 => lcs_multiword_kernel::<2, _>(ctx.rows::<2>(w0), c),
+            3 => lcs_multiword_kernel::<3, _>(ctx.rows::<3>(w0), c),
+            _ => lcs_multiword_kernel::<LCS_STRIP, _>(ctx.rows::<LCS_STRIP>(w0), c),
+        };
+    }
+    lcs
 }
