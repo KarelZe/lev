@@ -23,8 +23,6 @@ def expected(s1: str, s2: str) -> int:
     """
     Return the rapidfuzz distance of the parametrized pair.
 
-    Fixtures run during test setup, which CodSpeed does not measure.
-
     Returns:
         int: Levenshtein distance between s1 and s2.
 
@@ -83,11 +81,10 @@ _DISTANCE_PAIRS = [
 ]
 
 
-@pytest.mark.benchmark
 @pytest.mark.parametrize(("s1", "s2"), _DISTANCE_PAIRS)
 def test_distance(s1: str, s2: str, expected: int) -> None:
     """
-    Test and benchmark lev.distance.
+    Test lev.distance.
 
     Args:
         s1 (str): First input string.
@@ -175,11 +172,10 @@ _MIXED_KIND_CASES = [
 ]
 
 
-@pytest.mark.benchmark
 @pytest.mark.parametrize(("s1", "s2"), _MIXED_KIND_CASES)
 def test_distance_mixed_kind(s1: str, s2: str, expected: int) -> None:
     """
-    Test and benchmark lev.distance on pairs with different internal encodings.
+    Test lev.distance on pairs with different internal encodings.
 
     Args:
         s1 (str): First input string.
@@ -269,11 +265,10 @@ _LONG_CASES = [
 ]
 
 
-@pytest.mark.benchmark
 @pytest.mark.parametrize(("s1", "s2"), _LONG_CASES)
 def test_distance_long(s1: str, s2: str, expected: int) -> None:
     """
-    Test and benchmark lev.distance on strings beyond the 512-char gate.
+    Test lev.distance on strings beyond the 512-char gate.
 
     Args:
         s1 (str): First input string.
@@ -326,11 +321,10 @@ _MEDIUM_CASES = [
 ]
 
 
-@pytest.mark.benchmark
 @pytest.mark.parametrize(("s1", "s2"), _MEDIUM_CASES)
 def test_distance_medium(s1: str, s2: str, expected: int) -> None:
     """
-    Test and benchmark lev.distance on strings between the tiny and banded paths.
+    Test lev.distance on strings between the tiny and banded paths.
 
     Args:
         s1 (str): First input string.
@@ -378,11 +372,10 @@ _RATIO_PAIRS = [
 ]
 
 
-@pytest.mark.benchmark
 @pytest.mark.parametrize(("s1", "s2"), _RATIO_PAIRS)
 def test_ratio(s1: str, s2: str, expected_ratio: float) -> None:
     """
-    Test and benchmark lev.ratio.
+    Test lev.ratio.
 
     Args:
         s1 (str): First input string.

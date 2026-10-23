@@ -1,0 +1,85 @@
+name: A/B benchmark
+
+# Wall-clock comparison of a pull request against its base on several
+# GitHub-hosted runners. Both builds run alternately in the same job, so the
+# drift of shared runners cancels out of the B/A ratios; CodSpeed (benchmark.yml)
+# counts simulated instructions on x86-64 only and cannot see latency effects
+# or other architectures. Results land in each job's summary.
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - '.cargo/**'
+      - 'tests/test_bench.py'
+      - 'scripts/ab_benchmark.py'
+      - '.github/workflows/ab-benchmark.yml'
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Baseline ref (A)"
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ab-benchmark-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ab:
+    name: A/B (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86-64, os: ubuntu-24.04 }
+          - { name: linux-aarch64, os: ubuntu-24.04-arm }
+          - { name: windows-x86-64, os: windows-2025 }
+          - { name: windows-aarch64, os: windows-11-arm }
+          - { name: macos-arm64, os: macos-15 }
+    defaults:
+      run:
+        shell: bash
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha || inputs.base }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Build base (A) and head (B)
+        run: |
+          python -m pip install --quiet "maturin>=1.14.1,<2.0" pytest
+          git worktree add ../lev-base "$BASE_SHA"
+          for side in base head; do
+            src=$([ "$side" = base ] && echo ../lev-base || echo .)
+            (cd "$src" && maturin build --release --interpreter python --out "$GITHUB_WORKSPACE/dist-$side")
+            python -m pip install --quiet --no-deps --target "ab-$side" dist-$side/*.whl
+          done
+
+      - name: Hardware
+        run: python -c "import os, platform; print(platform.platform(), platform.processor(), os.cpu_count(), 'cpus')"
+
+      - name: Run A/B
+        run: |
+          # Pin to one core on Linux so the scheduler does not migrate the timed process.
+          pin=$([ "$RUNNER_OS" = Linux ] && echo "taskset -c 1" || true)
+          $pin python scripts/ab_benchmark.py --a ab-base --b ab-head \
+            --summary "$GITHUB_STEP_SUMMARY" --json "ab-${{ matrix.name }}.json"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ab-${{ matrix.name }}
+          path: ab-${{ matrix.name }}.json
