@@ -39,4 +39,4 @@ jobs:
         with:
           mode: simulation
           token: ${{ secrets.CODSPEED_TOKEN }}
-          run: pytest tests/test_lev.py --codspeed
+          run: pytest tests/test_bench.py --codspeed
