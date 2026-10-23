@@ -247,7 +247,7 @@ def plot_contenders(per_lib: dict[str, float], kind: str, meta: dict) -> None:
             })
             fig, ax = plt.subplots(figsize=(10, 2))
             bars = ax.barh(list(sorted_measures.keys()), list(sorted_measures.values()))
-            ax.bar_label(bars, padding=5, fmt="%.1f ms")
+            ax.bar_label(bars, padding=5, fmt="%.2f ms")
             for label in ax.get_yticklabels():
                 if label.get_text() == "lev":
                     label.set_fontweight("bold")
