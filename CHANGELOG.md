@@ -2,6 +2,13 @@
 
 - build: move dev and docs to project dependencies🔧 (#160)
 
+## [0.4.1](https://github.com/KarelZe/lev/compare/0.4.0...0.4.1) (2026-10-22)
+
+
+### Bug Fixes
+
+* publish CPython 3.14 and 3.15 wheels for macOS and Windows ([#194](https://github.com/KarelZe/lev/issues/194)) ([cd5a6c2](https://github.com/KarelZe/lev/commit/cd5a6c247ed7ce1882da6fb6f8207855adda1aa7))
+
 ## [0.4.0](https://github.com/KarelZe/lev/compare/0.3.0...0.4.0) (2026-10-14)
 
 
