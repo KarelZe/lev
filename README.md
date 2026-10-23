@@ -14,6 +14,8 @@ or if you prefer slow:
 pip install lev-rs
 ```
 
+On x86-64, lev needs a CPU with SSE4.2 and POPCNT (x86-64-v2, any CPU from 2009 on).
+
 ## Usage
 
 ```python
