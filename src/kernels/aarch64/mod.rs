@@ -57,6 +57,8 @@ macro_rules! with_width {
 /// [`crate::kernels::full`] strip by strip: the pattern is cut into strips of
 /// [`STRIP`] words, bottom first, and each strip sweeps the whole text,
 /// handing its per-column edges to the strip above.
+// Selected on AArch64 only; the tests run this form on every target.
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub(crate) fn full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
     let (m, w) = (ctx.m, ctx.w);
     let mut edges = vec![EDGE_ROW0; ctx.n];
@@ -72,6 +74,8 @@ pub(crate) fn full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
 }
 
 /// [`crate::kernels::lcs_full`] strip by strip.
+// Selected on AArch64 only; the tests run this form on every target.
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub(crate) fn lcs_full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
     let mut carries = vec![0u8; ctx.n];
     let mut lcs = 0;

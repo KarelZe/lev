@@ -54,6 +54,8 @@ pub(crate) fn multiword<const W: usize, I: Iterator<Item = [u64; W]>>(
 
 /// [`super::full`] as one loop over all words per column, with the state on
 /// the heap.
+// AArch64 selects the strips; the tests still run this form there.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
 pub(crate) fn full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
     let (m, w) = (ctx.m, ctx.w);
     let (mut vp, mut vn) = (vec![!0u64; w], vec![0u64; w]);
@@ -82,6 +84,8 @@ pub(crate) fn full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
 }
 
 /// [`super::lcs_full`] as one loop over all words per column.
+// AArch64 selects the strips; the tests still run this form there.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
 pub(crate) fn lcs_full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
     let mut s = vec![!0u64; ctx.w];
     ctx.for_each_base(|base| {
