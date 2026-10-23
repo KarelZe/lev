@@ -17,5 +17,5 @@ _PY_TAG = f"py{sys.version_info.major}.{sys.version_info.minor}"
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Append the Python version to each benchmark's node id."""
     for item in items:
-        if item.get_closest_marker("benchmark") is not None:
+        if item.get_closest_marker("benchmark") is not None or "benchmark" in getattr(item, "fixturenames", ()):
             item._nodeid = f"{item._nodeid}[{_PY_TAG}]"
