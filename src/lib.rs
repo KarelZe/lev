@@ -1900,27 +1900,6 @@ mod tests {
         check("abcdefghij", "abcdefghij", 0);
     }
 
-    /// The mixed-kind block scans must find a difference at every offset
-    /// inside, at and past a block boundary, from either end, and count
-    /// mismatches like the element-wise definition.
-    #[test]
-    fn mixed_scans_find_every_mismatch() {
-        for n in [15usize, 16, 17, 31, 32, 33, 50] {
-            let a: Vec<u8> = (0..n).map(|i| b'a' + (i % 26) as u8).collect();
-            let wide: Vec<u16> = a.iter().map(|&c| c as u16).collect();
-            assert_eq!(strip_affix_mixed(&a, &wide).0.len(), 0);
-            for pos in 0..n {
-                let mut b = wide.clone();
-                b[pos] |= 0x100;
-                let (sa, sb) = strip_affix_mixed(&a, &b);
-                assert_eq!((sa, sb), (&a[pos..=pos], &b[pos..=pos]), "n={n}");
-                assert_eq!(small_ub_mixed(&a, &b), Some(1), "n={n} pos={pos}");
-            }
-            let all: Vec<u16> = wide.iter().map(|&c| c | 0x100).collect();
-            assert_eq!(small_ub_mixed(&a, &all), None, "n={n}");
-        }
-    }
-
     #[test]
     fn strip_affix_discards_partial_elements() {
         // u16 units where raw bytes match past an element boundary: the
@@ -1956,6 +1935,27 @@ mod tests {
             let ac: Vec<char> = a.chars().collect();
             let bc: Vec<char> = b.chars().collect();
             assert_eq!(levenshtein(&a, &b), naive(&ac, &bc), "({a:?}, {b:?})");
+        }
+    }
+
+    /// The mixed-kind block scans must find a difference at every offset
+    /// inside, at and past a block boundary, from either end, and count
+    /// mismatches like the element-wise definition.
+    #[test]
+    fn mixed_scans_find_every_mismatch() {
+        for n in [15usize, 16, 17, 31, 32, 33, 50] {
+            let a: Vec<u8> = (0..n).map(|i| b'a' + (i % 26) as u8).collect();
+            let wide: Vec<u16> = a.iter().map(|&c| c as u16).collect();
+            assert_eq!(strip_affix_mixed(&a, &wide).0.len(), 0);
+            for pos in 0..n {
+                let mut b = wide.clone();
+                b[pos] |= 0x100;
+                let (sa, sb) = strip_affix_mixed(&a, &b);
+                assert_eq!((sa, sb), (&a[pos..=pos], &b[pos..=pos]), "n={n}");
+                assert_eq!(small_ub_mixed(&a, &b), Some(1), "n={n} pos={pos}");
+            }
+            let all: Vec<u16> = wide.iter().map(|&c| c | 0x100).collect();
+            assert_eq!(small_ub_mixed(&a, &all), None, "n={n}");
         }
     }
 
