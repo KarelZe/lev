@@ -484,11 +484,34 @@ fn as_bytes<T: CodeUnit>(s: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, std::mem::size_of_val(s)) }
 }
 
-/// Length in bytes of the common prefix of `a` and `b`, compared 8 bytes at a time.
+/// Bytes compared per branch by the affix scans: the XORs of four words are
+/// ORed into one test, which LLVM lowers to 16-byte vector compares.
+const AFFIX_BLOCK: usize = 32;
+
+/// Whether two `AFFIX_BLOCK`-byte blocks differ, without an early exit.
+#[inline(always)]
+fn blocks_differ(x: &[u8; AFFIX_BLOCK], y: &[u8; AFFIX_BLOCK]) -> bool {
+    let (wx, _) = x.as_chunks::<8>();
+    let (wy, _) = y.as_chunks::<8>();
+    wx.iter().zip(wy).fold(0u64, |acc, (p, q)| {
+        acc | (u64::from_ne_bytes(*p) ^ u64::from_ne_bytes(*q))
+    }) != 0
+}
+
+/// Length in bytes of the common prefix of `a` and `b`: whole blocks first,
+/// then 8 bytes at a time from the first differing block on.
 #[inline(always)]
 fn common_prefix_bytes(a: &[u8], b: &[u8]) -> usize {
     let n = a.len().min(b.len());
     let mut i = 0;
+    while i + AFFIX_BLOCK <= n
+        && !blocks_differ(
+            a[i..i + AFFIX_BLOCK].try_into().unwrap(),
+            b[i..i + AFFIX_BLOCK].try_into().unwrap(),
+        )
+    {
+        i += AFFIX_BLOCK;
+    }
     while i + 8 <= n {
         let x = u64::from_le_bytes(a[i..i + 8].try_into().unwrap());
         let y = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
@@ -504,12 +527,21 @@ fn common_prefix_bytes(a: &[u8], b: &[u8]) -> usize {
     i
 }
 
-/// Length in bytes of the common suffix of `a` and `b`, compared 8 bytes at a time.
+/// Length in bytes of the common suffix of `a` and `b`, scanned like
+/// [`common_prefix_bytes`] from the end.
 #[inline(always)]
 fn common_suffix_bytes(a: &[u8], b: &[u8]) -> usize {
     let n = a.len().min(b.len());
     let (la, lb) = (a.len(), b.len());
     let mut i = 0;
+    while i + AFFIX_BLOCK <= n
+        && !blocks_differ(
+            a[la - i - AFFIX_BLOCK..la - i].try_into().unwrap(),
+            b[lb - i - AFFIX_BLOCK..lb - i].try_into().unwrap(),
+        )
+    {
+        i += AFFIX_BLOCK;
+    }
     while i + 8 <= n {
         let x = u64::from_le_bytes(a[la - i - 8..la - i].try_into().unwrap());
         let y = u64::from_le_bytes(b[lb - i - 8..lb - i].try_into().unwrap());
@@ -2213,6 +2245,23 @@ mod tests {
         // Prefix and suffix scans meeting in the middle.
         check("abcdefgh_XY_abcdefgh", "abcdefgh_YX_abcdefgh", 2);
         check("abcdefghij", "abcdefghij", 0);
+    }
+
+    /// The block scans must find a difference at every offset inside, at
+    /// and past a block boundary, from either end.
+    #[test]
+    fn affix_scan_finds_every_mismatch() {
+        for n in [31usize, 32, 33, 63, 64, 65, 100] {
+            let a: Vec<u8> = (0..n).map(|i| i as u8).collect();
+            assert_eq!(common_prefix_bytes(&a, &a), n);
+            assert_eq!(common_suffix_bytes(&a, &a), n);
+            for pos in 0..n {
+                let mut b = a.clone();
+                b[pos] ^= 0x80;
+                assert_eq!(common_prefix_bytes(&a, &b), pos, "n={n}");
+                assert_eq!(common_suffix_bytes(&a, &b), n - 1 - pos, "n={n}");
+            }
+        }
     }
 
     #[test]
