@@ -1,7 +1,7 @@
 //! Every form of every kernel against the DP oracle or the portable form,
 //! on every target, not only on the one that selects it.
 
-use super::aarch64::apple;
+use super::aarch64::{self, apple, neoverse};
 use super::x86_64::bmi1;
 use super::{myers_step, portable, EDGE_ROW0};
 use crate::tests::{lcg, mutate, naive, naive_indel, rand_string};
@@ -112,23 +112,24 @@ fn large_kernels_match_oracle() {
         let (d, e) = (naive(&sc, &lc), naive_indel(&sc, &lc));
         let llcs = (s.len() + l.len() - e) / 2;
         let msg = format!("m={} n={}", s.len(), l.len());
-        assert_eq!(apple::full(&ctx), d, "apple::full {msg}");
+        assert_eq!(aarch64::full(&ctx), d, "aarch64::full {msg}");
         assert_eq!(portable::full(&ctx), d, "portable::full {msg}");
         assert_eq!(ctx.run(), d, "run {msg}");
-        assert_eq!(apple::lcs_full(&ctx), llcs, "apple::lcs_full {msg}");
+        assert_eq!(aarch64::lcs_full(&ctx), llcs, "aarch64::lcs_full {msg}");
         assert_eq!(portable::lcs_full(&ctx), llcs, "portable::lcs_full {msg}");
         assert_eq!(ctx.lcs_run(), llcs, "lcs_run {msg}");
     }
 }
 
-/// Both multi-word step forms must agree with the oracle on every target,
-/// not only on the one that selects them, as whole patterns and as
-/// stacked strips.
+/// Every multi-word step form must agree with the oracle on every target,
+/// not only on the one that selects it, as stacked strips and (Neoverse,
+/// whose whole-pattern instances no other test reaches off AArch64) as
+/// whole patterns.
 #[test]
 fn multiword_forms_match_oracle() {
     let mut state = 0xA5C3_0F0F_1234_5678_u64;
     let alpha = &b"abcdefgh"[..];
-    for &m in &[65usize, 128, 129, 200, 300, 385, 449, 512, 700, 1030] {
+    for &m in &[65usize, 128, 129, 200, 300, 350, 385, 449, 512, 700, 1030] {
         let a = rand_string(&mut state, m, alpha);
         for b in [
             mutate(&mut state, &a, 5, alpha),
@@ -157,39 +158,51 @@ fn multiword_forms_match_oracle() {
                 l.iter().map(|&c| c as char).collect(),
             );
             let expected = naive(&sc, &lc);
-            for apple_form in [false, true] {
+            for form in ["portable", "apple", "neoverse"] {
                 // Strips of up to four words over the whole pattern.
                 let mut edges = vec![EDGE_ROW0; l.len()];
                 let mut delta = 0isize;
                 for w0 in (0..w).step_by(4) {
                     let rows = (s.len() - 64 * w0).min(256);
                     let e = Some(&mut edges[..]);
-                    delta += match ((w - w0).min(4), apple_form) {
-                        (1, false) => portable::multiword::<1, _>(rows, ctx.rows::<1>(w0), e),
-                        (2, false) => portable::multiword::<2, _>(rows, ctx.rows::<2>(w0), e),
-                        (3, false) => portable::multiword::<3, _>(rows, ctx.rows::<3>(w0), e),
-                        (_, false) => portable::multiword::<4, _>(rows, ctx.rows::<4>(w0), e),
-                        (1, true) => apple::multiword::<1, _>(rows, ctx.rows::<1>(w0), e),
-                        (2, true) => apple::multiword::<2, _>(rows, ctx.rows::<2>(w0), e),
-                        (3, true) => apple::multiword::<3, _>(rows, ctx.rows::<3>(w0), e),
-                        (_, true) => apple::multiword::<4, _>(rows, ctx.rows::<4>(w0), e),
+                    delta += match ((w - w0).min(4), form) {
+                        (1, "portable") => portable::multiword::<1, _>(rows, ctx.rows::<1>(w0), e),
+                        (2, "portable") => portable::multiword::<2, _>(rows, ctx.rows::<2>(w0), e),
+                        (3, "portable") => portable::multiword::<3, _>(rows, ctx.rows::<3>(w0), e),
+                        (_, "portable") => portable::multiword::<4, _>(rows, ctx.rows::<4>(w0), e),
+                        (1, "apple") => apple::multiword::<1, _>(rows, ctx.rows::<1>(w0), e),
+                        (2, "apple") => apple::multiword::<2, _>(rows, ctx.rows::<2>(w0), e),
+                        (3, "apple") => apple::multiword::<3, _>(rows, ctx.rows::<3>(w0), e),
+                        (_, "apple") => apple::multiword::<4, _>(rows, ctx.rows::<4>(w0), e),
+                        (1, _) => neoverse::multiword::<1, _>(rows, ctx.rows::<1>(w0), e),
+                        (2, _) => neoverse::multiword::<2, _>(rows, ctx.rows::<2>(w0), e),
+                        (3, _) => neoverse::multiword::<3, _>(rows, ctx.rows::<3>(w0), e),
+                        (_, _) => neoverse::multiword::<4, _>(rows, ctx.rows::<4>(w0), e),
                     };
                 }
                 let d = (l.len() as isize + delta) as usize;
-                assert_eq!(
-                    d,
-                    expected,
-                    "apple_form={apple_form} m={} n={}",
-                    s.len(),
-                    l.len()
-                );
+                assert_eq!(d, expected, "{form} m={} n={}", s.len(), l.len());
             }
+            // Whole patterns, as the const-width kernels run them.
+            let whole = match w {
+                2 => neoverse::multiword::<2, _>(s.len(), ctx.rows::<2>(0), None),
+                3 => neoverse::multiword::<3, _>(s.len(), ctx.rows::<3>(0), None),
+                4 => neoverse::multiword::<4, _>(s.len(), ctx.rows::<4>(0), None),
+                5 => neoverse::multiword::<5, _>(s.len(), ctx.rows::<5>(0), None),
+                6 => neoverse::multiword::<6, _>(s.len(), ctx.rows::<6>(0), None),
+                7 => neoverse::multiword::<7, _>(s.len(), ctx.rows::<7>(0), None),
+                8 => neoverse::multiword::<8, _>(s.len(), ctx.rows::<8>(0), None),
+                _ => continue,
+            };
+            let d = (l.len() as isize + whole) as usize;
+            assert_eq!(d, expected, "neoverse whole m={} n={}", s.len(), l.len());
         }
     }
 }
 
-/// The hand-scheduled aarch64 step must match its portable reference on
-/// every reachable state (`vp & vn == 0`).
+/// Every single-word step must match the portable reference on every
+/// reachable state (`vp & vn == 0`): the selected one, the Neoverse form on
+/// every target, and the hand-scheduled Apple form on Apple silicon.
 #[test]
 fn myers_step_matches_portable() {
     let mut x = 0x9E37_79B9_7F4A_7C15u64;
@@ -199,9 +212,26 @@ fn myers_step_matches_portable() {
         x ^= x << 17;
         x
     };
-    for _ in 0..200_000 {
-        let (eq, vp) = (next(), next());
-        let vn = next() & !vp;
-        assert_eq!(myers_step(eq, vp, vn), portable::myers_step(eq, vp, vn));
+    let mut states: Vec<(u64, u64, u64)> = (0..200_000)
+        .map(|_| {
+            let (eq, vp) = (next(), next());
+            (eq, vp, next() & !vp)
+        })
+        .collect();
+    // Words with the top or bottom bit alone set or alone clear.
+    let edges = [0, 1, 1 << 63, !0, !1, !0 >> 1];
+    for eq in edges {
+        for vp in edges {
+            for vn in edges {
+                states.push((eq, vp, vn & !vp));
+            }
+        }
+    }
+    for (eq, vp, vn) in states {
+        let expected = portable::myers_step(eq, vp, vn);
+        assert_eq!(myers_step(eq, vp, vn), expected);
+        assert_eq!(neoverse::myers_step(eq, vp, vn), expected, "neoverse");
+        #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+        assert_eq!(apple::myers_step(eq, vp, vn), expected, "apple");
     }
 }

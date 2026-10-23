@@ -12,8 +12,10 @@
 //!   detection, or by `cfg(target_feature)` where the target guarantees it.
 //! - `<target_arch>/<uarch>`: forms that use only the baseline ISA but are
 //!   scheduled for one core family, named after that family as LLVM's
-//!   `target-cpu` names it (e.g. [`aarch64::apple`], later
-//!   `aarch64::neoverse`).  Selected at compile time by `cfg`.
+//!   `target-cpu` names it ([`aarch64::apple`], [`aarch64::neoverse`]).
+//!   Selected at compile time by `cfg`.
+//! - `<target_arch>`: forms that every core of one architecture runs, such
+//!   as the strips of [`aarch64::full`], which need AArch64's 31 registers.
 //!
 //! The split follows `memchr` (`arch/{generic, x86_64/avx2, aarch64/neon}`)
 //! and RustCrypto's `sha2` (`soft`, `x86_sha`, `aarch64_sha2`), with module
@@ -45,15 +47,14 @@ mod x86_64;
 
 use crate::LargeCtx;
 
-/// Whether the kernels tuned on Apple M-series cores are used: the pinned
-/// [`myers_step`], the funnel-shift [`multiword`] and the strips of
-/// [`full`] and [`lcs_full`].  They were never measured on other AArch64
-/// cores, which take the portable kernels like every other target.  The
-/// first two are selected by the same predicate in `cfg`.
-const APPLE_SILICON: bool = cfg!(all(target_arch = "aarch64", target_vendor = "apple"));
+/// Whether the strips of [`full`] and [`lcs_full`] are used: on every
+/// AArch64 core, whose 31 general-purpose registers hold a strip's state.
+/// [`myers_step`] and [`multiword`] have one form for Apple M-series cores
+/// and one for the others (Neoverse), selected by `target_vendor` in `cfg`.
+const AARCH64: bool = cfg!(target_arch = "aarch64");
 
 /// Edge byte between stacked strips of a tall pattern (see
-/// [`aarch64::apple::full`]): bit 0 is the carry of the column addition,
+/// [`aarch64::full`]): bit 0 is the carry of the column addition,
 /// bits 1 and 2 the `+1`/`-1` horizontal delta leaving the strip's top row.
 /// Below row 0 the delta is `+1` and there is no carry.
 const EDGE_ROW0: u8 = 0b010;
@@ -62,7 +63,9 @@ const EDGE_ROW0: u8 = 0b010;
 /// [`crate::hyrro_inner`]): returns the new `(vp, vn)`.
 #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
 pub(crate) use aarch64::apple::myers_step;
-#[cfg(not(all(target_arch = "aarch64", target_vendor = "apple")))]
+#[cfg(all(target_arch = "aarch64", not(target_vendor = "apple")))]
+pub(crate) use aarch64::neoverse::myers_step;
+#[cfg(not(target_arch = "aarch64"))]
 pub(crate) use portable::myers_step;
 
 /// Multi-word Levenshtein kernel over `m` pattern rows in `W` words.
@@ -77,7 +80,8 @@ pub(crate) use portable::myers_step;
 /// x86-64's 16 registers and the spills, not the ALU work, set the pace: the
 /// and-not form saved under 2% of the instructions there and measured within
 /// noise to 4% slower.  Apple silicon runs [`aarch64::apple::multiword`],
-/// every other target [`portable::multiword`].
+/// other AArch64 cores [`aarch64::neoverse::multiword`], every other target
+/// [`portable::multiword`].
 #[inline(always)]
 pub(crate) fn multiword<const W: usize, I: Iterator<Item = [u64; W]>>(
     m: usize,
@@ -97,15 +101,17 @@ pub(crate) fn multiword<const W: usize, I: Iterator<Item = [u64; W]>>(
     // here, LLVM allocates the registers of the strips differently.
     #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
     return aarch64::apple::multiword::<W, I>(m, pm_iter, edges);
-    #[cfg(not(all(target_arch = "aarch64", target_vendor = "apple")))]
+    #[cfg(all(target_arch = "aarch64", not(target_vendor = "apple")))]
+    return aarch64::neoverse::multiword::<W, I>(m, pm_iter, edges);
+    #[cfg(not(target_arch = "aarch64"))]
     portable::multiword::<W, I>(m, pm_iter, edges)
 }
 
 /// Full-matrix Levenshtein distance (fallback for `w > MAX_W`): strips on
-/// Apple silicon, one loop over all words elsewhere.
+/// AArch64, one loop over all words elsewhere.
 pub(crate) fn full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
-    if APPLE_SILICON {
-        aarch64::apple::full(ctx)
+    if AARCH64 {
+        aarch64::full(ctx)
     } else {
         portable::full(ctx)
     }
@@ -113,8 +119,8 @@ pub(crate) fn full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
 
 /// Full-matrix LCS length (fallback for `w > MAX_W`), split like [`full`].
 pub(crate) fn lcs_full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
-    if APPLE_SILICON {
-        aarch64::apple::lcs_full(ctx)
+    if AARCH64 {
+        aarch64::lcs_full(ctx)
     } else {
         portable::lcs_full(ctx)
     }
