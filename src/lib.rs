@@ -1301,13 +1301,79 @@ const EDGE_ROW0: u8 = 0b010;
 /// `D(0, n) = n` (see [`hyrro_inner`]).  With `edges`, the kernel is one
 /// strip of a taller pattern: it reads each column's incoming edge from
 /// there and writes the outgoing one back.
+///
+/// On x86-64 CPUs with BMI1, whole patterns (no `edges`) of up to four words
+/// run [`multiword_kernel_andn`] compiled with `andn` and `popcnt`.  From
+/// five words the state spills out of x86-64's 16 registers and the spills,
+/// not the ALU work, set the pace: the and-not form saved under 2% of the
+/// instructions there and measured within noise to 4% slower.
 #[inline(always)]
 fn multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(
     m: usize,
     pm_iter: I,
     edges: Option<&mut [u8]>,
 ) -> isize {
+    #[cfg(target_arch = "x86_64")]
+    if W <= 4
+        && edges.is_none()
+        && std::is_x86_feature_detected!("bmi1")
+        && std::is_x86_feature_detected!("popcnt")
+    {
+        // SAFETY: both target features were just detected.
+        return unsafe { multiword_kernel_bmi1::<W, I>(m, pm_iter) };
+    }
     multiword_kernel_form::<W, I, APPLE_SILICON>(m, pm_iter, edges)
+}
+
+/// [`multiword_kernel_andn`] compiled for x86-64 CPUs with BMI1 and POPCNT
+/// (every x86-64 CPU since 2013), which run each `!a & b` as one `andn`.
+/// The kernel is throughput-bound from two words on, so the fewer
+/// instructions (15-18% per column at `W` = 2 and 4) translate into time.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "bmi1,popcnt")]
+unsafe fn multiword_kernel_bmi1<const W: usize, I: Iterator<Item = [u64; W]>>(
+    m: usize,
+    pm_iter: I,
+) -> isize {
+    multiword_kernel_andn::<W, I>(m, pm_iter)
+}
+
+/// Hyyrö's form of [`multiword_kernel_form`] (`FUNNEL = false`, whole
+/// patterns only) with `nhp = !hp` tracked instead of `hp`,
+/// so every negation pairs with an AND: `hp = vn | !(d0 | vp)` becomes
+/// `nhp = !vn & (d0 | vp)`, and with `nhp_s = !hp_s` (its shift-in is the
+/// negated `hp` bit, 0 below row 0) `vp' = hn_s | (!d0 & nhp_s)` and
+/// `vn' = !nhp_s & d0`.  Exact for every state; it only pays where `!a & b`
+/// is one instruction (`andn` with BMI1), otherwise it costs a few more.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+#[inline(always)]
+fn multiword_kernel_andn<const W: usize, I: Iterator<Item = [u64; W]>>(
+    m: usize,
+    pm_iter: I,
+) -> isize {
+    let mut vp = [!0u64; W];
+    let mut vn = [0u64; W];
+    for pm_row in pm_iter {
+        let (mut carry, mut prev_nhp, mut prev_hn) = (false, 0u64, 0u64);
+        for k in 0..W {
+            let (pm, v_p, v_n) = (pm_row[k], vp[k], vn[k]);
+            let x = pm | v_n;
+            let (sum, nc) = (x & v_p).carrying_add(v_p, carry);
+            carry = nc;
+            let d0 = (sum ^ v_p) | x;
+            let nhp = !v_n & (d0 | v_p);
+            let hn = v_p & d0;
+            let (nhp_s, hn_s) = (nhp << 1 | prev_nhp, hn << 1 | prev_hn);
+            vp[k] = hn_s | (!d0 & nhp_s);
+            vn[k] = !nhp_s & d0;
+            (prev_nhp, prev_hn) = (nhp >> 63, hn >> 63);
+        }
+    }
+    let rows = u64::MAX >> (64 * W - m);
+    vp[W - 1] &= rows;
+    vn[W - 1] &= rows;
+    let count = |v: &[u64; W]| v.iter().map(|x| x.count_ones() as isize).sum::<isize>();
+    count(&vp) - count(&vn)
 }
 
 /// [`multiword_kernel`] with the step formulation chosen explicitly; both
@@ -2465,6 +2531,65 @@ mod tests {
             }
         }
         out.into_iter().collect()
+    }
+
+    /// The and-not form must agree with Hyyrö's form and the oracle on every
+    /// target, not only where it is selected: on real pairs for every width,
+    /// and with Hyyrö's form on random pattern-match rows (the and-not form is an exact
+    /// rewrite for any state).
+    #[test]
+    fn multiword_andn_matches_oracle() {
+        fn both<const W: usize>(m: usize, rows: &[[u64; W]]) -> (isize, isize) {
+            (
+                multiword_kernel_form::<W, _, false>(m, rows.iter().copied(), None),
+                multiword_kernel_andn::<W, _>(m, rows.iter().copied()),
+            )
+        }
+        fn check<const W: usize>(state: &mut u64) {
+            let alpha = b"abcdefgh";
+            let m = 64 * (W - 1) + 1 + lcg(state) % 64;
+            let a = rand_string(state, m, alpha);
+            let extra = lcg(state) % 50;
+            for b in [
+                mutate(state, &a, 5, alpha),
+                rand_string(state, m + extra, alpha),
+            ] {
+                let (s, l) = if a.len() <= b.len() {
+                    (a.as_bytes(), b.as_bytes())
+                } else {
+                    (b.as_bytes(), a.as_bytes())
+                };
+                if s.len().div_ceil(64) != W {
+                    continue;
+                }
+                let mut peq = [[0u64; W]; 256];
+                for (i, &c) in s.iter().enumerate() {
+                    peq[c as usize][i / 64] |= 1 << (i % 64);
+                }
+                let rows: Vec<[u64; W]> = l.iter().map(|&c| peq[c as usize]).collect();
+                let (sc, lc): (Vec<char>, Vec<char>) = (
+                    s.iter().map(|&c| c as char).collect(),
+                    l.iter().map(|&c| c as char).collect(),
+                );
+                let expected = naive(&sc, &lc) as isize - l.len() as isize;
+                assert_eq!(both::<W>(s.len(), &rows), (expected, expected), "W={W}");
+            }
+            let rows: Vec<[u64; W]> = (0..200)
+                .map(|_| std::array::from_fn(|_| (lcg(state) as u64) << 33 ^ lcg(state) as u64))
+                .collect();
+            let (t, n) = both::<W>(64 * W - 3, &rows);
+            assert_eq!(t, n, "random rows W={W}");
+        }
+        let mut state = 0xA11D_0F0F_1234_5678_u64;
+        for _ in 0..20 {
+            check::<2>(&mut state);
+            check::<3>(&mut state);
+            check::<4>(&mut state);
+            check::<5>(&mut state);
+            check::<6>(&mut state);
+            check::<7>(&mut state);
+            check::<8>(&mut state);
+        }
     }
 
     #[test]
