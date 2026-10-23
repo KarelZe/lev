@@ -931,7 +931,7 @@ trait Kernel {
         -> usize;
 
     /// Heap-backed kernel for very long patterns (`w > MAX_W`).
-    fn large(ctx: &LargeCtx<'_>) -> usize;
+    fn large<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize;
 }
 
 /// Levenshtein distance (substitution, insertion, and deletion each cost 1).
@@ -955,7 +955,7 @@ impl Kernel for Lev {
     }
 
     #[inline(always)]
-    fn large(ctx: &LargeCtx<'_>) -> usize {
+    fn large<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
         ctx.run()
     }
 }
@@ -983,8 +983,8 @@ impl Kernel for Lcs {
     }
 
     #[inline(always)]
-    fn large(ctx: &LargeCtx<'_>) -> usize {
-        ctx.m + ctx.n() - 2 * ctx.lcs_run()
+    fn large<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
+        ctx.m + ctx.n - 2 * ctx.lcs_run()
     }
 }
 
@@ -1071,14 +1071,14 @@ fn hyrro_multiword_bytes<K: Kernel, const SLOTS: usize>(short: &[u8], long: &[u8
             for (i, &c) in short.iter().enumerate() {
                 peq[c as usize * w + i / 64] |= 1u64 << (i % 64);
             }
-            let bases: Vec<usize> = long.iter().map(|&c| c as usize * w).collect();
-            let ctx = LargeCtx {
+            K::large(&LargeCtx {
                 m,
+                n: long.len(),
                 w,
                 data: &peq,
-                bases: &bases,
-            };
-            K::large(&ctx)
+                // SAFETY: the kernels only ask for j < n.
+                base_of: |j: usize| unsafe { *long.get_unchecked(j) } as usize * w,
+            })
         }
     }
 }
@@ -1111,21 +1111,48 @@ fn lcs_band_words(slack: usize, t: usize) -> usize {
 }
 
 /// Shared context for the very-long-pattern kernels (w > MAX_W): `data` is
-/// the flat peq table with stride `w`, and `bases[j]` is the offset of text
-/// char `j`'s row in it.  Resolving rows once pays off because the kernels
-/// below may sweep the text several times.
-struct LargeCtx<'a> {
+/// the flat peq table with stride `w`, and `base_of(j)` is the offset of
+/// text char `j`'s row in it.
+struct LargeCtx<'a, F> {
     m: usize,
+    n: usize,
     w: usize,
     data: &'a [u64],
-    bases: &'a [usize],
+    base_of: F,
 }
 
-impl LargeCtx<'_> {
-    /// Text length.
+impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
+    /// Copy of `self` that reads row offsets from `bases`, one per text char.
+    /// Resolving rows once pays off when the band passes sweep the text
+    /// several times; `bases` costs a word per text char, so only build it
+    /// for those.
+    fn with_bases<'b>(&'b self, bases: &'b [usize]) -> LargeCtx<'b, impl Fn(usize) -> usize + 'b> {
+        debug_assert_eq!(bases.len(), self.n);
+        LargeCtx {
+            m: self.m,
+            n: self.n,
+            w: self.w,
+            data: self.data,
+            // SAFETY: the kernels only ask for j < n = bases.len().
+            base_of: move |j: usize| unsafe { *bases.get_unchecked(j) },
+        }
+    }
+
+    /// Calls `f` with the row offset of each text char in order.  The
+    /// offsets are resolved a chunk at a time into a stack buffer, so the
+    /// lookups (hash probes for UCS-2/4) stay out of the kernel's serial
+    /// loop without a buffer the size of the text.
     #[inline(always)]
-    fn n(&self) -> usize {
-        self.bases.len()
+    fn for_each_base(&self, mut f: impl FnMut(usize)) {
+        const CHUNK: usize = 512;
+        let mut buf = [0usize; CHUNK];
+        for start in (0..self.n).step_by(CHUNK) {
+            let chunk = &mut buf[..(self.n - start).min(CHUNK)];
+            for (j, b) in (start..).zip(chunk.iter_mut()) {
+                *b = (self.base_of)(j);
+            }
+            chunk.iter().for_each(|&base| f(base));
+        }
     }
 
     /// Peq word `k` of the row starting at `base`.
@@ -1147,7 +1174,7 @@ impl LargeCtx<'_> {
     /// Returns `Ok(distance)` when the result proves itself (`score <= t`),
     /// else `Err(j)` with the text column where the band gave up.
     fn banded(&self, t: usize, pv: &mut [u64], mv: &mut [u64]) -> Result<usize, usize> {
-        let (m, n, w) = (self.m, self.n(), self.w);
+        let (m, n, w) = (self.m, self.n, self.w);
         debug_assert!(n >= m);
         debug_assert!(t >= n - m);
         let (pv, mv) = (&mut pv[..w], &mut mv[..w]);
@@ -1160,7 +1187,8 @@ impl LargeCtx<'_> {
         let mut score = bottom(last) as isize;
         let mut top_bit = (bottom(last) - 1) & 63;
 
-        for (j, &base) in (1..=n).zip(self.bases) {
+        for j in 1..=n {
+            let base = (self.base_of)(j - 1);
             let needed = ((j + t - 1) / 64).min(w - 1);
             if needed > last {
                 pv[last + 1..=needed].fill(!0);
@@ -1214,7 +1242,7 @@ impl LargeCtx<'_> {
     fn full(&self) -> usize {
         let (m, w) = (self.m, self.w);
         let (mut vp, mut vn) = (vec![!0u64; w], vec![0u64; w]);
-        for &base in self.bases {
+        self.for_each_base(|base| {
             let (mut carry, mut prev_hp, mut prev_hn) = (false, 1u64, 0u64);
             for (k, (vp_k, vn_k)) in vp.iter_mut().zip(vn.iter_mut()).enumerate() {
                 let (pm, v_p, v_n) = (self.peq(base, k), *vp_k, *vn_k);
@@ -1229,37 +1257,42 @@ impl LargeCtx<'_> {
                 *vn_k = hp_s & d0;
                 (prev_hp, prev_hn) = (hp >> 63, hn >> 63);
             }
-        }
+        });
         // Distance = n + sum of the last column's vertical deltas (see
         // `hyrro_inner`); rows above the pattern hold garbage.
         vp[w - 1] &= u64::MAX >> (64 * w - m);
         vn[w - 1] &= u64::MAX >> (64 * w - m);
         let count = |v: &[u64]| v.iter().map(|x| x.count_ones() as usize).sum::<usize>();
-        self.n() + count(&vp) - count(&vn)
+        self.n + count(&vp) - count(&vn)
     }
 
     /// Bands of growing width before the full matrix.  Each pass aborts as
     /// soon as it can no longer prove a result, so a miss on dissimilar
     /// strings costs a few percent of the full kernel.
     fn run(&self) -> usize {
+        let mut t = (self.n - self.m + 32).max(64);
+        if band_blocks(t) * 3 > self.w {
+            return self.full();
+        }
+        let bases: Vec<usize> = (0..self.n).map(&self.base_of).collect();
+        let ctx = self.with_bases(&bases);
         let (mut pv, mut mv) = (vec![0u64; self.w], vec![0u64; self.w]);
-        let mut t = (self.n() - self.m + 32).max(64);
         while band_blocks(t) * 3 <= self.w {
-            match self.banded(t, &mut pv, &mut mv) {
+            match ctx.banded(t, &mut pv, &mut mv) {
                 Ok(d) => return d,
-                Err(j) => t = next_band(t, j, self.n()),
+                Err(j) => t = next_band(t, j, self.n),
             }
         }
-        self.full()
+        ctx.full()
     }
 
     /// Full-matrix LCS kernel (fallback for w > MAX_W), one loop over all
     /// words per column like [`Self::full`]; returns the LCS length.
     fn lcs_full(&self) -> usize {
         let mut s = vec![!0u64; self.w];
-        for &base in self.bases {
+        self.for_each_base(|base| {
             lcs_step(&mut s, false, |k| self.peq(base, k));
-        }
+        });
         lcs_len(&s)
     }
 
@@ -1277,12 +1310,13 @@ impl LargeCtx<'_> {
     /// any match off the band costs more than `n - m + 2t` indels, so `l` is
     /// exact whenever `m + n - 2l <= n - m + 2t`.
     fn lcs_banded(&self, t: usize, s: &mut [u64]) -> Result<usize, usize> {
-        let (m, n, w) = (self.m, self.n(), self.w);
+        let (m, n, w) = (self.m, self.n, self.w);
         debug_assert!(n >= m);
         let slack = n - m;
         let s = &mut s[..w];
         s.fill(!0);
-        for (j, &base) in (1..=n).zip(self.bases) {
+        for j in 1..=n {
+            let base = (self.base_of)(j - 1);
             // Rows of the band in column j: `[j - 1 - slack - t, j - 1 + t]`.
             let first = j.saturating_sub(slack + t + 1) / 64;
             let last = ((j + t - 1) / 64).min(w - 1);
@@ -1308,7 +1342,7 @@ impl LargeCtx<'_> {
     /// is `2j - slack - 2 * P(j - slack)`; for `j < slack` it sits at row 0
     /// and is just `slack`, which never exceeds the limit.
     fn lcs_band_hopeless(&self, j: usize, t: usize, s: &[u64]) -> bool {
-        let slack = self.n() - self.m;
+        let slack = self.n - self.m;
         let Some(c) = j.checked_sub(slack) else {
             return false;
         };
@@ -1323,16 +1357,21 @@ impl LargeCtx<'_> {
 
     /// LCS length via bands of growing width, like [`Self::run`].
     fn lcs_run(&self) -> usize {
-        let slack = self.n() - self.m;
-        let mut s = vec![0u64; self.w];
+        let slack = self.n - self.m;
         let mut t = 64;
+        if lcs_band_words(slack, t) * 3 > self.w {
+            return self.lcs_full();
+        }
+        let bases: Vec<usize> = (0..self.n).map(&self.base_of).collect();
+        let ctx = self.with_bases(&bases);
+        let mut s = vec![0u64; self.w];
         while lcs_band_words(slack, t) * 3 <= self.w {
-            match self.lcs_banded(t, &mut s) {
+            match ctx.lcs_banded(t, &mut s) {
                 Ok(l) => return l,
-                Err(j) => t = next_band(t, j, self.n()),
+                Err(j) => t = next_band(t, j, self.n),
             }
         }
-        self.lcs_full()
+        ctx.lcs_full()
     }
 }
 
@@ -1451,14 +1490,14 @@ fn hyrro_multiword_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(short: &[T1], lon
         7 => run!(7),
         8 => run!(8),
         _ => {
-            let bases: Vec<usize> = long.iter().map(|&c| row_of(c.as_u64()) * w).collect();
-            let ctx = LargeCtx {
+            K::large(&LargeCtx {
                 m,
+                n: long.len(),
                 w,
                 data,
-                bases: &bases,
-            };
-            K::large(&ctx)
+                // SAFETY: the kernels only ask for j < n.
+                base_of: |j: usize| row_of(unsafe { long.get_unchecked(j) }.as_u64()) * w,
+            })
         }
     }
 }
@@ -2192,12 +2231,12 @@ mod tests {
             for (i, &c) in s.iter().enumerate() {
                 data[c as usize * w + i / 64] |= 1 << (i % 64);
             }
-            let bases: Vec<usize> = l.iter().map(|&c| c as usize * w).collect();
             let ctx = LargeCtx {
                 m: s.len(),
+                n: l.len(),
                 w,
                 data: &data,
-                bases: &bases,
+                base_of: |j: usize| l[j] as usize * w,
             };
             let (sc, lc): (Vec<char>, Vec<char>) = (
                 s.iter().map(|&c| c as char).collect(),
