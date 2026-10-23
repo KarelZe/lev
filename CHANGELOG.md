@@ -2,6 +2,30 @@
 
 - build: move dev and docs to project dependencies🔧 (#160)
 
+## [0.5.0](https://github.com/KarelZe/lev/compare/0.4.1...0.5.0) (2026-10-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* `lev.ratio` returns different values. Substitutions now cost 2 instead of 1, e.g. `ratio("kitten", "sitting")` changes from 0.769 to 0.615 and `ratio("abc", "xyz")` from 0.5 to 0.0.
+
+### Bug Fixes
+
+* replace implementation of ratio with more conventional definition 🐞 ([#168](https://github.com/KarelZe/lev/issues/168)) ([a1c61d4](https://github.com/KarelZe/lev/commit/a1c61d486f432f8aa11273718b0356eb40aa6eac))
+* restore long similar-pair speed of 0.4.1 🐛 ([#207](https://github.com/KarelZe/lev/issues/207)) ([2fec76f](https://github.com/KarelZe/lev/commit/2fec76fcd1ba09f8a6edbd57a0a5a6addef125ff))
+
+
+### Performance
+
+* Apple silicon kernels: pinned Myers step, funnel-shift form, strips ⚡ ([0b42a1c](https://github.com/KarelZe/lev/commit/0b42a1ceee2d2ba2b5ecf7767ddcdd025b5eaa4b))
+* call distance and ratio through fast-call entry points ⚡ ([a91b7d6](https://github.com/KarelZe/lev/commit/a91b7d612caff830a52e3db221ef47aa825c32c0))
+* compare 32 bytes per branch when stripping common affixes ⚡ ([ffb4e99](https://github.com/KarelZe/lev/commit/ffb4e9996f23844f6616a18c17e89030b9bbda59))
+* compare mixed-kind strings 16 code units per branch ⚡ ([32708f4](https://github.com/KarelZe/lev/commit/32708f4c1ae0e9974c51fdb507f346fc45b3fb02))
+* direct peq table for long mixed-kind pairs with a UCS-1 side ⚡ ([#196](https://github.com/KarelZe/lev/issues/196)) ([0ac9c5e](https://github.com/KarelZe/lev/commit/0ac9c5e4fbc0665b812b7c5319093415b8aeb501))
+* LCS full matrix in strips on x86-64 ⚡ ([#209](https://github.com/KarelZe/lev/issues/209)) ([c568b0a](https://github.com/KarelZe/lev/commit/c568b0affa4f03c63f420499c6907b8eb89b2aa0))
+* Neoverse-tuned AArch64 kernels ⚡ ([#208](https://github.com/KarelZe/lev/issues/208)) ([a32e48d](https://github.com/KarelZe/lev/commit/a32e48df81f9fb6d8aa6cd8f5113015330d4ad8c))
+* x86-64 multi-word kernel with andn and popcnt ⚡ ([#202](https://github.com/KarelZe/lev/issues/202)) ([865ed7b](https://github.com/KarelZe/lev/commit/865ed7b32b56b6ab8cf03176a96d72514e7ebf44))
+
 ## [0.4.1](https://github.com/KarelZe/lev/compare/0.4.0...0.4.1) (2026-10-22)
 
 
