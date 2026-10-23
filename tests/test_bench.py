@@ -133,6 +133,10 @@ _MEDIUM = [
     _pair(_UCS2, 100, 25, seed=26, id="ucs2-100"),
     _pair(_UCS2, 300, None, seed=28, id="ucs2-300-dis"),
     _pair(_UCS4, 200, 50, seed=30, id="ucs4-200"),
+    _pair(_LATIN1, 360, 90, seed=32, id="latin1-360"),
+    _pair(_ASCII, 420, 105, seed=34, id="ascii-420"),
+    _pair(_UCS2, 500, None, seed=36, id="ucs2-500-dis"),
+    _pair(_ASCII, 640, 160, seed=38, id="ascii-640"),
 ]
 
 # One string UCS-1, the other UCS-2 or UCS-4 (a curly quote is enough).

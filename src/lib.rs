@@ -39,6 +39,7 @@
 //!      AArch64, strips of eight words sweep the text one after another
 //!      with the const-width kernel instead, handing the per-column carry
 //!      and boundary bits upwards, so each strip's state stays in registers.
+//!      The LCS full matrix runs in strips of four words on x86-64 too.
 //!    - Steps with target-specific forms live in [`kernels`], one module per
 //!      target, with a dispatcher that picks the form for the build target
 //!      and CPU.

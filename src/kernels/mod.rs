@@ -79,7 +79,11 @@ pub(crate) use portable::myers_step;
 /// run `x86_64::bmi1::multiword`.  From five words the state spills out of
 /// x86-64's 16 registers and the spills, not the ALU work, set the pace: the
 /// and-not form saved under 2% of the instructions there and measured within
-/// noise to 4% slower.  Apple silicon runs [`aarch64::apple::multiword`],
+/// noise to 4% slower.  Nor did AVX2 pay: with the words as lanes of two
+/// vectors and the carries rippled through lane masks, a column took 40-65%
+/// fewer instructions but became one latency chain through the moves of the
+/// masks between vector and scalar registers, 1.1 to 1.9 times slower at
+/// five to eight words.  Apple silicon runs [`aarch64::apple::multiword`],
 /// other AArch64 cores [`aarch64::neoverse::multiword`], every other target
 /// [`portable::multiword`].
 #[inline(always)]
@@ -108,7 +112,10 @@ pub(crate) fn multiword<const W: usize, I: Iterator<Item = [u64; W]>>(
 }
 
 /// Full-matrix Levenshtein distance (fallback for `w > MAX_W`): strips on
-/// AArch64, one loop over all words elsewhere.
+/// AArch64, one loop over all words elsewhere.  On x86-64, strips of
+/// four words of `x86_64::bmi1::multiword` measured 12-23% slower than the
+/// loop, strips of eight words of the AVX2 kernel (see [`multiword`]) up to
+/// 1.8 times slower.
 pub(crate) fn full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
     if AARCH64 {
         aarch64::full(ctx)
@@ -117,8 +124,14 @@ pub(crate) fn full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
     }
 }
 
-/// Full-matrix LCS length (fallback for `w > MAX_W`), split like [`full`].
+/// Full-matrix LCS length (fallback for `w > MAX_W`): strips on Apple
+/// silicon and on x86-64 CPUs with BMI1, one loop over all words elsewhere.
 pub(crate) fn lcs_full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("bmi1") && std::is_x86_feature_detected!("popcnt") {
+        // SAFETY: both target features were just detected.
+        return unsafe { x86_64::bmi1::lcs_full(ctx) };
+    }
     if AARCH64 {
         aarch64::lcs_full(ctx)
     } else {
