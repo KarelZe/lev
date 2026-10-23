@@ -39,6 +39,9 @@
 //!      silicon, strips of eight words sweep the text one after another
 //!      with the const-width kernel instead, handing the per-column carry
 //!      and boundary bits upwards, so each strip's state stays in registers.
+//!    - Steps with target-specific forms live in [`kernels`], one module per
+//!      target, with a dispatcher that picks the form for the build target
+//!      and CPU.
 //! 5. **Ukkonen banding** (`m > 512`) – similar strings are resolved by a
 //!    narrow diagonal band over Myers' blocked recurrence (O(n · d/w) instead
 //!    of O(n · m/w)).  Band widths double until one proves its result; each
@@ -61,6 +64,8 @@ use std::sync::OnceLock;
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyString};
+
+mod kernels;
 
 // ---------------------------------------------------------------------------
 // Code units of the three CPython string kinds (UCS-1 / UCS-2 / UCS-4).
@@ -1057,76 +1062,10 @@ fn hyrro_inner<I: Iterator<Item = u64>>(m: usize, n: usize, pm_iter: I) -> usize
     debug_assert!((1..=64).contains(&m));
     let (mut vp, mut vn) = (!0u64, 0u64);
     for eq in pm_iter {
-        (vp, vn) = myers_step(eq, vp, vn);
+        (vp, vn) = kernels::myers_step(eq, vp, vn);
     }
     let rows = u64::MAX >> (64 - m);
     n + (vp & rows).count_ones() as usize - (vn & rows).count_ones() as usize
-}
-
-/// One column of [`hyrro_inner`]: returns the new `(vp, vn)`.
-#[cfg_attr(
-    all(target_arch = "aarch64", target_vendor = "apple"),
-    allow(dead_code)
-)]
-#[inline(always)]
-fn myers_step_portable(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
-    let sum = (eq & vp).wrapping_add(vp);
-    let ph = vn | !(sum | (vp | eq));
-    let mh = vp & (eq | !sum);
-    let xv = eq | vn;
-    let ph_s = (ph << 1) | 1;
-    ((mh << 1) | !(xv | ph_s), ph_s & xv)
-}
-
-/// [`myers_step_portable`] with its schedule pinned.  On Apple cores a
-/// logical op with a shifted operand has twice the latency of a plain one,
-/// yet LLVM folds the shifts into the ops on the chain and reassociates the
-/// `| 1` back onto it (10 cycles instead of 7 per column).  Other AArch64
-/// cores (Neoverse, Windows on ARM) were never measured and keep the
-/// portable step.
-#[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
-#[inline(always)]
-fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
-    let (mut vp, mut vn) = (vp, vn);
-    // SAFETY: register-only arithmetic.  `vp`/`vn` are overwritten in place
-    // after their last read, which keeps loop-carried copies out of the loop.
-    unsafe {
-        std::arch::asm!(
-            "and  {sum}, {eq}, {vp}",
-            "orr  {t}, {eq}, {vp}",
-            "orr  {xv}, {eq}, {vn}",
-            "add  {sum}, {sum}, {vp}",
-            "orr  {t}, {t}, {sum}",
-            "orn  {ph}, {vn}, {t}",
-            "orn  {t}, {eq}, {sum}",
-            "and  {mh}, {t}, {vp}",
-            "orr  {xv1}, {xv}, #1",
-            "lsl  {phs}, {ph}, #1",
-            "lsl  {vp}, {mh}, #1",
-            "orr  {t}, {xv1}, {phs}",
-            "orn  {vp}, {vp}, {t}",
-            "orr  {phs}, {phs}, #1",
-            "and  {vn}, {phs}, {xv}",
-            eq = in(reg) eq,
-            vp = inout(reg) vp,
-            vn = inout(reg) vn,
-            sum = out(reg) _,
-            t = out(reg) _,
-            xv = out(reg) _,
-            xv1 = out(reg) _,
-            phs = out(reg) _,
-            ph = out(reg) _,
-            mh = out(reg) _,
-            options(pure, nomem, nostack, preserves_flags),
-        );
-    }
-    (vp, vn)
-}
-
-#[cfg(not(all(target_arch = "aarch64", target_vendor = "apple")))]
-#[inline(always)]
-fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
-    myers_step_portable(eq, vp, vn)
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,7 +1117,7 @@ fn lcs_inner_64<I: Iterator<Item = u64>>(pm_iter: I) -> usize {
 
 /// Multi-word LCS over `W` words; returns their share of the LCS length.
 /// With `carries`, the kernel is one strip of a taller pattern (see
-/// [`LargeCtx::lcs_full`]): it reads each column's incoming carry from there
+/// [`kernels::lcs_full`]): it reads each column's incoming carry from there
 /// and writes the outgoing one back.
 #[inline(always)]
 fn lcs_multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(
@@ -1238,7 +1177,7 @@ impl Kernel for Lev {
         n: usize,
         pm_iter: I,
     ) -> usize {
-        (n as isize + multiword_kernel::<W, I>(m, pm_iter, None)) as usize
+        (n as isize + kernels::multiword::<W, I>(m, pm_iter, None)) as usize
     }
 
     #[inline(always)]
@@ -1279,169 +1218,9 @@ impl Kernel for Lcs {
 // Multi-word Hyyrö (m > 64)
 // ---------------------------------------------------------------------------
 
-/// Whether the kernels tuned on Apple M-series cores are used: the pinned
-/// [`myers_step`], the funnel-shift [`multiword_kernel_form`] and the strips
-/// of [`LargeCtx::full`].  They were never measured on other AArch64 cores,
-/// which take the portable kernels like every other target.
-const APPLE_SILICON: bool = cfg!(all(target_arch = "aarch64", target_vendor = "apple"));
-
 /// Widest pattern, in 64-bit words, handled by the const-width kernels with
 /// stack peq tables; longer patterns go through [`LargeCtx`].
 const MAX_W: usize = 8;
-
-/// Edge byte between stacked strips of a tall pattern (see
-/// [`LargeCtx::full`]): bit 0 is the carry of the column addition, bits 1
-/// and 2 the `+1`/`-1` horizontal delta leaving the strip's top row.
-/// Below row 0 the delta is `+1` and there is no carry.
-const EDGE_ROW0: u8 = 0b010;
-
-/// Const-generic inner kernel over `m` pattern rows in `W` words, unrolled
-/// for speed.  Returns the sum of the vertical deltas of these rows in the
-/// last text column, i.e. their contribution to the distance on top of
-/// `D(0, n) = n` (see [`hyrro_inner`]).  With `edges`, the kernel is one
-/// strip of a taller pattern: it reads each column's incoming edge from
-/// there and writes the outgoing one back.
-///
-/// On x86-64 CPUs with BMI1, whole patterns (no `edges`) of up to four words
-/// run [`multiword_kernel_andn`] compiled with `andn` and `popcnt`.  From
-/// five words the state spills out of x86-64's 16 registers and the spills,
-/// not the ALU work, set the pace: the and-not form saved under 2% of the
-/// instructions there and measured within noise to 4% slower.
-#[inline(always)]
-fn multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(
-    m: usize,
-    pm_iter: I,
-    edges: Option<&mut [u8]>,
-) -> isize {
-    #[cfg(target_arch = "x86_64")]
-    if W <= 4
-        && edges.is_none()
-        && std::is_x86_feature_detected!("bmi1")
-        && std::is_x86_feature_detected!("popcnt")
-    {
-        // SAFETY: both target features were just detected.
-        return unsafe { multiword_kernel_bmi1::<W, I>(m, pm_iter) };
-    }
-    multiword_kernel_form::<W, I, APPLE_SILICON>(m, pm_iter, edges)
-}
-
-/// [`multiword_kernel_andn`] compiled for x86-64 CPUs with BMI1 and POPCNT
-/// (every x86-64 CPU since 2013), which run each `!a & b` as one `andn`.
-/// The kernel is throughput-bound from two words on, so the fewer
-/// instructions (15-18% per column at `W` = 2 and 4) translate into time.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "bmi1,popcnt")]
-unsafe fn multiword_kernel_bmi1<const W: usize, I: Iterator<Item = [u64; W]>>(
-    m: usize,
-    pm_iter: I,
-) -> isize {
-    multiword_kernel_andn::<W, I>(m, pm_iter)
-}
-
-/// Hyyrö's form of [`multiword_kernel_form`] (`FUNNEL = false`, whole
-/// patterns only) with `nhp = !hp` tracked instead of `hp`,
-/// so every negation pairs with an AND: `hp = vn | !(d0 | vp)` becomes
-/// `nhp = !vn & (d0 | vp)`, and with `nhp_s = !hp_s` (its shift-in is the
-/// negated `hp` bit, 0 below row 0) `vp' = hn_s | (!d0 & nhp_s)` and
-/// `vn' = !nhp_s & d0`.  Exact for every state; it only pays where `!a & b`
-/// is one instruction (`andn` with BMI1), otherwise it costs a few more.
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
-#[inline(always)]
-fn multiword_kernel_andn<const W: usize, I: Iterator<Item = [u64; W]>>(
-    m: usize,
-    pm_iter: I,
-) -> isize {
-    let mut vp = [!0u64; W];
-    let mut vn = [0u64; W];
-    for pm_row in pm_iter {
-        let (mut carry, mut prev_nhp, mut prev_hn) = (false, 0u64, 0u64);
-        for k in 0..W {
-            let (pm, v_p, v_n) = (pm_row[k], vp[k], vn[k]);
-            let x = pm | v_n;
-            let (sum, nc) = (x & v_p).carrying_add(v_p, carry);
-            carry = nc;
-            let d0 = (sum ^ v_p) | x;
-            let nhp = !v_n & (d0 | v_p);
-            let hn = v_p & d0;
-            let (nhp_s, hn_s) = (nhp << 1 | prev_nhp, hn << 1 | prev_hn);
-            vp[k] = hn_s | (!d0 & nhp_s);
-            vn[k] = !nhp_s & d0;
-            (prev_nhp, prev_hn) = (nhp >> 63, hn >> 63);
-        }
-    }
-    let rows = u64::MAX >> (64 * W - m);
-    vp[W - 1] &= rows;
-    vn[W - 1] &= rows;
-    let count = |v: &[u64; W]| v.iter().map(|x| x.count_ones() as isize).sum::<isize>();
-    count(&vp) - count(&vn)
-}
-
-/// [`multiword_kernel`] with the step formulation chosen explicitly; both
-/// are compiled on every target so tests cover each.
-///
-/// - `FUNNEL = false`: Hyyrö's form, shifting each word's top bits into the
-///   next word as 0/1 values.
-/// - `FUNNEL = true`: the short-chain step of [`myers_step_portable`], with
-///   the bit shifted in at the bottom of a word taken as the top bit of the
-///   word below, so every shift-in is one funnel shift (`extr` on AArch64).
-///   On x86-64 this form keeps more values live than 16 registers hold and
-///   gets SLP-vectorized from five words on, so it is used on Apple silicon
-///   only, the one AArch64 target it was measured on.
-#[inline(always)]
-fn multiword_kernel_form<const W: usize, I: Iterator<Item = [u64; W]>, const FUNNEL: bool>(
-    m: usize,
-    pm_iter: I,
-    mut edges: Option<&mut [u8]>,
-) -> isize {
-    let mut vp = [!0u64; W];
-    let mut vn = [0u64; W];
-    for (j, pm_row) in pm_iter.enumerate() {
-        let e = edges.as_ref().map_or(EDGE_ROW0, |e| e[j]);
-        let mut carry = e & 1 != 0;
-        let (top_hp, top_hn) = if FUNNEL {
-            // Edge bits 1 and 2 moved to bit 63.
-            let (mut below_ph, mut below_mh) = ((e as u64) << 62, (e as u64) << 61);
-            for k in 0..W {
-                let (eq, v_p, v_n) = (pm_row[k], vp[k], vn[k]);
-                let (sum, nc) = (eq & v_p).carrying_add(v_p, carry);
-                carry = nc;
-                let ph = v_n | !(sum | (v_p | eq));
-                let mh = v_p & (eq | !sum);
-                let xv = eq | v_n;
-                let ph_s = ph << 1 | below_ph >> 63;
-                vp[k] = (mh << 1 | below_mh >> 63) | !(xv | ph_s);
-                vn[k] = ph_s & xv;
-                (below_ph, below_mh) = (ph, mh);
-            }
-            (below_ph >> 63, below_mh >> 63)
-        } else {
-            let (mut prev_hp, mut prev_hn) = ((e >> 1 & 1) as u64, (e >> 2) as u64);
-            for k in 0..W {
-                let (pm, v_p, v_n) = (pm_row[k], vp[k], vn[k]);
-                let x = pm | v_n;
-                let (sum, nc) = (x & v_p).carrying_add(v_p, carry);
-                carry = nc;
-                let d0 = (sum ^ v_p) | x;
-                let hp = v_n | !(d0 | v_p);
-                let hn = v_p & d0;
-                let (hp_s, hn_s) = (hp << 1 | prev_hp, hn << 1 | prev_hn);
-                vp[k] = hn_s | !(d0 | hp_s);
-                vn[k] = hp_s & d0;
-                (prev_hp, prev_hn) = (hp >> 63, hn >> 63);
-            }
-            (prev_hp, prev_hn)
-        };
-        if let Some(e) = edges.as_deref_mut() {
-            e[j] = carry as u8 | (top_hp as u8) << 1 | (top_hn as u8) << 2;
-        }
-    }
-    // Rows above the pattern in the top word hold garbage; mask them off.
-    let rows = u64::MAX >> (64 * W - m);
-    vp[W - 1] &= rows;
-    vn[W - 1] &= rows;
-    let count = |v: &[u64; W]| v.iter().map(|x| x.count_ones() as isize).sum::<isize>();
-    count(&vp) - count(&vn)
-}
 
 /// Multi-word entry point with a direct peq table of `ROWS` rows: UCS-1
 /// pairs (128 rows for pure ASCII, 256 for Latin-1) and mixed-kind pairs
@@ -1526,53 +1305,6 @@ fn band_blocks(t: usize) -> usize {
 #[inline(always)]
 fn lcs_band_words(slack: usize, t: usize) -> usize {
     (slack + 2 * t) / 64 + 2
-}
-
-/// Words per strip of the Apple silicon full-matrix kernels: a strip's state
-/// stays in registers while it sweeps the text.  Eight words (16 state
-/// registers for Levenshtein plus temporaries) fit AArch64's 31
-/// general-purpose registers; on x86-64's 16 they would spill on every
-/// column.
-const STRIP: usize = 8;
-
-/// Run `$kernel` with the const `W` bound to the width `$w` in `1..=8`.
-macro_rules! with_width {
-    ($w:expr, $W:ident => $kernel:expr) => {
-        match $w {
-            1 => {
-                const $W: usize = 1;
-                $kernel
-            }
-            2 => {
-                const $W: usize = 2;
-                $kernel
-            }
-            3 => {
-                const $W: usize = 3;
-                $kernel
-            }
-            4 => {
-                const $W: usize = 4;
-                $kernel
-            }
-            5 => {
-                const $W: usize = 5;
-                $kernel
-            }
-            6 => {
-                const $W: usize = 6;
-                $kernel
-            }
-            7 => {
-                const $W: usize = 7;
-                $kernel
-            }
-            _ => {
-                const $W: usize = 8;
-                $kernel
-            }
-        }
-    };
 }
 
 /// Shared context for the very-long-pattern kernels (w > MAX_W): `data` is
@@ -1712,69 +1444,13 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
         })
     }
 
-    /// Full-matrix exact kernel (fallback for w > MAX_W): strips on Apple
-    /// silicon, one loop over all words elsewhere.
-    fn full(&self) -> usize {
-        if APPLE_SILICON {
-            self.full_strips()
-        } else {
-            self.full_single()
-        }
-    }
-
-    /// [`Self::full`] strip by strip: the pattern is cut into strips of
-    /// [`STRIP`] words, bottom first, and each strip sweeps the whole text,
-    /// handing its per-column edges to the strip above.
-    fn full_strips(&self) -> usize {
-        let (m, w) = (self.m, self.w);
-        let mut edges = vec![EDGE_ROW0; self.n];
-        let mut delta = 0isize;
-        for w0 in (0..w).step_by(STRIP) {
-            let rows = (m - 64 * w0).min(64 * STRIP);
-            let e = Some(&mut edges[..]);
-            delta += with_width!((w - w0).min(STRIP), W => {
-                multiword_kernel::<W, _>(rows, self.rows::<W>(w0), e)
-            });
-        }
-        (self.n as isize + delta) as usize
-    }
-
-    /// [`Self::full`] as one loop over all words per column, with the state
-    /// on the heap.
-    fn full_single(&self) -> usize {
-        let (m, w) = (self.m, self.w);
-        let (mut vp, mut vn) = (vec![!0u64; w], vec![0u64; w]);
-        self.for_each_base(|base| {
-            let (mut carry, mut prev_hp, mut prev_hn) = (false, 1u64, 0u64);
-            for (k, (vp_k, vn_k)) in vp.iter_mut().zip(vn.iter_mut()).enumerate() {
-                let (pm, v_p, v_n) = (self.peq(base, k), *vp_k, *vn_k);
-                let x = pm | v_n;
-                let (sum, nc) = (x & v_p).carrying_add(v_p, carry);
-                carry = nc;
-                let d0 = (sum ^ v_p) | x;
-                let hp = v_n | !(d0 | v_p);
-                let hn = v_p & d0;
-                let (hp_s, hn_s) = (hp << 1 | prev_hp, hn << 1 | prev_hn);
-                *vp_k = hn_s | !(d0 | hp_s);
-                *vn_k = hp_s & d0;
-                (prev_hp, prev_hn) = (hp >> 63, hn >> 63);
-            }
-        });
-        // Distance = n + sum of the last column's vertical deltas (see
-        // `hyrro_inner`); rows above the pattern hold garbage.
-        vp[w - 1] &= u64::MAX >> (64 * w - m);
-        vn[w - 1] &= u64::MAX >> (64 * w - m);
-        let count = |v: &[u64]| v.iter().map(|x| x.count_ones() as usize).sum::<usize>();
-        self.n + count(&vp) - count(&vn)
-    }
-
     /// Bands of growing width before the full matrix.  Each pass aborts as
     /// soon as it can no longer prove a result, so a miss on dissimilar
     /// strings costs a few percent of the full kernel.
     fn run(&self) -> usize {
         let mut t = (self.n - self.m + 32).max(64);
         if band_blocks(t) * 3 > self.w {
-            return self.full();
+            return kernels::full(self);
         }
         let bases: Vec<usize> = (0..self.n).map(&self.base_of).collect();
         let ctx = self.with_bases(&bases);
@@ -1785,39 +1461,7 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
                 Err(j) => t = next_band(t, j, self.n),
             }
         }
-        ctx.full()
-    }
-
-    /// Full-matrix LCS kernel (fallback for w > MAX_W), split like
-    /// [`Self::full`]; returns the LCS length.
-    fn lcs_full(&self) -> usize {
-        if APPLE_SILICON {
-            self.lcs_full_strips()
-        } else {
-            self.lcs_full_single()
-        }
-    }
-
-    /// [`Self::lcs_full`] strip by strip.
-    fn lcs_full_strips(&self) -> usize {
-        let mut carries = vec![0u8; self.n];
-        let mut lcs = 0;
-        for w0 in (0..self.w).step_by(STRIP) {
-            let c = Some(&mut carries[..]);
-            lcs += with_width!((self.w - w0).min(STRIP), W => {
-                lcs_multiword_kernel::<W, _>(self.rows::<W>(w0), c)
-            });
-        }
-        lcs
-    }
-
-    /// [`Self::lcs_full`] as one loop over all words per column.
-    fn lcs_full_single(&self) -> usize {
-        let mut s = vec![!0u64; self.w];
-        self.for_each_base(|base| {
-            lcs_step(&mut s, false, |k| self.peq(base, k));
-        });
-        lcs_len(&s)
+        kernels::full(&ctx)
     }
 
     /// LCS over the matches on diagonals `j - i` in `[-t, n - m + t]`, rows
@@ -1884,7 +1528,7 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
         let slack = self.n - self.m;
         let mut t = 64;
         if lcs_band_words(slack, t) * 3 > self.w {
-            return self.lcs_full();
+            return kernels::lcs_full(self);
         }
         let bases: Vec<usize> = (0..self.n).map(&self.base_of).collect();
         let ctx = self.with_bases(&bases);
@@ -1895,7 +1539,7 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
                 Err(j) => t = next_band(t, j, self.n),
             }
         }
-        ctx.lcs_full()
+        kernels::lcs_full(&ctx)
     }
 }
 
@@ -2066,7 +1710,7 @@ mod tests {
     use super::*;
 
     /// Reference O(m·n) DP — small, obviously correct, used as oracle.
-    fn naive(a: &[char], b: &[char]) -> usize {
+    pub(crate) fn naive(a: &[char], b: &[char]) -> usize {
         let (m, n) = (a.len(), b.len());
         let mut dp = vec![vec![0usize; n + 1]; m + 1];
         for (i, row) in dp.iter_mut().enumerate() {
@@ -2505,20 +2149,20 @@ mod tests {
     }
 
     /// Deterministic LCG used by the banded-kernel tests.
-    fn lcg(state: &mut u64) -> usize {
+    pub(crate) fn lcg(state: &mut u64) -> usize {
         *state = state
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
         (*state >> 33) as usize
     }
 
-    fn rand_string(state: &mut u64, len: usize, alpha: &[u8]) -> String {
+    pub(crate) fn rand_string(state: &mut u64, len: usize, alpha: &[u8]) -> String {
         (0..len)
             .map(|_| alpha[lcg(state) % alpha.len()] as char)
             .collect()
     }
 
-    fn mutate(state: &mut u64, s: &str, edits: usize, alpha: &[u8]) -> String {
+    pub(crate) fn mutate(state: &mut u64, s: &str, edits: usize, alpha: &[u8]) -> String {
         let mut out: Vec<char> = s.chars().collect();
         for _ in 0..edits {
             let i = lcg(state) % out.len();
@@ -2531,65 +2175,6 @@ mod tests {
             }
         }
         out.into_iter().collect()
-    }
-
-    /// The and-not form must agree with Hyyrö's form and the oracle on every
-    /// target, not only where it is selected: on real pairs for every width,
-    /// and with Hyyrö's form on random pattern-match rows (the and-not form is an exact
-    /// rewrite for any state).
-    #[test]
-    fn multiword_andn_matches_oracle() {
-        fn both<const W: usize>(m: usize, rows: &[[u64; W]]) -> (isize, isize) {
-            (
-                multiword_kernel_form::<W, _, false>(m, rows.iter().copied(), None),
-                multiword_kernel_andn::<W, _>(m, rows.iter().copied()),
-            )
-        }
-        fn check<const W: usize>(state: &mut u64) {
-            let alpha = b"abcdefgh";
-            let m = 64 * (W - 1) + 1 + lcg(state) % 64;
-            let a = rand_string(state, m, alpha);
-            let extra = lcg(state) % 50;
-            for b in [
-                mutate(state, &a, 5, alpha),
-                rand_string(state, m + extra, alpha),
-            ] {
-                let (s, l) = if a.len() <= b.len() {
-                    (a.as_bytes(), b.as_bytes())
-                } else {
-                    (b.as_bytes(), a.as_bytes())
-                };
-                if s.len().div_ceil(64) != W {
-                    continue;
-                }
-                let mut peq = [[0u64; W]; 256];
-                for (i, &c) in s.iter().enumerate() {
-                    peq[c as usize][i / 64] |= 1 << (i % 64);
-                }
-                let rows: Vec<[u64; W]> = l.iter().map(|&c| peq[c as usize]).collect();
-                let (sc, lc): (Vec<char>, Vec<char>) = (
-                    s.iter().map(|&c| c as char).collect(),
-                    l.iter().map(|&c| c as char).collect(),
-                );
-                let expected = naive(&sc, &lc) as isize - l.len() as isize;
-                assert_eq!(both::<W>(s.len(), &rows), (expected, expected), "W={W}");
-            }
-            let rows: Vec<[u64; W]> = (0..200)
-                .map(|_| std::array::from_fn(|_| (lcg(state) as u64) << 33 ^ lcg(state) as u64))
-                .collect();
-            let (t, n) = both::<W>(64 * W - 3, &rows);
-            assert_eq!(t, n, "random rows W={W}");
-        }
-        let mut state = 0xA11D_0F0F_1234_5678_u64;
-        for _ in 0..20 {
-            check::<2>(&mut state);
-            check::<3>(&mut state);
-            check::<4>(&mut state);
-            check::<5>(&mut state);
-            check::<6>(&mut state);
-            check::<7>(&mut state);
-            check::<8>(&mut state);
-        }
     }
 
     #[test]
@@ -2767,7 +2352,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Reference O(m·n) indel DP (insert and delete only), used as oracle.
-    fn naive_indel(a: &[char], b: &[char]) -> usize {
+    pub(crate) fn naive_indel(a: &[char], b: &[char]) -> usize {
         let (m, n) = (a.len(), b.len());
         let mut dp = vec![vec![0usize; n + 1]; m + 1];
         for (i, row) in dp.iter_mut().enumerate() {
@@ -2856,156 +2441,6 @@ mod tests {
                     assert_eq!(indel(&wa, &wb), naive_indel(&ac, &bc), "astral ({a:?})");
                 }
             }
-        }
-    }
-
-    /// The very-long-pattern kernels must agree with the oracle on their own:
-    /// both forms of the full matrices on every target (the public path
-    /// reaches them only when banding does not pay), and the band drivers,
-    /// on similar and dissimilar pairs.
-    #[test]
-    fn large_kernels_match_oracle() {
-        let mut state = 0xA5C3_0F0F_1234_5678_u64;
-        let alpha = &b"abcdefgh"[..];
-        for &(m, n, edits) in &[
-            (530usize, 530usize, 5usize),
-            (700, 900, 0),
-            (1030, 1100, 60),
-            (600, 2000, 0),
-            (2000, 2000, 40),
-        ] {
-            let a = rand_string(&mut state, m, alpha);
-            let b = if edits > 0 {
-                mutate(&mut state, &a, edits, alpha)
-            } else {
-                rand_string(&mut state, n, alpha)
-            };
-            let (s, l) = if a.len() <= b.len() {
-                (&a, &b)
-            } else {
-                (&b, &a)
-            };
-            let (s, l) = (s.as_bytes(), l.as_bytes());
-            let w = s.len().div_ceil(64);
-            let mut data = vec![0u64; 256 * w];
-            for (i, &c) in s.iter().enumerate() {
-                data[c as usize * w + i / 64] |= 1 << (i % 64);
-            }
-            let ctx = LargeCtx {
-                m: s.len(),
-                n: l.len(),
-                w,
-                data: &data,
-                base_of: |j: usize| l[j] as usize * w,
-            };
-            let (sc, lc): (Vec<char>, Vec<char>) = (
-                s.iter().map(|&c| c as char).collect(),
-                l.iter().map(|&c| c as char).collect(),
-            );
-            let (d, e) = (naive(&sc, &lc), naive_indel(&sc, &lc));
-            let llcs = (s.len() + l.len() - e) / 2;
-            let msg = format!("m={} n={}", s.len(), l.len());
-            assert_eq!(ctx.full_strips(), d, "full_strips {msg}");
-            assert_eq!(ctx.full_single(), d, "full_single {msg}");
-            assert_eq!(ctx.run(), d, "run {msg}");
-            assert_eq!(ctx.lcs_full_strips(), llcs, "lcs_full_strips {msg}");
-            assert_eq!(ctx.lcs_full_single(), llcs, "lcs_full_single {msg}");
-            assert_eq!(ctx.lcs_run(), llcs, "lcs_run {msg}");
-        }
-    }
-
-    /// Both multi-word step forms must agree with the oracle on every target,
-    /// not only on the one that selects them, as whole patterns and as
-    /// stacked strips.
-    #[test]
-    fn multiword_forms_match_oracle() {
-        let mut state = 0xA5C3_0F0F_1234_5678_u64;
-        let alpha = &b"abcdefgh"[..];
-        for &m in &[65usize, 128, 129, 200, 300, 385, 449, 512, 700, 1030] {
-            let a = rand_string(&mut state, m, alpha);
-            for b in [
-                mutate(&mut state, &a, 5, alpha),
-                rand_string(&mut state, m + m / 3, alpha),
-            ] {
-                let (s, l) = if a.len() <= b.len() {
-                    (&a, &b)
-                } else {
-                    (&b, &a)
-                };
-                let (s, l) = (s.as_bytes(), l.as_bytes());
-                let w = s.len().div_ceil(64);
-                let mut data = vec![0u64; 256 * w];
-                for (i, &c) in s.iter().enumerate() {
-                    data[c as usize * w + i / 64] |= 1 << (i % 64);
-                }
-                let ctx = LargeCtx {
-                    m: s.len(),
-                    n: l.len(),
-                    w,
-                    data: &data,
-                    base_of: |j: usize| l[j] as usize * w,
-                };
-                let (sc, lc): (Vec<char>, Vec<char>) = (
-                    s.iter().map(|&c| c as char).collect(),
-                    l.iter().map(|&c| c as char).collect(),
-                );
-                let expected = naive(&sc, &lc);
-                for funnel in [false, true] {
-                    // Strips of up to four words over the whole pattern.
-                    let mut edges = vec![EDGE_ROW0; l.len()];
-                    let mut delta = 0isize;
-                    for w0 in (0..w).step_by(4) {
-                        let rows = (s.len() - 64 * w0).min(256);
-                        let e = Some(&mut edges[..]);
-                        delta += match ((w - w0).min(4), funnel) {
-                            (1, false) => {
-                                multiword_kernel_form::<1, _, false>(rows, ctx.rows::<1>(w0), e)
-                            }
-                            (2, false) => {
-                                multiword_kernel_form::<2, _, false>(rows, ctx.rows::<2>(w0), e)
-                            }
-                            (3, false) => {
-                                multiword_kernel_form::<3, _, false>(rows, ctx.rows::<3>(w0), e)
-                            }
-                            (_, false) => {
-                                multiword_kernel_form::<4, _, false>(rows, ctx.rows::<4>(w0), e)
-                            }
-                            (1, true) => {
-                                multiword_kernel_form::<1, _, true>(rows, ctx.rows::<1>(w0), e)
-                            }
-                            (2, true) => {
-                                multiword_kernel_form::<2, _, true>(rows, ctx.rows::<2>(w0), e)
-                            }
-                            (3, true) => {
-                                multiword_kernel_form::<3, _, true>(rows, ctx.rows::<3>(w0), e)
-                            }
-                            (_, true) => {
-                                multiword_kernel_form::<4, _, true>(rows, ctx.rows::<4>(w0), e)
-                            }
-                        };
-                    }
-                    let d = (l.len() as isize + delta) as usize;
-                    assert_eq!(d, expected, "funnel={funnel} m={} n={}", s.len(), l.len());
-                }
-            }
-        }
-    }
-
-    /// The hand-scheduled aarch64 step must match its portable reference on
-    /// every reachable state (`vp & vn == 0`).
-    #[test]
-    fn myers_step_matches_portable() {
-        let mut x = 0x9E37_79B9_7F4A_7C15u64;
-        let mut next = move || {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            x
-        };
-        for _ in 0..200_000 {
-            let (eq, vp) = (next(), next());
-            let vn = next() & !vp;
-            assert_eq!(myers_step(eq, vp, vn), myers_step_portable(eq, vp, vn));
         }
     }
 

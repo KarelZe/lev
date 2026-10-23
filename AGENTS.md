@@ -41,6 +41,19 @@ sub-agent (`.claude/agents/profile-runner.md`). It uses samply for the
 Python-level benchmark and cargo flamegraph for the criterion benches;
 neither needs `--profile-time`.
 
+## Architecture-specific kernels
+Kernels with target-specific forms live in `src/kernels/`: the reference form
+in `portable.rs`, ISA-feature forms in `<target_arch>/<feature>.rs` (named after
+the `target_feature` they enable, e.g. `x86_64/bmi1.rs`, `x86_64/avx2.rs`) and
+core-tuned forms in `<target_arch>/<uarch>.rs` (named after the LLVM
+`target-cpu` family, e.g. `aarch64/apple.rs`, `aarch64/neoverse.rs`). Each form
+keeps the kernel's name and signature (`portable::multiword`,
+`x86_64::bmi1::multiword`). Selection lives only in the dispatchers in
+`kernels/mod.rs`: runtime detection (`is_x86_feature_detected!`) for ISA
+features, `cfg` for core tuning. Every plain-Rust form is compiled on every
+target (gate only `asm!`, `#[target_feature]` and intrinsics with `cfg`) and gets
+a test in `kernels/tests.rs` against the portable form or the DP oracle.
+
 ## Testing
 - Python: `pytest tests/`
 - Rust: `cargo test`
