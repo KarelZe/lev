@@ -1370,6 +1370,11 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
     /// whenever the true distance is `<= t` (such paths never leave the band).
     /// Returns `Ok(distance)` when the result proves itself (`score <= t`),
     /// else `Err(j)` with the text column where the band gave up.
+    ///
+    /// Kept out of line: inlined into the large entry functions, the block
+    /// loop reloads the `pv`, `mv` and peq pointers from the stack on x86-64
+    /// and loses the branch around the score update on AArch64.
+    #[inline(never)]
     fn banded(&self, t: usize, pv: &mut [u64], mv: &mut [u64]) -> Result<usize, usize> {
         let (m, n, w) = (self.m, self.n, self.w);
         debug_assert!(n >= m);
@@ -1398,9 +1403,11 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
                 first = ((j - t - 1) / 64).min(last);
             }
             let mut hin: i32 = 1;
+            debug_assert!(first <= last && last < w);
             for k in first..=last {
                 let eq = self.peq(base, k);
-                let (pv_k, mv_k) = (pv[k], mv[k]);
+                // SAFETY: k <= last < w = pv.len() = mv.len().
+                let (pv_k, mv_k) = unsafe { (*pv.get_unchecked(k), *mv.get_unchecked(k)) };
                 let xv = eq | mv_k;
                 let eq_in = eq | ((hin < 0) as u64);
                 let xh = ((eq_in & pv_k).wrapping_add(pv_k) ^ pv_k) | eq_in;
@@ -1412,8 +1419,11 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
                 let hout = ((ph >> 63) & 1) as i32 - ((mh >> 63) & 1) as i32;
                 let ph_s = (ph << 1) | ((hin > 0) as u64);
                 let mh_s = (mh << 1) | ((hin < 0) as u64);
-                pv[k] = mh_s | !(xv | ph_s);
-                mv[k] = ph_s & xv;
+                // SAFETY: as for the reads above.
+                unsafe {
+                    *pv.get_unchecked_mut(k) = mh_s | !(xv | ph_s);
+                    *mv.get_unchecked_mut(k) = ph_s & xv;
+                }
                 hin = hout;
             }
             // `score` never underestimates D[bottom(last)][j], and finishing
