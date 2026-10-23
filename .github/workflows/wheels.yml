@@ -1,8 +1,8 @@
 name: Wheels
 
 # Builds the wheels for the platforms the regular test suite does not cover
-# (musllinux and Windows ARM64) the same way release.yml does, installs them
-# and runs the test suite against the installed wheel.
+# (musllinux, Windows ARM64 and 32-bit Windows) the same way release.yml does,
+# installs them and runs the test suite against the installed wheel.
 on:
   pull_request:
     paths:
@@ -75,22 +75,27 @@ jobs:
             /venv/bin/python -m pytest tests/
           '
 
-  windows-arm64:
-    name: Build and test Windows ARM64 (Python ${{ matrix.python }})
-    runs-on: windows-11-arm
+  windows:
+    name: Build and test Windows ${{ matrix.target }} (Python ${{ matrix.python }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         python: ["3.13", "3.14t"]
+        target: [aarch64, x86]
+        include:
+          - { target: aarch64, runner: windows-11-arm, architecture: arm64 }
+          - { target: x86, runner: windows-latest, architecture: x86 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: py
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.architecture }}
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
-          target: aarch64
+          target: ${{ matrix.target }}
           args: --release --out dist -i ${{ steps.py.outputs.python-path }}
       - name: Install the wheel and run the tests
         env:

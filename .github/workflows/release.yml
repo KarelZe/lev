@@ -102,6 +102,7 @@ jobs:
         include:
           - runner: windows-latest
             target: x64
+            architecture: x64
             python-versions: |
               3.10
               3.11
@@ -112,7 +113,19 @@ jobs:
           # setup-python has no ARM64 build of 3.10, so win_arm64 starts at 3.11.
           - runner: windows-11-arm
             target: aarch64
+            architecture: arm64
             python-versions: |
+              3.11
+              3.12
+              3.13
+              3.14
+              3.15
+          # 32-bit Python on the x64 runner.
+          - runner: windows-latest
+            target: x86
+            architecture: x86
+            python-versions: |
+              3.10
               3.11
               3.12
               3.13
@@ -129,6 +142,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-versions }}
+          architecture: ${{ matrix.architecture }}
           allow-prereleases: true
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
@@ -138,10 +152,12 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: 3.14t
+          architecture: ${{ matrix.architecture }}
       - id: py315t
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: 3.15t
+          architecture: ${{ matrix.architecture }}
           allow-prereleases: true
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
