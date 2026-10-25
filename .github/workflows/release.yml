@@ -15,9 +15,6 @@ on:
         description: "Existing release tag to rebuild and publish (e.g. 0.3.0)"
         required: true
 
-permissions:
-  contents: read
-
 jobs:
   release-please:
     name: Release PR
@@ -41,6 +38,7 @@ jobs:
       always() &&
       (needs.release-please.outputs.created == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
+    permissions: {}
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
@@ -53,6 +51,8 @@ jobs:
     name: Build — Linux (${{ matrix.libc }} ${{ matrix.target }})
     needs: version
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
@@ -97,6 +97,8 @@ jobs:
     name: Build — Windows (${{ matrix.target }})
     needs: version
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
@@ -191,6 +193,8 @@ jobs:
     name: Build — macOS (universal2)
     needs: version
     runs-on: macos-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -250,6 +254,8 @@ jobs:
     name: Build — sdist
     needs: version
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
