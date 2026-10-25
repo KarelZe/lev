@@ -215,9 +215,8 @@ unsafe fn as_u32(v: &UniView) -> &[u32] {
 /// The distance is the minimum number of single-character insertions,
 /// deletions, or substitutions required to transform `s1` into `s2`.
 ///
-/// Lengths are measured in Unicode scalar values (`char`s), so
-/// multi-byte characters count as a single edit regardless of their
-/// UTF-8 encoded length.
+/// Characters are counted as Unicode code points, so an accented letter or an
+/// emoji counts as one character.
 ///
 /// Args:
 ///     s1 (str): First input string.
