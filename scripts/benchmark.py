@@ -48,7 +48,7 @@ import edlib
 import matplotlib.pyplot as plt
 import matplotx
 import polyleven
-import rapidfuzz.distance.Levenshtein as rf_lev  # noqa: N813
+import rapidfuzz.distance.Levenshtein as rf_lev  # ruff: ignore[camelcase-imported-as-lowercase]
 
 import lev
 

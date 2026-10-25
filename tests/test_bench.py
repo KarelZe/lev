@@ -83,7 +83,7 @@ def _mutate(s: str, alphabet: str, edits: int, seed: int) -> str:
     return "".join(b)
 
 
-def _pair(alphabet: str, n: int, edits: int | None, seed: int, id: str) -> object:  # noqa: A002
+def _pair(alphabet: str, n: int, edits: int | None, seed: int, id: str) -> object:  # ruff: ignore[builtin-argument-shadowing]
     """
     Build a mutated pair (`edits` edits) or an unrelated pair (`edits=None`).
 

@@ -288,7 +288,7 @@ _LATIN1 = "àáâãäåæçèé"
 _UCS4 = "".join(chr(0x1F600 + i) for i in range(10))
 
 
-def _medium(alphabet: str, n: int, edits: int, seed: int, id: str) -> object:  # noqa: A002
+def _medium(alphabet: str, n: int, edits: int, seed: int, id: str) -> object:  # ruff: ignore[builtin-argument-shadowing]
     """
     Build a mutated pair far enough apart that the mbleven path cannot fire.
 
