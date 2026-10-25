@@ -1,5 +1,11 @@
 //! Kernels for x86-64 CPUs with BMI1 and POPCNT (every x86-64 CPU since
-//! 2013), selected by runtime feature detection.
+//! 2013), selected by runtime feature detection.  The module is named after
+//! BMI1, the feature that defines the and-not form of `multiword` (`andn`);
+//! POPCNT only turns the final scores into hardware popcounts.  On the
+//! x86-64-v2 builds from `.cargo/config.toml`,
+//! `is_x86_feature_detected!("popcnt")` folds to `true` at compile time,
+//! since std checks `cfg!(target_feature)` first; only the BMI1 check is
+//! left at run time.
 
 use crate::kernels::delta;
 #[cfg(target_arch = "x86_64")]
@@ -58,7 +64,7 @@ pub(crate) fn multiword_andn<const W: usize, I: Iterator<Item = [u64; W]>>(
 const LCS_STRIP: usize = 4;
 
 /// [`crate::kernels::lcs_full`] strip by strip, like
-/// [`crate::kernels::aarch64::apple::lcs_full`] but four words wide.  The
+/// [`crate::kernels::aarch64::lcs_full`] but four words wide.  The
 /// portable loop over all words keeps the state in memory and, as every
 /// logic op clobbers the flags, moves the carry between the flags and a
 /// register on each word (`setb`, `bt`), a serial chain through the whole
