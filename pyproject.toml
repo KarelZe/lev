@@ -42,7 +42,7 @@ dev = [
   { include-group = "test" },
   { include-group = "docs" },
   "maturin>=1.14.1,<2.0",
-  "prek>=0.3.11",
+  "prek>=0.5.5",
   "ruff",
 ]
 
@@ -88,7 +88,11 @@ select = [
   "W",   # PyCodeStyle warnings
 ]
 
-ignore = ["D203", "D212", "E501"]
+ignore = [
+  "incorrect-blank-line-before-class",
+  "multi-line-summary-first-line",
+  "line-too-long",
+]
 
 preview = true
 

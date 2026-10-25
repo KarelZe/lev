@@ -23,13 +23,13 @@ Wheels are available for Python 3.10+, including free-threaded builds, on Linux,
 ```python
 import lev
 
-lev.distance("kitten", "sitting")   # 3
-lev.distance("résumé", "resume")    # 2
-lev.distance("日本語", "日本")       # 1
+lev.distance("kitten", "sitting")  # 3
+lev.distance("résumé", "resume")  # 2
+lev.distance("日本語", "日本")  # 1
 
-lev.ratio("kitten", "sitting")      # 0.615...
-lev.ratio("abc", "xyz")             # 0.0
-lev.ratio("", "")                   # 1.0
+lev.ratio("kitten", "sitting")  # 0.615...
+lev.ratio("abc", "xyz")  # 0.0
+lev.ratio("", "")  # 1.0
 ```
 
 See the [API Reference](api.md) for details.

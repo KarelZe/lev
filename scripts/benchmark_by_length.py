@@ -116,7 +116,7 @@ def run_all() -> dict[str, dict[str, np.ndarray]]:
         dict[str, dict[str, np.ndarray]]: Data for each kind and library,
             shape (len(LENGTHS), N_REPEAT), values in µs per call.
 
-    """  # noqa: RUF002
+    """  # ruff: ignore[ambiguous-unicode-character-docstring]
     data: dict[str, dict[str, np.ndarray]] = {
         k: {lib: np.empty((len(LENGTHS), N_REPEAT)) for lib in LIBRARIES} for k in KINDS
     }
@@ -186,7 +186,7 @@ def plot(
         fig.suptitle(
             "Levenshtein distance — runtime vs. string length\n"
             f"median  +  25th-75th percentile band  "
-            f"({N_REPEAT} runs × {N_NUMBER:,} calls)",  # noqa: RUF001
+            f"({N_REPEAT} runs × {N_NUMBER:,} calls)",  # ruff: ignore[ambiguous-unicode-character-string]
             fontsize=14,
         )
         for ax, kind in zip(axes.flat, KINDS):
@@ -202,7 +202,7 @@ def plot(
             ax.set_xlabel("string length (chars)", fontsize=11)
             ax.set_xlim(xs[0], xs[-1])
             ax.set_ylim(bottom=0)
-            matplotx.ylabel_top("time (µs)", ax=ax)  # noqa: RUF001
+            matplotx.ylabel_top("time (µs)", ax=ax)  # ruff: ignore[ambiguous-unicode-character-string]
             legend = ax.legend(fontsize=11)
             for text in legend.get_texts():
                 if text.get_text() == "lev [ours]":
@@ -256,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
 
     """
     args = parse_args(argv)
-    print(f"Benchmarking ({N_REPEAT} runs × {N_NUMBER:,} calls per data point) …")  # noqa: RUF001
+    print(f"Benchmarking ({N_REPEAT} runs × {N_NUMBER:,} calls per data point) …")  # ruff: ignore[ambiguous-unicode-character-string]
     data = run_all()
 
     if args.save is not None:
