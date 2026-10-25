@@ -45,25 +45,40 @@ Each plot shows the total time for 1,000 calls (lower is better).
 
 ### ASCII
 
-![ASCII benchmark](https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_ascii_dark.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_ascii_dark.svg">
+  <img alt="ASCII benchmark" src="https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_ascii_light.svg">
+</picture>
 
 ### Latin-1
 
-![Latin-1 benchmark](https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_latin_1_dark.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_latin_1_dark.svg">
+  <img alt="Latin-1 benchmark" src="https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_latin_1_light.svg">
+</picture>
 
 ### CJK
 
-![CJK benchmark](https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_cjk_dark.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_cjk_dark.svg">
+  <img alt="CJK benchmark" src="https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_cjk_light.svg">
+</picture>
 
 ### Emoji
 
-![Emoji benchmark](https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_emoji_dark.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_emoji_dark.svg">
+  <img alt="Emoji benchmark" src="https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_emoji_light.svg">
+</picture>
 
 ### Realistic Text
 
 A short customer support message with a few natural typos.
 
-![Realistic text benchmark](https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_realistic_dark.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_realistic_dark.svg">
+  <img alt="Realistic text benchmark" src="https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_realistic_light.svg">
+</picture>
 
 ## Contact
 
