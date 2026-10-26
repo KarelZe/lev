@@ -3,7 +3,7 @@
 //! AArch64 core runs.
 
 use crate::kernels::EDGE_ROW0;
-use crate::{lcs_multiword_kernel, LargeCtx};
+use crate::{lcs_multiword_kernel, Baseline, LargeCtx};
 
 pub(super) mod apple;
 pub(super) mod neoverse;
@@ -65,7 +65,7 @@ pub(crate) fn full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
         let rows = (m - 64 * w0).min(64 * STRIP);
         let e = Some(&mut edges[..]);
         delta += with_width!((w - w0).min(STRIP), W => {
-            crate::kernels::multiword::<W, _>(rows, ctx.rows::<W>(w0), e)
+            crate::kernels::multiword::<Baseline, W, _>(rows, ctx.rows::<W>(w0), e)
         });
     }
     (ctx.n as isize + delta) as usize

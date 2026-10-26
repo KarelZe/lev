@@ -1,10 +1,12 @@
 [target.aarch64-apple-darwin]
 rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
 
-# x86-64 builds target x86-64-v2 (SSE4.2 and POPCNT, any x86-64 CPU since
-# 2009): the kernels' final scores become hardware popcounts instead of a
-# ~12-instruction bit trick each, and LLVM stops SLP-vectorizing the wide
-# multi-word kernels through SSE.
+# x86-64 builds tune for x86-64-v2 but turn its features off again, so the
+# wheels run on x86-64-v1 CPUs.  The hot path gets a second copy with the
+# features turned back on, selected at run time (`Isa` in src/lib.rs and
+# src/kernels/x86_64/v2.rs); both copies keep the x86-64-v2 scheduling.
+# LAHF/SAHF stays on: rustc has no stable name for it, and LLVM uses it
+# only for x87 compares.
 [target.x86_64-apple-darwin]
 rustflags = [
   "-C",
@@ -13,13 +15,30 @@ rustflags = [
   "link-arg=dynamic_lookup",
   "-C",
   "target-cpu=x86-64-v2",
+  "-C",
+  "target-feature=-popcnt,-sse3,-ssse3,-sse4.1,-sse4.2,-cmpxchg16b",
 ]
 
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "target-cpu=x86-64-v2"]
+rustflags = [
+  "-C",
+  "target-cpu=x86-64-v2",
+  "-C",
+  "target-feature=-popcnt,-sse3,-ssse3,-sse4.1,-sse4.2,-cmpxchg16b",
+]
 
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-cpu=x86-64-v2"]
+rustflags = [
+  "-C",
+  "target-cpu=x86-64-v2",
+  "-C",
+  "target-feature=-popcnt,-sse3,-ssse3,-sse4.1,-sse4.2,-cmpxchg16b",
+]
 
 [target.x86_64-unknown-linux-musl]
-rustflags = ["-C", "target-cpu=x86-64-v2"]
+rustflags = [
+  "-C",
+  "target-cpu=x86-64-v2",
+  "-C",
+  "target-feature=-popcnt,-sse3,-ssse3,-sse4.1,-sse4.2,-cmpxchg16b",
+]

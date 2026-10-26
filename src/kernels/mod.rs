@@ -50,6 +50,14 @@
 //! inlined into the short-pattern path.  std caches the result, so each
 //! call costs one load and a branch.
 //!
+//! The crate itself is compiled for each target's baseline ISA; on x86-64
+//! the hot path has a second copy with the x86-64-v2 features (see
+//! [`crate::Isa`] and [`x86_64::v2`]).  The dispatchers take the copy as
+//! `X`: the forms of [`x86_64::bmi1`] need the x86-64-v2 features besides
+//! BMI1, so only that copy selects them, and there the check for POPCNT
+//! is `X::X86_64_V2`, a constant, as it was `cfg!(target_feature)` in the
+//! crate-wide x86-64-v2 build before.
+//!
 //! # Measured and rejected
 //!
 //! - `x86_64::bmi1::multiword` from five words: the state spills out of
@@ -78,9 +86,9 @@ mod aarch64;
 mod portable;
 #[cfg(test)]
 mod tests;
-mod x86_64;
+pub(crate) mod x86_64;
 
-use crate::LargeCtx;
+use crate::{Isa, LargeCtx};
 
 /// Edge byte between stacked strips of a tall pattern (see
 /// [`aarch64::full`]): bit 0 is the carry of the column addition,
@@ -112,24 +120,21 @@ pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
 /// writes the outgoing one back.
 ///
 /// Selects `x86_64::bmi1::multiword` for whole patterns (no `edges`) of up
-/// to four words on x86-64 CPUs with BMI1 and POPCNT; from five words the
-/// state spills and the and-not form no longer pays (see *Measured and
-/// rejected*).  Otherwise selects like [`myers_step`]: the Apple form on
+/// to four words in the x86-64-v2 copy `X` on CPUs with BMI1; from five
+/// words the state spills and the and-not form no longer pays (see
+/// *Measured and rejected*).  Otherwise selects like [`myers_step`]: the Apple form on
 /// Apple targets, the Neoverse form on other AArch64 targets (by OS vendor,
 /// not by core) and [`portable::multiword`] elsewhere.
 #[inline(always)]
-pub(crate) fn multiword<const W: usize, I: Iterator<Item = [u64; W]>>(
+pub(crate) fn multiword<X: Isa, const W: usize, I: Iterator<Item = [u64; W]>>(
     m: usize,
     pm_iter: I,
     edges: Option<&mut [u8]>,
 ) -> isize {
     #[cfg(target_arch = "x86_64")]
-    if W <= 4
-        && edges.is_none()
-        && std::is_x86_feature_detected!("bmi1")
-        && std::is_x86_feature_detected!("popcnt")
-    {
-        // SAFETY: both target features were just detected.
+    if W <= 4 && edges.is_none() && X::X86_64_V2 && std::is_x86_feature_detected!("bmi1") {
+        // SAFETY: the copy `X` has the x86-64-v2 features, and BMI1 was
+        // just detected.
         return unsafe { x86_64::bmi1::multiword::<W, I>(m, pm_iter) };
     }
     #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
@@ -154,14 +159,15 @@ pub(crate) fn full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
     }
 }
 
-/// Full-matrix LCS length (fallback for `w > MAX_W`).  Selects strips on
-/// x86-64 CPUs with BMI1 and POPCNT (`x86_64::bmi1::lcs_full`) and on every
-/// AArch64 core ([`aarch64::lcs_full`]), and the loop over all words of
-/// [`portable::lcs_full`] elsewhere.
-pub(crate) fn lcs_full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
+/// Full-matrix LCS length (fallback for `w > MAX_W`).  Selects strips in
+/// the x86-64-v2 copy `X` on CPUs with BMI1 (`x86_64::bmi1::lcs_full`)
+/// and on every AArch64 core ([`aarch64::lcs_full`]), and the loop over
+/// all words of [`portable::lcs_full`] elsewhere.
+pub(crate) fn lcs_full<X: Isa, F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
     #[cfg(target_arch = "x86_64")]
-    if std::is_x86_feature_detected!("bmi1") && std::is_x86_feature_detected!("popcnt") {
-        // SAFETY: both target features were just detected.
+    if X::X86_64_V2 && std::is_x86_feature_detected!("bmi1") {
+        // SAFETY: the copy `X` has the x86-64-v2 features, and BMI1 was
+        // just detected.
         return unsafe { x86_64::bmi1::lcs_full(ctx) };
     }
     #[cfg(target_arch = "aarch64")]

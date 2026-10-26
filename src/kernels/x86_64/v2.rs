@@ -1,0 +1,133 @@
+//! The copy of the hot path for x86-64 CPUs with the x86-64-v2 features
+//! (every x86-64 CPU since 2009), selected by runtime feature detection
+//! when the module loads (see [`crate::Isa`]).
+//!
+//! The crate builds for `target-cpu=x86-64-v2` with these features turned
+//! off again (`.cargo/config.toml`), so [`crate::Baseline`] runs on
+//! x86-64-v1 and both copies keep the instruction scheduling of the
+//! crate-wide x86-64-v2 build they replace (`target_feature` sets features
+//! only).  The functions here turn the features back on; inlined into them,
+//! the bodies of the out-of-line functions compile as in that build.
+//! LAHF/SAHF, the last x86-64-v2 feature, has no stable name in rustc and
+//! stays on in the whole crate; LLVM uses it only for x87 compares, which
+//! lev has none of.
+//!
+//! rustc drops `#[inline(never)]` from `#[target_feature]` functions.  The
+//! functions kept out of line therefore reach these through their
+//! `#[inline(never)]` form in the crate, which has no target features, so
+//! LLVM cannot inline into it and compiles it to one `jmp`.
+//!
+//! [`py`] exposes the copy's `#[pyfunction]` wrappers; PyO3's generated
+//! argument-extraction code stays outside `#[target_feature]` and calls
+//! [`distance`] and [`ratio`] here.
+
+#[cfg(target_arch = "x86_64")]
+use pyo3::{types::PyString, Borrowed};
+
+#[cfg(target_arch = "x86_64")]
+use crate::{CodeUnit, Isa, Kernel, LargeCtx};
+
+/// The x86-64-v2 copy of the hot path.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub(crate) struct V2;
+
+/// Put `#[target_feature]` with the features of [`V2`] on each item.
+#[cfg(target_arch = "x86_64")]
+macro_rules! v2 {
+    ($($item:item)*) => {
+        $(#[target_feature(enable = "popcnt,sse3,ssse3,sse4.1,sse4.2,cmpxchg16b")] $item)*
+    };
+}
+
+/// Whether the CPU has the features of [`V2`].
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn detected() -> bool {
+    std::is_x86_feature_detected!("popcnt")
+        && std::is_x86_feature_detected!("sse3")
+        && std::is_x86_feature_detected!("ssse3")
+        && std::is_x86_feature_detected!("sse4.1")
+        && std::is_x86_feature_detected!("sse4.2")
+        && std::is_x86_feature_detected!("cmpxchg16b")
+}
+
+/// PyO3 wrappers for [`V2`], registered by `crate::_lev` when [`detected`] holds.
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod py {
+    use pyo3::prelude::*;
+    use pyo3::types::PyString;
+
+    crate::entry_points!(super::distance, super::ratio);
+}
+
+#[cfg(target_arch = "x86_64")]
+impl Isa for V2 {
+    const X86_64_V2: bool = true;
+}
+
+#[cfg(target_arch = "x86_64")]
+v2! {
+    /// [`crate::distance`] in this copy.
+    pub(crate) unsafe fn distance(
+        s1: Borrowed<'_, '_, PyString>,
+        s2: Borrowed<'_, '_, PyString>,
+    ) -> usize {
+        crate::distance_in::<V2>(s1, s2)
+    }
+
+    /// [`crate::ratio`] in this copy.
+    pub(crate) unsafe fn ratio(
+        s1: Borrowed<'_, '_, PyString>,
+        s2: Borrowed<'_, '_, PyString>,
+    ) -> f64 {
+        crate::ratio_in::<V2>(s1, s2)
+    }
+
+    /// [`crate::hyrro_64_tiny`] in this copy.
+    pub(crate) unsafe fn hyrro_64_tiny<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
+        pattern: &[T1],
+        text: &[T2],
+    ) -> usize {
+        crate::hyrro_64_tiny_body::<K, T1, T2>(pattern, text)
+    }
+
+    /// [`crate::mbleven`] in this copy: LLVM inlines its instance for this
+    /// copy, which has no other caller.
+    pub(crate) unsafe fn mbleven<X: Isa, T1: CodeUnit, T2: CodeUnit>(
+        short: &[T1],
+        long: &[T2],
+        ub: usize,
+    ) -> usize {
+        crate::mbleven::<X, T1, T2>(short, long, ub)
+    }
+
+    /// [`crate::hyrro_multiword_direct`] in this copy.
+    pub(crate) unsafe fn hyrro_multiword_direct<
+        K: Kernel,
+        const ROWS: usize,
+        T1: CodeUnit,
+        T2: CodeUnit,
+    >(
+        short: &[T1],
+        long: &[T2],
+    ) -> usize {
+        crate::hyrro_multiword_direct_body::<K, ROWS, T1, T2>(short, long)
+    }
+
+    /// [`crate::hyrro_multiword_hash`] in this copy.
+    pub(crate) unsafe fn hyrro_multiword_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
+        short: &[T1],
+        long: &[T2],
+    ) -> usize {
+        crate::hyrro_multiword_hash_body::<K, T1, T2>(short, long)
+    }
+
+    /// [`crate::LargeCtx::banded`] in this copy.
+    pub(crate) unsafe fn banded<F: Fn(usize) -> usize>(
+        ctx: &LargeCtx<'_, F>,
+        t: usize,
+        pv: &mut [u64],
+        mv: &mut [u64],
+    ) -> Result<usize, usize> {
+        ctx.banded_body(t, pv, mv)
+    }
+}
