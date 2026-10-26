@@ -33,11 +33,12 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import matplotlib.pyplot as plt
 import matplotx
@@ -85,6 +86,7 @@ REPEAT_DEFAULT = 10
 WARMUP_DEFAULT = 1_000
 
 UNRELEASED_ALIASES = frozenset({"unreleased", "current", "dev", "head", "local", "."})
+SEMVER_REGEX = re.compile(r"^\d+(\.\d+)*$")
 
 CHILD_RUNNER_CODE = """
 import json
@@ -92,11 +94,12 @@ import sys
 import timeit
 import lev
 
-s1 = sys.argv[1]
-s2 = sys.argv[2]
-repetitions = int(sys.argv[3])
-repeat = int(sys.argv[4])
-warmup = int(sys.argv[5])
+payload = json.loads(sys.stdin.read())
+s1 = payload["s1"]
+s2 = payload["s2"]
+repetitions = int(payload["repetitions"])
+repeat = int(payload["repeat"])
+warmup = int(payload["warmup"])
 
 # Sanity check
 dist = lev.distance(s1, s2)
@@ -115,6 +118,28 @@ print(json.dumps({
     "version": getattr(lev, "__version__", None),
 }))
 """
+
+
+def _validate_save_path(path: Path) -> Path:
+    """
+    Ensure the path is safely bounded within the repository or working tree to avoid path traversal.
+
+    Args:
+        path: Path to validate.
+
+    Returns:
+        Canonicalized Path.
+
+    Raises:
+        ValueError: If path resolves outside the repository or current directory.
+
+    """
+    resolved = path.resolve()
+    repo_resolved = REPO_ROOT.resolve()
+    cwd_resolved = Path.cwd().resolve()
+    if not (resolved.is_relative_to(repo_resolved) or resolved.is_relative_to(cwd_resolved)):
+        raise ValueError(f"Path must be within repository or working directory: {path}")
+    return resolved
 
 
 def _cpu_model() -> str:
@@ -173,6 +198,28 @@ def is_unreleased_version(ver: str) -> bool:
     return ver.lower() in UNRELEASED_ALIASES
 
 
+def _validate_version_label(label: str) -> str:
+    """
+    Validate that the version label is safe and matches expected semver format.
+
+    Args:
+        label: Raw version string.
+
+    Returns:
+        Validated version label.
+
+    Raises:
+        ValueError: If the version label does not match allowed characters.
+
+    """
+    cleaned = label.strip()
+    if is_unreleased_version(cleaned):
+        return cleaned
+    if not SEMVER_REGEX.match(cleaned):
+        raise ValueError(f"Invalid version format '{cleaned}'. Expected semver like '0.5.0' or 'unreleased'.")
+    return cleaned
+
+
 def measure_version(
     version_label: str,
     s1: str,
@@ -180,7 +227,6 @@ def measure_version(
     repetitions: int,
     repeat: int,
     warmup: int,
-    uv_bin: str = "uv",
 ) -> dict:
     """
     Run benchmark for a single version in an isolated Python subprocess via uv.
@@ -192,7 +238,6 @@ def measure_version(
         repetitions: Calls per batch.
         repeat: Number of batches.
         warmup: Number of warmup calls.
-        uv_bin: Path to the uv executable.
 
     Returns:
         Dictionary with statistics (mean_us, min_us, etc.) and distance check.
@@ -202,13 +247,10 @@ def measure_version(
         ValueError: If no output is received from the runner subprocess.
 
     """
-    if is_unreleased_version(version_label):
-        pkg_spec = str(REPO_ROOT)
-    elif Path(version_label).exists():
-        pkg_spec = str(Path(version_label).resolve())
-    else:
-        pkg_spec = f"lev-rs=={version_label}"
+    validated_label = _validate_version_label(version_label)
+    pkg_spec = str(REPO_ROOT) if is_unreleased_version(validated_label) else f"lev-rs=={validated_label}"
 
+    uv_bin = shutil.which("uv") or "uv"
     cmd = [
         uv_bin,
         "run",
@@ -219,14 +261,17 @@ def measure_version(
         "python",
         "-c",
         CHILD_RUNNER_CODE,
-        s1,
-        s2,
-        str(repetitions),
-        str(repeat),
-        str(warmup),
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    input_data = json.dumps({
+        "s1": s1,
+        "s2": s2,
+        "repetitions": int(repetitions),
+        "repeat": int(repeat),
+        "warmup": int(warmup),
+    })
+
+    result = subprocess.run(cmd, input=input_data, capture_output=True, text=True)
     if result.returncode != 0:
         err_msg = result.stderr.strip() or result.stdout.strip()
         raise RuntimeError(f"Benchmark failed for version '{version_label}': {err_msg}")
@@ -261,7 +306,6 @@ def run_benchmarks(
     repetitions: int = REPETITIONS_DEFAULT,
     repeat: int = REPEAT_DEFAULT,
     warmup: int = WARMUP_DEFAULT,
-    uv_bin: str | None = None,
 ) -> dict:
     """
     Benchmark each specified version of lev and return comprehensive metrics.
@@ -273,13 +317,11 @@ def run_benchmarks(
         repetitions: Number of calls per measurement run.
         repeat: Number of measurement repetitions.
         warmup: Number of warmup calls before timing.
-        uv_bin: Path to the uv binary (detected automatically if None).
 
     Returns:
         Payload dictionary with metadata and per-version results.
 
     """
-    resolved_uv = uv_bin or shutil.which("uv") or "uv"
     results: dict[str, dict] = {}
 
     print(f"Benchmarking {len(versions)} version(s) on realistic text...")
@@ -287,7 +329,7 @@ def run_benchmarks(
         sys.stdout.write(f"  • {ver:14s} ... ")
         sys.stdout.flush()
         try:
-            res = measure_version(ver, s1, s2, repetitions, repeat, warmup, uv_bin=resolved_uv)
+            res = measure_version(ver, s1, s2, repetitions, repeat, warmup)
             results[ver] = res
             print(f"done  [avg: {res['mean_us']:.3f} μs, min: {res['min_us']:.3f} μs, dist: {res['distance']}]")
         except Exception as e:
@@ -305,6 +347,127 @@ def run_benchmarks(
         },
         "results": results,
     }
+
+
+def _extract_metric_series(
+    results: dict[str, dict],
+    labels_versions: list[str],
+    metrics: Sequence[str],
+) -> tuple[list[np.ndarray], list[str]]:
+    """
+    Extract metric series arrays and labels from benchmark results.
+
+    Args:
+        results: Mapping of version to benchmark statistics.
+        labels_versions: Ordered list of version labels.
+        metrics: Requested metrics to plot ('average', 'min', 'median').
+
+    Returns:
+        Tuple of (list of y arrays, list of line labels).
+
+    """
+    series: list[tuple[str, np.ndarray]] = []
+    if "average" in metrics:
+        series.append(("average", np.array([results[v]["mean_us"] for v in labels_versions])))
+    if "min" in metrics:
+        series.append(("min", np.array([results[v]["min_us"] for v in labels_versions])))
+    if "median" in metrics:
+        series.append(("median", np.array([results[v]["median_us"] for v in labels_versions])))
+
+    if not series:
+        series.append(("average", np.array([results[v]["mean_us"] for v in labels_versions])))
+
+    return [s[1] for s in series], [s[0] for s in series]
+
+
+def _render_line_chart(
+    x0: np.ndarray,
+    y: list[np.ndarray],
+    line_labels: list[str],
+    version_labels: list[str],
+    subtitle: str,
+) -> None:
+    """
+    Render dufte line chart visualization with line labels.
+
+    Args:
+        x0: Array of x-axis indices.
+        y: List of metric series arrays.
+        line_labels: Labels for each metric series.
+        version_labels: Display labels for versions.
+        subtitle: Descriptive metadata subtitle.
+
+    """
+    for yy, label in zip(y, line_labels):
+        plt.plot(x0, yy, label=label, marker="o", markersize=4)
+
+    _, tick_labels = plt.xticks(x0, version_labels, rotation=30, ha="right")
+    for tick in tick_labels:
+        if is_unreleased_version(tick.get_text()):
+            tick.set_fontweight("bold")
+
+    plt.xlabel(f"version\n{subtitle}")
+    matplotx.ylabel_top("time [µs]")  # ruff: ignore[ambiguous-unicode-character-string]
+    matplotx.line_labels()
+
+
+def _render_bar_chart(
+    x0: np.ndarray,
+    means: np.ndarray,
+    version_labels: list[str],
+    results: dict[str, dict],
+    theme: str,
+    subtitle: str,
+) -> None:
+    """
+    Render horizontal or vertical bar chart visualization.
+
+    Args:
+        x0: Array of x-axis indices.
+        means: Average runtime values per version.
+        version_labels: Display labels for versions.
+        results: Raw benchmark results mapping.
+        theme: 'light' or 'dark' theme string.
+        subtitle: Descriptive metadata subtitle.
+
+    """
+    released_color = "#58a6ff" if theme == "dark" else "#0969da"
+    unreleased_color = "#3fb950" if theme == "dark" else "#1a7f37"
+    grid_color = "#30363d" if theme == "dark" else "#d0d7de"
+    text_color = "white" if theme == "dark" else "black"
+
+    colors = [unreleased_color if results[v]["is_unreleased"] else released_color for v in version_labels]
+    bars = plt.bar(x0, means, color=colors, width=0.62, edgecolor="none", zorder=3)
+    plt.bar_label(bars, fmt="%.2f μs", padding=4, fontsize=8.5, color=text_color)
+    plt.ylim(0, max(means) * 1.20)
+    plt.grid(True, axis="y", ls="--", alpha=0.5, color=grid_color, zorder=0)
+    plt.grid(False, axis="x")
+
+    _, tick_labels = plt.xticks(x0, version_labels, rotation=30, ha="right")
+    for tick in tick_labels:
+        if is_unreleased_version(tick.get_text()):
+            tick.set_fontweight("bold")
+            tick.set_color(unreleased_color)
+
+    plt.title("Levenshtein Distance Performance Across lev Versions", fontsize=13, pad=12)
+    plt.xlabel(f"version\n{subtitle}", fontsize=9.5, labelpad=8)
+    matplotx.ylabel_top("time [µs]")  # ruff: ignore[ambiguous-unicode-character-string]
+
+
+def _get_theme_style(theme: str) -> Any:
+    """
+    Return the matplotlib style context for light or dark theme.
+
+    Args:
+        theme: Theme name ('light' or 'dark').
+
+    Returns:
+        Matplotlib style object.
+
+    """
+    if theme == "light":
+        return matplotx.styles.dufte
+    return matplotx.styles.duftify(matplotx.styles.github["dark"])
 
 
 def plot_versions(
@@ -332,25 +495,7 @@ def plot_versions(
     meta: dict = payload["meta"]
     labels_versions = list(results.keys())
     x0 = np.arange(len(labels_versions))
-
-    # Assemble series to plot based on metrics
-    series: list[tuple[str, np.ndarray]] = []
-    if "average" in metrics:
-        means = np.array([results[ver]["mean_us"] for ver in labels_versions])
-        series.append(("average", means))
-    if "min" in metrics:
-        mins = np.array([results[ver]["min_us"] for ver in labels_versions])
-        series.append(("min", mins))
-    if "median" in metrics:
-        medians = np.array([results[ver]["median_us"] for ver in labels_versions])
-        series.append(("median", medians))
-
-    if not series:
-        means = np.array([results[ver]["mean_us"] for ver in labels_versions])
-        series.append(("average", means))
-
-    y = [s[1] for s in series]
-    labels = [s[0] for s in series]
+    y, line_labels = _extract_metric_series(results, labels_versions, metrics)
 
     machine = meta["machine"]
     subtitle = (
@@ -358,55 +503,22 @@ def plot_versions(
         f"Realistic text ({meta['string_lengths'][0]} chars), n={meta['repetitions']:,} calls × {meta['repeat']} runs"  # ruff: ignore[ambiguous-unicode-character-string]
     )
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    safe_dir = _validate_save_path(output_dir)
+    safe_dir.mkdir(parents=True, exist_ok=True)
     generated_files: list[Path] = []
 
     for theme in ("light", "dark"):
-        style = matplotx.styles.dufte if theme == "light" else matplotx.styles.duftify(matplotx.styles.github["dark"])
-
+        style = _get_theme_style(theme)
         with plt.style.context(style):
             plt.figure(figsize=(10.5, 5.0))
-
             if chart_type == "line":
-                for yy, label in zip(y, labels):
-                    plt.plot(x0, yy, label=label, marker="o", markersize=4)
-
-                _, tick_labels = plt.xticks(x0, labels_versions, rotation=30, ha="right")
-                for tick in tick_labels:
-                    if is_unreleased_version(tick.get_text()):
-                        tick.set_fontweight("bold")
-
-                plt.xlabel(f"version\n{subtitle}")
-                matplotx.ylabel_top("time [µs]")  # ruff: ignore[ambiguous-unicode-character-string]
-                matplotx.line_labels()
+                _render_line_chart(x0, y, line_labels, labels_versions, subtitle)
             else:
-                means = np.array([results[ver]["mean_us"] for ver in labels_versions])
-                released_color = "#58a6ff" if theme == "dark" else "#0969da"
-                unreleased_color = "#3fb950" if theme == "dark" else "#1a7f37"
-                grid_color = "#30363d" if theme == "dark" else "#d0d7de"
-                text_color = "white" if theme == "dark" else "black"
-
-                colors = [
-                    unreleased_color if results[ver]["is_unreleased"] else released_color for ver in labels_versions
-                ]
-                bars = plt.bar(x0, means, color=colors, width=0.62, edgecolor="none", zorder=3)
-                plt.bar_label(bars, fmt="%.2f μs", padding=4, fontsize=8.5, color=text_color)
-                plt.ylim(0, max(means) * 1.20)
-                plt.grid(True, axis="y", ls="--", alpha=0.5, color=grid_color, zorder=0)
-                plt.grid(False, axis="x")
-
-                _, tick_labels = plt.xticks(x0, labels_versions, rotation=30, ha="right")
-                for tick in tick_labels:
-                    if is_unreleased_version(tick.get_text()):
-                        tick.set_fontweight("bold")
-                        tick.set_color(unreleased_color)
-
-                plt.title("Levenshtein Distance Performance Across lev Versions", fontsize=13, pad=12)
-                plt.xlabel(f"version\n{subtitle}", fontsize=9.5, labelpad=8)
-                matplotx.ylabel_top("time [µs]")  # ruff: ignore[ambiguous-unicode-character-string]
+                means = np.array([results[v]["mean_us"] for v in labels_versions])
+                _render_bar_chart(x0, means, labels_versions, results, theme, subtitle)
 
             for fmt in formats:
-                out_path = output_dir / f"benchmark_by_version_{theme}.{fmt}"
+                out_path = safe_dir / f"benchmark_by_version_{theme}.{fmt}"
                 plt.savefig(out_path, bbox_inches="tight")
                 generated_files.append(out_path)
 
@@ -485,19 +597,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=True,
         help="Whether to generate and save plot images (default: True).",
     )
-    p.add_argument(
-        "--output-dir",
-        type=Path,
-        default=ASSETS_DIR,
-        help=f"Directory for plot output files (default: {ASSETS_DIR.relative_to(REPO_ROOT)}).",
-    )
-    p.add_argument(
-        "--uv",
-        dest="uv_bin",
-        type=str,
-        default=None,
-        help="Custom path to the uv binary (detected automatically if omitted).",
-    )
     return p.parse_args(argv)
 
 
@@ -517,7 +616,6 @@ def resolve_versions(arg_versions: list[str] | None) -> tuple[str, ...]:
 
     resolved: list[str] = []
     for item in arg_versions:
-        # Handle comma-separated list e.g. "0.4.0,0.5.0,unreleased"
         parts = [p.strip() for p in item.split(",") if p.strip()]
         resolved.extend(parts)
 
@@ -540,23 +638,22 @@ def main(argv: list[str] | None = None) -> int:
         repetitions=args.repetitions,
         repeat=args.repeat,
         warmup=args.warmup,
-        uv_bin=args.uv_bin,
     )
 
-    args.save.parent.mkdir(parents=True, exist_ok=True)
-    args.save.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
-    print(f"\nWrote benchmark results JSON to {args.save}")
+    safe_save = _validate_save_path(args.save)
+    safe_save.parent.mkdir(parents=True, exist_ok=True)
+    safe_save.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    print(f"\nWrote benchmark results JSON to {safe_save}")
 
     if args.plot:
         fmts = ("svg", "png") if args.format == "both" else (args.format,)
         generated = plot_versions(
             payload,
-            output_dir=args.output_dir,
             chart_type=args.chart_type,
             metrics=args.metrics,
             formats=fmts,
         )
-        print(f"Generated {len(generated)} plot files in {args.output_dir}:")
+        print(f"Generated {len(generated)} plot files in {ASSETS_DIR}:")
         for p in generated:
             print(f"  • {p.name}")
 
