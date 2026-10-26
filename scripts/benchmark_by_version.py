@@ -11,7 +11,7 @@
 Benchmark lev across released versions up to the current unreleased build.
 
 Measures average runtime (and spread) on realistic natural-language text.
-Produces GitHub-themed light and dark SVG and PNG line plots using dufte and matplotx.
+Produces GitHub-themed light and dark SVG and PNG line plots with filled uncertainty bands.
 
 Examples:
     # Run default benchmark across all versions and generate line plots:
@@ -19,9 +19,6 @@ Examples:
 
     # Select specific versions via CLI:
     uv run scripts/benchmark_by_version.py --versions 0.4.0 0.4.1 0.5.0 unreleased
-
-    # Plot only the average metric:
-    uv run scripts/benchmark_by_version.py --metrics average
 
     # Save JSON results to a custom file:
     uv run scripts/benchmark_by_version.py --save baselines/versions.json
@@ -32,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import re
 import shutil
@@ -120,26 +118,40 @@ print(json.dumps({
 """
 
 
-def _validate_save_path(path: Path) -> Path:
+def _validate_safe_path(path: Path) -> Path:
     """
-    Ensure the path is safely bounded within the repository or working tree to avoid path traversal.
+    Ensure the path is safely bounded within the repository to prevent path traversal.
 
     Args:
         path: Path to validate.
 
     Returns:
-        Canonicalized Path.
+        Canonicalized Path safely inside the repository.
 
     Raises:
-        ValueError: If path resolves outside the repository or current directory.
+        ValueError: If path resolves outside the repository root.
 
     """
     resolved = path.resolve()
-    repo_resolved = REPO_ROOT.resolve()
-    cwd_resolved = Path.cwd().resolve()
-    if not (resolved.is_relative_to(repo_resolved) or resolved.is_relative_to(cwd_resolved)):
-        raise ValueError(f"Path must be within repository or working directory: {path}")
+    base = REPO_ROOT.resolve()
+    if not resolved.is_relative_to(base) or os.path.commonpath([str(base), str(resolved)]) != str(base):
+        raise ValueError(f"Path traversal detected: {path} must be inside {base}")
     return resolved
+
+
+def _safe_write_json(destination: Path, data: dict) -> None:
+    """
+    Write JSON safely to destination inside the repository.
+
+    Args:
+        destination: Path to write to.
+        data: Data dictionary to serialize.
+
+    """
+    safe_path = _validate_safe_path(destination)
+    safe_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(safe_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 def _cpu_model() -> str:
@@ -349,57 +361,28 @@ def run_benchmarks(
     }
 
 
-def _extract_metric_series(
-    results: dict[str, dict],
-    labels_versions: list[str],
-    metrics: Sequence[str],
-) -> tuple[list[np.ndarray], list[str]]:
-    """
-    Extract metric series arrays and labels from benchmark results.
-
-    Args:
-        results: Mapping of version to benchmark statistics.
-        labels_versions: Ordered list of version labels.
-        metrics: Requested metrics to plot ('average', 'min', 'median').
-
-    Returns:
-        Tuple of (list of y arrays, list of line labels).
-
-    """
-    series: list[tuple[str, np.ndarray]] = []
-    if "average" in metrics:
-        series.append(("average", np.array([results[v]["mean_us"] for v in labels_versions])))
-    if "min" in metrics:
-        series.append(("min", np.array([results[v]["min_us"] for v in labels_versions])))
-    if "median" in metrics:
-        series.append(("median", np.array([results[v]["median_us"] for v in labels_versions])))
-
-    if not series:
-        series.append(("average", np.array([results[v]["mean_us"] for v in labels_versions])))
-
-    return [s[1] for s in series], [s[0] for s in series]
-
-
 def _render_line_chart(
     x0: np.ndarray,
-    y: list[np.ndarray],
-    line_labels: list[str],
+    means: np.ndarray,
+    lower: np.ndarray,
+    upper: np.ndarray,
     version_labels: list[str],
     subtitle: str,
 ) -> None:
     """
-    Render dufte line chart visualization with line labels.
+    Render dufte line chart with a filled uncertainty band and end-of-line label.
 
     Args:
         x0: Array of x-axis indices.
-        y: List of metric series arrays.
-        line_labels: Labels for each metric series.
+        means: Average runtime values per version.
+        lower: Lower bound of the uncertainty band (e.g. min runtime).
+        upper: Upper bound of the uncertainty band (e.g. max runtime).
         version_labels: Display labels for versions.
         subtitle: Descriptive metadata subtitle.
 
     """
-    for yy, label in zip(y, line_labels):
-        plt.plot(x0, yy, label=label, marker="o", markersize=4)
+    (line,) = plt.plot(x0, means, label="average", marker="o", markersize=4)
+    plt.fill_between(x0, lower, upper, alpha=0.2, color=line.get_color())
 
     _, tick_labels = plt.xticks(x0, version_labels, rotation=30, ha="right")
     for tick in tick_labels:
@@ -474,7 +457,6 @@ def plot_versions(
     payload: dict,
     output_dir: Path = ASSETS_DIR,
     chart_type: str = "line",
-    metrics: Sequence[str] = ("average", "min"),
     formats: tuple[str, ...] = ("svg", "png"),
 ) -> list[Path]:
     """
@@ -483,8 +465,7 @@ def plot_versions(
     Args:
         payload: Benchmark results payload.
         output_dir: Directory where plot images should be saved.
-        chart_type: 'line' for line plot with dufte styling, 'bar' for bar chart.
-        metrics: Which metric series to plot (e.g. 'average', 'min').
+        chart_type: 'line' for line plot with filled uncertainty band, 'bar' for bar chart.
         formats: File formats to export ('svg', 'png', etc.).
 
     Returns:
@@ -495,7 +476,10 @@ def plot_versions(
     meta: dict = payload["meta"]
     labels_versions = list(results.keys())
     x0 = np.arange(len(labels_versions))
-    y, line_labels = _extract_metric_series(results, labels_versions, metrics)
+
+    means = np.array([results[v]["mean_us"] for v in labels_versions])
+    mins = np.array([results[v]["min_us"] for v in labels_versions])
+    maxs = np.array([results[v]["max_us"] for v in labels_versions])
 
     machine = meta["machine"]
     subtitle = (
@@ -503,7 +487,7 @@ def plot_versions(
         f"Realistic text ({meta['string_lengths'][0]} chars), n={meta['repetitions']:,} calls × {meta['repeat']} runs"  # ruff: ignore[ambiguous-unicode-character-string]
     )
 
-    safe_dir = _validate_save_path(output_dir)
+    safe_dir = _validate_safe_path(output_dir)
     safe_dir.mkdir(parents=True, exist_ok=True)
     generated_files: list[Path] = []
 
@@ -512,9 +496,8 @@ def plot_versions(
         with plt.style.context(style):
             plt.figure(figsize=(10.5, 5.0))
             if chart_type == "line":
-                _render_line_chart(x0, y, line_labels, labels_versions, subtitle)
+                _render_line_chart(x0, means, mins, maxs, labels_versions, subtitle)
             else:
-                means = np.array([results[v]["mean_us"] for v in labels_versions])
                 _render_bar_chart(x0, means, labels_versions, results, theme, subtitle)
 
             for fmt in formats:
@@ -579,13 +562,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Visualization chart type (default: line).",
     )
     p.add_argument(
-        "--metrics",
-        nargs="*",
-        choices=["average", "min", "median"],
-        default=["average", "min"],
-        help="Metrics to plot as lines (default: average min).",
-    )
-    p.add_argument(
         "--format",
         choices=["svg", "png", "both"],
         default="both",
@@ -640,17 +616,14 @@ def main(argv: list[str] | None = None) -> int:
         warmup=args.warmup,
     )
 
-    safe_save = _validate_save_path(args.save)
-    safe_save.parent.mkdir(parents=True, exist_ok=True)
-    safe_save.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
-    print(f"\nWrote benchmark results JSON to {safe_save}")
+    _safe_write_json(args.save, payload)
+    print(f"\nWrote benchmark results JSON to {args.save}")
 
     if args.plot:
         fmts = ("svg", "png") if args.format == "both" else (args.format,)
         generated = plot_versions(
             payload,
             chart_type=args.chart_type,
-            metrics=args.metrics,
             formats=fmts,
         )
         print(f"Generated {len(generated)} plot files in {ASSETS_DIR}:")
