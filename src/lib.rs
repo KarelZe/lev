@@ -604,19 +604,18 @@ fn strip_affix<'a, T: CodeUnit>(a: &'a [T], b: &'a [T]) -> (&'a [T], &'a [T]) {
 // ---------------------------------------------------------------------------
 
 /// Patterns at or below this length skip peq-table construction entirely; the
-/// pattern-match word is computed per text char by a fully unrolled linear
-/// scan.  Zero-initializing the peq tables (1-2 KiB) dominates the runtime for
-/// tiny inputs, so trading one table load for ≤ `TINY_M` compare+or ops wins.
-const TINY_M: usize = 8;
+/// pattern-match word is computed per text char by vector comparisons or a
+/// fully unrolled linear scan.  Zero-initializing the peq tables (1-2 KiB)
+/// dominates the runtime for tiny inputs, so trading one table load for ≤ `TINY_M`
+/// SIMD or compare+or ops wins.
+const TINY_M: usize = 16;
 
 /// Tiny-pattern kernel: no peq table, `pm` computed per text char directly
 /// from the pattern.
 ///
-/// A plain loop over a runtime-length pattern gets auto-vectorized per text
-/// char (widening loads, horizontal reduce, scalar tail), which costs several
-/// times the bit-parallel step it feeds.  Single-byte patterns therefore use a
-/// SWAR match; wider ones dispatch on a const length so the scan unrolls into
-/// `m` compares.
+/// Single-byte patterns up to 16 characters use 128-bit SIMD comparisons
+/// (NEON on AArch64, SSE2 on x86-64), avoiding any peq table setup. Wider
+/// patterns dispatch on a const length so the scan unrolls into `m` compares.
 ///
 /// Kept out of line: inlining these loops into the dispatcher perturbs
 /// register allocation of the single-word paths sharing that function.
@@ -636,7 +635,17 @@ fn hyrro_64_tiny<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[
 fn hyrro_64_tiny_body<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[T2]) -> usize {
     debug_assert!((1..=TINY_M).contains(&pattern.len()));
     if std::mem::size_of::<T1>() == 1 {
-        return tiny_swar::<K, _, _>(pattern, text);
+        if pattern.len() <= 8 {
+            return tiny_swar::<K, _, _>(pattern, text);
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            return unsafe { tiny_u8_simd::<K, T1, T2>(pattern, text) };
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            return unsafe { tiny_u8_simd::<K, T1, T2>(pattern, text) };
+        }
     }
     match pattern.len() {
         1 => tiny_n::<K, 1, _, _>(pattern, text),
@@ -647,8 +656,87 @@ fn hyrro_64_tiny_body<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], tex
         6 => tiny_n::<K, 6, _, _>(pattern, text),
         7 => tiny_n::<K, 7, _, _>(pattern, text),
         8 => tiny_n::<K, 8, _, _>(pattern, text),
+        9 => tiny_n::<K, 9, _, _>(pattern, text),
+        10 => tiny_n::<K, 10, _, _>(pattern, text),
+        11 => tiny_n::<K, 11, _, _>(pattern, text),
+        12 => tiny_n::<K, 12, _, _>(pattern, text),
+        13 => tiny_n::<K, 13, _, _>(pattern, text),
+        14 => tiny_n::<K, 14, _, _>(pattern, text),
+        15 => tiny_n::<K, 15, _, _>(pattern, text),
+        16 => tiny_n::<K, 16, _, _>(pattern, text),
         _ => unreachable!("tiny path requires 1..=TINY_M pattern chars"),
     }
+}
+
+/// [`hyrro_64_tiny`] for single-byte patterns using 128-bit NEON vector comparisons.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn tiny_u8_simd<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
+    pattern: &[T1],
+    text: &[T2],
+) -> usize {
+    use std::arch::aarch64::*;
+    let m = pattern.len();
+    debug_assert!(std::mem::size_of::<T1>() == 1 && (1..=TINY_M).contains(&m));
+    let mut pat_buf = [0u8; 16];
+    pat_buf[..m].copy_from_slice(as_bytes(pattern));
+    let pat_vec = vld1q_u8(pat_buf.as_ptr());
+    let valid = if m == 64 { u64::MAX } else { (1u64 << m) - 1 };
+
+    const IDX_BYTES: [u8; 16] = [0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15];
+    const MBITS_U16: [u16; 8] = [
+        0x0101, 0x0202, 0x0404, 0x0808, 0x1010, 0x2020, 0x4040, 0x8080,
+    ];
+    let idx = vld1q_u8(IDX_BYTES.as_ptr());
+    let mbits = vld1q_u16(MBITS_U16.as_ptr());
+
+    K::word(
+        m,
+        text.len(),
+        text.iter().map(|&c| {
+            let c_val = c.as_u64();
+            if c_val > 0xff {
+                return 0;
+            }
+            let c_vec = vdupq_n_u8(c_val as u8);
+            let eq = vceqq_u8(pat_vec, c_vec);
+            let perm = vqtbl1q_u8(eq, idx);
+            let anded = vandq_u16(vreinterpretq_u16_u8(perm), mbits);
+            let mask = vaddvq_u16(anded) as u64;
+            mask & valid
+        }),
+    )
+}
+
+/// [`hyrro_64_tiny`] for single-byte patterns using 128-bit SSE2 vector comparisons.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn tiny_u8_simd<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
+    pattern: &[T1],
+    text: &[T2],
+) -> usize {
+    use std::arch::x86_64::*;
+    let m = pattern.len();
+    debug_assert!(std::mem::size_of::<T1>() == 1 && (1..=TINY_M).contains(&m));
+    let mut pat_buf = [0u8; 16];
+    pat_buf[..m].copy_from_slice(as_bytes(pattern));
+    let pat_vec = _mm_loadu_si128(pat_buf.as_ptr() as *const __m128i);
+    let valid = if m == 64 { u64::MAX } else { (1u64 << m) - 1 };
+
+    K::word(
+        m,
+        text.len(),
+        text.iter().map(|&c| {
+            let c_val = c.as_u64();
+            if c_val > 0xff {
+                return 0;
+            }
+            let c_vec = _mm_set1_epi8(c_val as i8);
+            let eq = _mm_cmpeq_epi8(pat_vec, c_vec);
+            let mask = _mm_movemask_epi8(eq) as u64;
+            mask & valid
+        }),
+    )
 }
 
 /// [`hyrro_64_tiny`] for a multi-byte pattern of exactly `N` code units.
@@ -2306,9 +2394,9 @@ mod tests {
                 .wrapping_add(1442695040888963407);
             (state >> 33) as usize
         };
-        for _ in 0..2000 {
-            let la = rng() % 13;
-            let lb = rng() % 13;
+        for _ in 0..4000 {
+            let la = rng() % 25;
+            let lb = rng() % 25;
             let a: String = (0..la)
                 .map(|_| (b'a' + (rng() % 4) as u8) as char)
                 .collect();
@@ -2318,6 +2406,74 @@ mod tests {
             let ac: Vec<char> = a.chars().collect();
             let bc: Vec<char> = b.chars().collect();
             assert_eq!(levenshtein(&a, &b), naive(&ac, &bc), "({a:?}, {b:?})");
+        }
+    }
+
+    #[test]
+    fn tiny_patterns_across_all_kinds() {
+        let mut state = 0x85A3_08D3_243F_6A88_u64;
+        let mut rng = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as usize
+        };
+        // Latin-1 (u8 non-ascii)
+        for _ in 0..1000 {
+            let la = 1 + (rng() % 16);
+            let lb = 1 + (rng() % 20);
+            let a: Vec<u8> = (0..la).map(|_| 0xc0 + (rng() % 10) as u8).collect();
+            let b: Vec<u8> = (0..lb).map(|_| 0xc0 + (rng() % 10) as u8).collect();
+            let ac: Vec<char> = a.iter().map(|&c| c as char).collect();
+            let bc: Vec<char> = b.iter().map(|&c| c as char).collect();
+            assert_eq!(compute_u8::<Lev, false>(&a, &b), naive(&ac, &bc));
+        }
+        // UCS-2 (u16)
+        for _ in 0..1000 {
+            let la = 1 + (rng() % 16);
+            let lb = 1 + (rng() % 20);
+            let a: Vec<u16> = (0..la).map(|_| 0x0500 + (rng() % 10) as u16).collect();
+            let b: Vec<u16> = (0..lb).map(|_| 0x0500 + (rng() % 10) as u16).collect();
+            let ac: Vec<char> = a
+                .iter()
+                .map(|&c| char::from_u32(c as u32).unwrap())
+                .collect();
+            let bc: Vec<char> = b
+                .iter()
+                .map(|&c| char::from_u32(c as u32).unwrap())
+                .collect();
+            assert_eq!(compute_sorted::<Lev, _>(&a, &b), naive(&ac, &bc));
+        }
+        // UCS-4 (u32)
+        for _ in 0..1000 {
+            let la = 1 + (rng() % 16);
+            let lb = 1 + (rng() % 20);
+            let a: Vec<u32> = (0..la).map(|_| 0x1f600 + (rng() % 10) as u32).collect();
+            let b: Vec<u32> = (0..lb).map(|_| 0x1f600 + (rng() % 10) as u32).collect();
+            let ac: Vec<char> = a.iter().map(|&c| char::from_u32(c).unwrap()).collect();
+            let bc: Vec<char> = b.iter().map(|&c| char::from_u32(c).unwrap()).collect();
+            assert_eq!(compute_sorted::<Lev, _>(&a, &b), naive(&ac, &bc));
+        }
+        // Mixed: u8 pattern, u16 text
+        for _ in 0..1000 {
+            let la = 1 + (rng() % 16);
+            let lb = 1 + (rng() % 20);
+            let a: Vec<u8> = (0..la).map(|_| b'a' + (rng() % 6) as u8).collect();
+            let b: Vec<u16> = (0..lb)
+                .map(|_| {
+                    if rng() % 3 == 0 {
+                        (b'a' + (rng() % 6) as u8) as u16
+                    } else {
+                        0x0300 + (rng() % 5) as u16
+                    }
+                })
+                .collect();
+            let ac: Vec<char> = a.iter().map(|&c| c as char).collect();
+            let bc: Vec<char> = b
+                .iter()
+                .map(|&c| char::from_u32(c as u32).unwrap())
+                .collect();
+            assert_eq!(compute_sorted_mixed::<Lev, _, _>(&a, &b), naive(&ac, &bc));
         }
     }
 
