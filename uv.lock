@@ -143,7 +143,7 @@ test = [
 dev = [
     { name = "maturin", specifier = ">=1.14.1,<2.0" },
     { name = "mkdocstrings", extras = ["python"] },
-    { name = "prek", specifier = ">=0.3.11" },
+    { name = "prek", specifier = ">=0.5.5" },
     { name = "pytest" },
     { name = "pytest-codspeed", specifier = ">=5.0.1" },
     { name = "rapidfuzz", specifier = ">=3.14.5" },
