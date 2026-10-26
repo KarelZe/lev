@@ -208,11 +208,11 @@ unsafe fn as_u8(v: &UniView) -> &[u8] {
 }
 #[inline(always)]
 unsafe fn as_u16(v: &UniView) -> &[u16] {
-    std::slice::from_raw_parts(v.data as *const u16, v.len)
+    std::slice::from_raw_parts(v.data.cast::<u16>(), v.len)
 }
 #[inline(always)]
 unsafe fn as_u32(v: &UniView) -> &[u32] {
-    std::slice::from_raw_parts(v.data as *const u32, v.len)
+    std::slice::from_raw_parts(v.data.cast::<u32>(), v.len)
 }
 
 /// [`distance`] in the copy `X` of the hot path.
@@ -504,7 +504,7 @@ fn strip_affix_mixed<'a, T1: CodeUnit, T2: CodeUnit>(
 /// Reinterpret a code-unit slice as raw bytes (sound: u8/u16/u32 are plain data).
 #[inline(always)]
 fn as_bytes<T: CodeUnit>(s: &[T]) -> &[u8] {
-    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, std::mem::size_of_val(s)) }
+    unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<u8>(), std::mem::size_of_val(s)) }
 }
 
 /// Bytes compared per branch by the affix scans: the XORs of four words are
@@ -1627,9 +1627,8 @@ fn scratch<'a, const N: usize>(
         for x in buf.iter_mut() {
             x.write(value);
         }
-        // SAFETY: all `len` elements were just initialized, and
-        // MaybeUninit<u64> has the layout of u64.
-        unsafe { &mut *(buf as *mut [MaybeUninit<u64>] as *mut [u64]) }
+        // SAFETY: all `len` elements were just initialized.
+        unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u64>(), len) }
     } else {
         *heap = vec![value; len];
         heap
