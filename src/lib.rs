@@ -56,7 +56,12 @@
 //! Step 5 has an LCS counterpart that restricts the recurrence to a band of
 //! diagonals and certifies its result (see `LargeCtx::lcs_banded`).  mbleven
 //! stays Levenshtein-only: against the three-op LCS step it does not pay.
+//!
+//! The crate builds for each target's baseline ISA.  On x86-64 the whole
+//! pipeline is compiled a second time with the x86-64-v2 features, and the
+//! module picks one of the two copies when it loads (see [`Isa`]).
 
+use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::os::raw::c_uint;
 
@@ -210,89 +215,132 @@ unsafe fn as_u32(v: &UniView) -> &[u32] {
     std::slice::from_raw_parts(v.data as *const u32, v.len)
 }
 
-/// Levenshtein edit distance between two strings.
+/// [`distance`] in the copy `X` of the hot path.
 ///
-/// The distance is the minimum number of single-character insertions,
-/// deletions, or substitutions required to transform `s1` into `s2`.
+/// # Safety
 ///
-/// Characters are counted as Unicode code points, so an accented letter or an
-/// emoji counts as one character.
-///
-/// Args:
-///     s1 (str): First input string.
-///     s2 (str): Second input string.
-///
-/// Returns:
-///     Non-negative integer edit distance.
-///
-/// Examples:
-///     >>> import lev
-///     >>> lev.distance("kitten", "sitting")
-///     3
-///     >>> lev.distance("flaw", "lawn")
-///     2
-///     >>> lev.distance("résumé", "resume")
-///     2
-// `pass_module` binds the functions to the module instead of registering
-// them `METH_STATIC`, which PyO3 0.28 does otherwise at a cost of a few ns per
-// call on CPython 3.11+ (PyO3 issue #6426).
-#[pyfunction]
-#[pyo3(pass_module, signature = (s1, s2, /))]
-fn distance(_m: &Bound<'_, PyModule>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> usize {
+/// The CPU must support the instruction set `X`.
+#[inline(always)]
+unsafe fn distance_in<X: Isa>(
+    s1: Borrowed<'_, '_, PyString>,
+    s2: Borrowed<'_, '_, PyString>,
+) -> usize {
     if s1.is(s2) {
         return 0;
     }
-    unsafe { compute::<Lev>(&view(s1), &view(s2)) }
+    compute::<Lev<X>>(&view(&s1), &view(&s2))
 }
 
-/// Calculate how similar two strings are, as a score from `0.0` to `1.0`.
+/// [`ratio`] in the copy `X` of the hot path.
 ///
-/// A score of `1.0` means the strings are identical, and `0.0` means they
-/// have no character in common.  In between, the score is the share of
-/// characters the two strings have in common, known as the indel similarity
-/// ratio:
+/// # Safety
 ///
-/// $$
-/// \mathrm{ratio}(s_1, s_2)
-///   = \frac{2 \cdot \mathrm{LCS}(s_1, s_2)}{|s_1| + |s_2|}
-/// $$
-///
-/// where $\mathrm{LCS}$ is the length of the longest common subsequence and
-/// $|s|$ is the length of $s$.
-///
-/// Characters are counted as Unicode code points, so an accented letter or an
-/// emoji counts as one character.
-///
-/// Args:
-///     s1 (str): First input string.
-///     s2 (str): Second input string.
-///
-/// Returns:
-///     Similarity score between `0.0` (nothing in common) and `1.0` (identical).
-///
-/// Examples:
-///     >>> import lev
-///     >>> lev.ratio("kitten", "sitting")
-///     0.6153846153846154
-///     >>> lev.ratio("abc", "xyz")
-///     0.0
-///     >>> lev.ratio("", "")
-///     1.0
-#[pyfunction]
-#[pyo3(pass_module, signature = (s1, s2, /))]
-fn ratio(_m: &Bound<'_, PyModule>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PyString>) -> f64 {
+/// The CPU must support the instruction set `X`.
+#[inline(always)]
+unsafe fn ratio_in<X: Isa>(s1: Borrowed<'_, '_, PyString>, s2: Borrowed<'_, '_, PyString>) -> f64 {
     if s1.is(s2) {
         return 1.0;
     }
-    unsafe {
-        let (v1, v2) = (view(s1), view(s2));
-        let total = v1.len + v2.len;
-        if total == 0 {
-            return 1.0;
-        }
-        1.0 - compute::<Lcs>(&v1, &v2) as f64 / total as f64
+    let (v1, v2) = (view(&s1), view(&s2));
+    let total = v1.len + v2.len;
+    if total == 0 {
+        return 1.0;
     }
+    1.0 - compute::<Lcs<X>>(&v1, &v2) as f64 / total as f64
 }
+
+/// Define the PyO3 [`distance`] and [`ratio`] entry points for one copy of the
+/// hot path, calling `$distance` and `$ratio` with `Borrowed` handles so the
+/// object pointers cross any `#[target_feature]` boundary in registers.
+macro_rules! entry_points {
+    ($distance:path, $ratio:path) => {
+        /// Levenshtein edit distance between two strings.
+        ///
+        /// The distance is the minimum number of single-character insertions,
+        /// deletions, or substitutions required to transform `s1` into `s2`.
+        ///
+        /// Characters are counted as Unicode code points, so an accented letter or an
+        /// emoji counts as one character.
+        ///
+        /// Args:
+        ///     s1 (str): First input string.
+        ///     s2 (str): Second input string.
+        ///
+        /// Returns:
+        ///     Non-negative integer edit distance.
+        ///
+        /// Examples:
+        ///     >>> import lev
+        ///     >>> lev.distance("kitten", "sitting")
+        ///     3
+        ///     >>> lev.distance("flaw", "lawn")
+        ///     2
+        ///     >>> lev.distance("résumé", "resume")
+        ///     2
+        // `pass_module` binds the functions to the module instead of registering
+        // them `METH_STATIC`, which PyO3 0.28 does otherwise at a cost of a few ns per
+        // call on CPython 3.11+ (PyO3 issue #6426).
+        #[pyfunction]
+        #[pyo3(pass_module, signature = (s1, s2, /))]
+        pub(crate) fn distance(
+            _m: &Bound<'_, PyModule>,
+            s1: &Bound<'_, PyString>,
+            s2: &Bound<'_, PyString>,
+        ) -> usize {
+            // SAFETY: `_lev` registers this copy's functions only when the CPU
+            // has its features (`Baseline` always does).
+            unsafe { $distance(s1.as_borrowed(), s2.as_borrowed()) }
+        }
+
+        /// Calculate how similar two strings are, as a score from `0.0` to `1.0`.
+        ///
+        /// A score of `1.0` means the strings are identical, and `0.0` means they
+        /// have no character in common.  In between, the score is the share of
+        /// characters the two strings have in common, known as the indel similarity
+        /// ratio:
+        ///
+        /// $$
+        /// \mathrm{ratio}(s_1, s_2)
+        ///   = \frac{2 \cdot \mathrm{LCS}(s_1, s_2)}{|s_1| + |s_2|}
+        /// $$
+        ///
+        /// where $\mathrm{LCS}$ is the length of the longest common subsequence and
+        /// $|s|$ is the length of $s$.
+        ///
+        /// Characters are counted as Unicode code points, so an accented letter or an
+        /// emoji counts as one character.
+        ///
+        /// Args:
+        ///     s1 (str): First input string.
+        ///     s2 (str): Second input string.
+        ///
+        /// Returns:
+        ///     Similarity score between `0.0` (nothing in common) and `1.0` (identical).
+        ///
+        /// Examples:
+        ///     >>> import lev
+        ///     >>> lev.ratio("kitten", "sitting")
+        ///     0.6153846153846154
+        ///     >>> lev.ratio("abc", "xyz")
+        ///     0.0
+        ///     >>> lev.ratio("", "")
+        ///     1.0
+        #[pyfunction]
+        #[pyo3(pass_module, signature = (s1, s2, /))]
+        pub(crate) fn ratio(
+            _m: &Bound<'_, PyModule>,
+            s1: &Bound<'_, PyString>,
+            s2: &Bound<'_, PyString>,
+        ) -> f64 {
+            // SAFETY: see `distance`.
+            unsafe { $ratio(s1.as_borrowed(), s2.as_borrowed()) }
+        }
+    };
+}
+#[cfg(target_arch = "x86_64")]
+pub(crate) use entry_points;
+
+entry_points!(distance_in::<Baseline>, ratio_in::<Baseline>);
 
 /// The compiled extension backing the `lev` package.
 ///
@@ -300,9 +348,62 @@ fn ratio(_m: &Bound<'_, PyModule>, s1: &Bound<'_, PyString>, s2: &Bound<'_, PySt
 /// is underscore-prefixed to keep it out of the package namespace.
 #[pymodule]
 fn _lev(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    #[cfg(target_arch = "x86_64")]
+    if kernels::x86_64::v2::detected() {
+        use kernels::x86_64::v2::py;
+        m.add_function(wrap_pyfunction!(py::distance, m)?)?;
+        m.add_function(wrap_pyfunction!(py::ratio, m)?)?;
+        return Ok(());
+    }
     m.add_function(wrap_pyfunction!(distance, m)?)?;
     m.add_function(wrap_pyfunction!(ratio, m)?)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Copies of the hot path, one per instruction set
+// ---------------------------------------------------------------------------
+
+/// One copy of the hot path, compiled for one instruction set, which
+/// [`Kernel::Isa`] carries through the pipeline.
+///
+/// [`Baseline`] is the copy for the target's baseline ISA, which every CPU
+/// of the target runs, and the only one off x86-64.  On x86-64 the crate
+/// builds for the x86-64-v1 ISA, and [`kernels::x86_64::v2::V2`] adds the
+/// x86-64-v2 features; [`_lev`] installs its entry points when the CPU has
+/// them.  A crate-wide `-C target-cpu=x86-64-v2` would get the features
+/// too, but lets LLVM use them anywhere, so the wheels would crash with
+/// SIGILL on older CPUs.  Detecting them per kernel instead would leave the
+/// code between the kernels (affix scans, peq tables, the final popcounts)
+/// on x86-64-v1.
+///
+/// Code inlined into a function is compiled with that function's target
+/// features, so a copy needs its own form of each function the pipeline
+/// keeps out of line.  [`hyrro_64_tiny`], [`hyrro_multiword_direct`],
+/// [`hyrro_multiword_hash`] and [`LargeCtx::banded`] call their copy's form
+/// of their body; [`mbleven`] is called through [`mbleven_in`], and the
+/// copies with target features inline [`LargeCtx::run`] by hand.  These
+/// functions test [`Isa::X86_64_V2`], a constant, rather than call methods
+/// of the copy: rustc inlines MIR only into calls it can resolve before
+/// monomorphization, and calls through trait methods changed the AArch64
+/// code of the baseline copy.  As it is, that code is the same per function
+/// as before there were copies.
+///
+/// A pipeline of a copy other than [`Baseline`] is only reached from that
+/// copy's entry points, so the CPU has its features.
+trait Isa {
+    /// Whether the copy has the x86-64-v2 features: its out-of-line
+    /// functions are those of [`kernels::x86_64::v2`], and the forms of
+    /// [`kernels::x86_64::bmi1`], which need them besides BMI1, may run.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    const X86_64_V2: bool;
+}
+
+/// The copy of the hot path for the target's baseline ISA (see [`Isa`]).
+struct Baseline;
+
+impl Isa for Baseline {
+    const X86_64_V2: bool = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -519,8 +620,20 @@ const TINY_M: usize = 8;
 ///
 /// Kept out of line: inlining these loops into the dispatcher perturbs
 /// register allocation of the single-word paths sharing that function.
+/// Each copy of the hot path compiles its own (see [`Isa`]).
 #[inline(never)]
 fn hyrro_64_tiny<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[T2]) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    if K::Isa::X86_64_V2 {
+        // SAFETY: the CPU runs `K::Isa` (see `Isa`).
+        return unsafe { kernels::x86_64::v2::hyrro_64_tiny::<K, T1, T2>(pattern, text) };
+    }
+    hyrro_64_tiny_body::<K, T1, T2>(pattern, text)
+}
+
+/// The body of [`hyrro_64_tiny`].
+#[inline(always)]
+fn hyrro_64_tiny_body<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[T2]) -> usize {
     debug_assert!((1..=TINY_M).contains(&pattern.len()));
     if std::mem::size_of::<T1>() == 1 {
         return tiny_swar::<K, _, _>(pattern, text);
@@ -609,7 +722,7 @@ fn compute_u8<K: Kernel, const ASCII: bool>(a: &[u8], b: &[u8]) -> usize {
     }
     if K::MBLEVEN {
         if let Some(ub) = small_ub(a, b) {
-            return mbleven(a, b, ub);
+            return mbleven_in::<K::Isa, _, _>(a, b, ub);
         }
     }
     if a.len() <= 64 {
@@ -716,6 +829,20 @@ fn small_ub_mixed<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2]) -> Opti
     Some(ub)
 }
 
+/// [`mbleven`] in the copy `X` of the hot path: the function itself, or on
+/// x86-64 its form in [`kernels::x86_64::v2`].  Unlike the other functions
+/// that stay out of line, `mbleven` is left to LLVM to inline or not: an
+/// `#[inline(never)]` wrapper that picks the copy changed its AArch64 code.
+#[inline(always)]
+fn mbleven_in<X: Isa, T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2], ub: usize) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    if X::X86_64_V2 {
+        // SAFETY: the CPU runs `X` (see `Isa`).
+        return unsafe { kernels::x86_64::v2::mbleven::<X, T1, T2>(short, long, ub) };
+    }
+    mbleven::<X, T1, T2>(short, long, ub)
+}
+
 /// Exact distance when an upper bound `ub` in `1..=3` is known (mbleven,
 /// Hyyrö 2018 formulation as used by rapidfuzz): try every candidate edit-op
 /// sequence of cost <= `ub` and take the cheapest that aligns the strings.
@@ -723,8 +850,9 @@ fn small_ub_mixed<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2]) -> Opti
 /// Each sequence packs ops two bits per op from the LSB: `0b01` advances only
 /// `long` (deletion from the longer string), `0b10` advances only `short`
 /// (insertion), `0b11` advances both (substitution).  O(ub * n) worst case,
-/// no peq table, no allocation.
-fn mbleven<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2], ub: usize) -> usize {
+/// no peq table, no allocation.  Instantiated per copy `X` of the hot path
+/// and called through [`mbleven_in`].
+fn mbleven<X: Isa, T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2], ub: usize) -> usize {
     if ub == 0 {
         return 0;
     }
@@ -793,7 +921,7 @@ fn compute_sorted<K: Kernel, T: CodeUnit>(a: &[T], b: &[T]) -> usize {
     }
     if K::MBLEVEN {
         if let Some(ub) = small_ub(a, b) {
-            return mbleven(a, b, ub);
+            return mbleven_in::<K::Isa, _, _>(a, b, ub);
         }
     }
     if a.len() <= 64 {
@@ -818,7 +946,7 @@ fn compute_sorted_mixed<K: Kernel, T1: CodeUnit, T2: CodeUnit>(a: &[T1], b: &[T2
     }
     if K::MBLEVEN {
         if let Some(ub) = small_ub_mixed(a, b) {
-            return mbleven(a, b, ub);
+            return mbleven_in::<K::Isa, _, _>(a, b, ub);
         }
     }
     if a.len() <= 64 {
@@ -1025,6 +1153,9 @@ fn lcs_multiword_kernel<const W: usize, I: Iterator<Item = [u64; W]>>(
 /// both metrics (indel distance is affix-invariant for the same reason
 /// Levenshtein distance is).
 trait Kernel {
+    /// The copy of the hot path the pipeline runs in.
+    type Isa: Isa;
+
     /// Whether the mbleven fast path applies; it is Levenshtein-specific.
     const MBLEVEN: bool;
 
@@ -1040,10 +1171,13 @@ trait Kernel {
     fn large<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize;
 }
 
-/// Levenshtein distance (substitution, insertion, and deletion each cost 1).
-struct Lev;
+/// Levenshtein distance (substitution, insertion, and deletion each cost 1),
+/// in the copy `X` of the hot path.
+struct Lev<X = Baseline>(PhantomData<X>);
 
-impl Kernel for Lev {
+impl<X: Isa> Kernel for Lev<X> {
+    type Isa = X;
+
     const MBLEVEN: bool = true;
 
     #[inline(always)]
@@ -1057,21 +1191,29 @@ impl Kernel for Lev {
         n: usize,
         pm_iter: I,
     ) -> usize {
-        (n as isize + kernels::multiword::<W, I>(m, pm_iter, None)) as usize
+        (n as isize + kernels::multiword::<X, W, I>(m, pm_iter, None)) as usize
     }
 
     #[inline(always)]
     fn large<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
-        ctx.run()
+        // In a copy with target features, LLVM keeps `run` (which has none)
+        // out of line, so its body is inlined by hand.
+        #[cfg(target_arch = "x86_64")]
+        if X::X86_64_V2 {
+            return ctx.run_body::<X>();
+        }
+        ctx.run::<X>()
     }
 }
 
 /// Indel distance: insertions and deletions cost 1, substitution is not an
 /// operation (it decomposes into one of each, cost 2).  Derived from the LCS
-/// length as `m + n - 2 * LLCS`.
-struct Lcs;
+/// length as `m + n - 2 * LLCS`.  In the copy `X` of the hot path.
+struct Lcs<X = Baseline>(PhantomData<X>);
 
-impl Kernel for Lcs {
+impl<X: Isa> Kernel for Lcs<X> {
+    type Isa = X;
+
     const MBLEVEN: bool = false;
 
     #[inline(always)]
@@ -1090,7 +1232,7 @@ impl Kernel for Lcs {
 
     #[inline(always)]
     fn large<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
-        ctx.m + ctx.n - 2 * ctx.lcs_run()
+        ctx.m + ctx.n - 2 * ctx.lcs_run::<X>()
     }
 }
 
@@ -1104,8 +1246,26 @@ const MAX_W: usize = 8;
 
 /// Multi-word entry point with a direct peq table of `ROWS` rows: UCS-1
 /// pairs (128 rows for pure ASCII, 256 for Latin-1) and mixed-kind pairs
-/// with a UCS-1 side (257 rows, see [`direct_row`]).
+/// with a UCS-1 side (257 rows, see [`direct_row`]).  Each copy of the hot
+/// path compiles its own (see [`Isa`]).
+#[inline(never)]
 fn hyrro_multiword_direct<K: Kernel, const ROWS: usize, T1: CodeUnit, T2: CodeUnit>(
+    short: &[T1],
+    long: &[T2],
+) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    if K::Isa::X86_64_V2 {
+        // SAFETY: the CPU runs `K::Isa` (see `Isa`).
+        return unsafe {
+            kernels::x86_64::v2::hyrro_multiword_direct::<K, ROWS, T1, T2>(short, long)
+        };
+    }
+    hyrro_multiword_direct_body::<K, ROWS, T1, T2>(short, long)
+}
+
+/// The body of [`hyrro_multiword_direct`].
+#[inline(always)]
+fn hyrro_multiword_direct_body<K: Kernel, const ROWS: usize, T1: CodeUnit, T2: CodeUnit>(
     short: &[T1],
     long: &[T2],
 ) -> usize {
@@ -1253,9 +1413,21 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
     ///
     /// Kept out of line: inlined into the large entry functions, the block
     /// loop reloads the `pv`, `mv` and peq pointers from the stack on x86-64
-    /// and loses the branch around the score update on AArch64.
+    /// and loses the branch around the score update on AArch64.  Each copy
+    /// `X` of the hot path compiles its own (see [`Isa`]).
     #[inline(never)]
-    fn banded(&self, t: usize, pv: &mut [u64], mv: &mut [u64]) -> Result<usize, usize> {
+    fn banded<X: Isa>(&self, t: usize, pv: &mut [u64], mv: &mut [u64]) -> Result<usize, usize> {
+        #[cfg(target_arch = "x86_64")]
+        if X::X86_64_V2 {
+            // SAFETY: the CPU runs `X` (see `Isa`).
+            return unsafe { kernels::x86_64::v2::banded(self, t, pv, mv) };
+        }
+        self.banded_body(t, pv, mv)
+    }
+
+    /// The body of [`Self::banded`].
+    #[inline(always)]
+    fn banded_body(&self, t: usize, pv: &mut [u64], mv: &mut [u64]) -> Result<usize, usize> {
         let (m, n, w) = (self.m, self.n, self.w);
         debug_assert!(n >= m);
         debug_assert!(t >= n - m);
@@ -1336,8 +1508,16 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
 
     /// Bands of growing width before the full matrix.  Each pass aborts as
     /// soon as it can no longer prove a result, so a miss on dissimilar
-    /// strings costs a few percent of the full kernel.
-    fn run(&self) -> usize {
+    /// strings costs a few percent of the full kernel.  The bands run in
+    /// the copy `X` of the hot path.
+    fn run<X: Isa>(&self) -> usize {
+        self.run_body::<X>()
+    }
+
+    /// The body of [`Self::run`], which the copies other than [`Baseline`]
+    /// inline (see [`Lev::large`]).
+    #[inline(always)]
+    fn run_body<X: Isa>(&self) -> usize {
         let mut t = (self.n - self.m + 32).max(64);
         if band_blocks(t) * 3 > self.w {
             return kernels::full(self);
@@ -1346,7 +1526,7 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
         let ctx = self.with_bases(&bases);
         let (mut pv, mut mv) = (vec![0u64; self.w], vec![0u64; self.w]);
         while band_blocks(t) * 3 <= self.w {
-            match ctx.banded(t, &mut pv, &mut mv) {
+            match ctx.banded::<X>(t, &mut pv, &mut mv) {
                 Ok(d) => return d,
                 Err(j) => t = next_band(t, j, self.n),
             }
@@ -1414,11 +1594,11 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
     }
 
     /// LCS length via bands of growing width, like [`Self::run`].
-    fn lcs_run(&self) -> usize {
+    fn lcs_run<X: Isa>(&self) -> usize {
         let slack = self.n - self.m;
         let mut t = 64;
         if lcs_band_words(slack, t) * 3 > self.w {
-            return kernels::lcs_full(self);
+            return kernels::lcs_full::<X, _>(self);
         }
         let bases: Vec<usize> = (0..self.n).map(&self.base_of).collect();
         let ctx = self.with_bases(&bases);
@@ -1429,7 +1609,7 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
                 Err(j) => t = next_band(t, j, self.n),
             }
         }
-        kernels::lcs_full(&ctx)
+        kernels::lcs_full::<X, _>(&ctx)
     }
 }
 
@@ -1457,8 +1637,24 @@ fn scratch<'a, const N: usize>(
 }
 
 /// Multi-word entry point for UCS-2/4 and mixed kinds: the peq rows are
-/// indexed through an open-addressing hash of the pattern alphabet.
+/// indexed through an open-addressing hash of the pattern alphabet.  Each
+/// copy of the hot path compiles its own (see [`Isa`]).
+#[inline(never)]
 fn hyrro_multiword_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2]) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    if K::Isa::X86_64_V2 {
+        // SAFETY: the CPU runs `K::Isa` (see `Isa`).
+        return unsafe { kernels::x86_64::v2::hyrro_multiword_hash::<K, T1, T2>(short, long) };
+    }
+    hyrro_multiword_hash_body::<K, T1, T2>(short, long)
+}
+
+/// The body of [`hyrro_multiword_hash`].
+#[inline(always)]
+fn hyrro_multiword_hash_body<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
+    short: &[T1],
+    long: &[T2],
+) -> usize {
     debug_assert!(short.len() > 64);
     let m = short.len();
     let w = m.div_ceil(64);
@@ -1647,7 +1843,7 @@ mod tests {
                             let ac: Vec<char> = a.iter().map(|&c| c as char).collect();
                             let bc: Vec<char> = b.iter().map(|&c| c as char).collect();
                             assert_eq!(
-                                mbleven(&a, &b, ub),
+                                mbleven::<Baseline, _, _>(&a, &b, ub),
                                 naive(&ac, &bc),
                                 "({a:?}, {b:?}, ub={ub})"
                             );

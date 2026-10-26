@@ -5,7 +5,7 @@ use super::aarch64::{self, apple, neoverse};
 use super::x86_64::bmi1;
 use super::{myers_step, portable, EDGE_ROW0};
 use crate::tests::{lcg, mutate, naive, naive_indel, rand_string};
-use crate::LargeCtx;
+use crate::{compute_sorted, compute_sorted_mixed, compute_u8, Baseline, Isa, LargeCtx, Lcs, Lev};
 
 /// The and-not form must agree with Hyyrö's form and the oracle on every
 /// target, not only where it is selected: on real pairs for every width,
@@ -114,7 +114,7 @@ fn large_kernels_match_oracle() {
         let msg = format!("m={} n={}", s.len(), l.len());
         assert_eq!(aarch64::full(&ctx), d, "aarch64::full {msg}");
         assert_eq!(portable::full(&ctx), d, "portable::full {msg}");
-        assert_eq!(ctx.run(), d, "run {msg}");
+        assert_eq!(ctx.run::<Baseline>(), d, "run {msg}");
         assert_eq!(aarch64::lcs_full(&ctx), llcs, "aarch64::lcs_full {msg}");
         assert_eq!(portable::lcs_full(&ctx), llcs, "portable::lcs_full {msg}");
         #[cfg(target_arch = "x86_64")]
@@ -123,7 +123,7 @@ fn large_kernels_match_oracle() {
             let l = unsafe { bmi1::lcs_full(&ctx) };
             assert_eq!(l, llcs, "bmi1::lcs_full {msg}");
         }
-        assert_eq!(ctx.lcs_run(), llcs, "lcs_run {msg}");
+        assert_eq!(ctx.lcs_run::<Baseline>(), llcs, "lcs_run {msg}");
     }
 }
 
@@ -239,5 +239,122 @@ fn myers_step_matches_portable() {
         assert_eq!(neoverse::myers_step(eq, vp, vn), expected, "neoverse");
         #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
         assert_eq!(apple::myers_step(eq, vp, vn), expected, "apple");
+    }
+}
+
+/// The pipeline of copy `X` of the hot path on every string kind: the
+/// Levenshtein and indel distances of `a` and `b` (`a` no longer), as
+/// UCS-1 (pure ASCII and Latin-1 tables), UCS-2, UCS-4 and mixed kinds where
+/// the code points fit.
+fn copy_metrics<X: Isa>(a: &[char], b: &[char]) -> Vec<(usize, usize)> {
+    let max = a.iter().chain(b).map(|&c| c as u32).max().unwrap_or(0);
+    let (u8a, u8b): (Vec<u8>, Vec<u8>) = (
+        a.iter().map(|&c| c as u8).collect(),
+        b.iter().map(|&c| c as u8).collect(),
+    );
+    let (u16a, u16b): (Vec<u16>, Vec<u16>) = (
+        a.iter().map(|&c| c as u16).collect(),
+        b.iter().map(|&c| c as u16).collect(),
+    );
+    let (u32a, u32b): (Vec<u32>, Vec<u32>) = (
+        a.iter().map(|&c| c as u32).collect(),
+        b.iter().map(|&c| c as u32).collect(),
+    );
+    let mut out = Vec::new();
+    if max < 0x80 {
+        out.push((
+            compute_u8::<Lev<X>, true>(&u8a, &u8b),
+            compute_u8::<Lcs<X>, true>(&u8a, &u8b),
+        ));
+    }
+    if max < 0x100 {
+        out.push((
+            compute_u8::<Lev<X>, false>(&u8a, &u8b),
+            compute_u8::<Lcs<X>, false>(&u8a, &u8b),
+        ));
+        out.push((
+            compute_sorted_mixed::<Lev<X>, _, _>(&u8a, &u32b),
+            compute_sorted_mixed::<Lcs<X>, _, _>(&u8a, &u32b),
+        ));
+        out.push((
+            compute_sorted_mixed::<Lev<X>, _, _>(&u16a, &u8b),
+            compute_sorted_mixed::<Lcs<X>, _, _>(&u16a, &u8b),
+        ));
+    }
+    if max < 0x10000 {
+        out.push((
+            compute_sorted::<Lev<X>, _>(&u16a, &u16b),
+            compute_sorted::<Lcs<X>, _>(&u16a, &u16b),
+        ));
+        out.push((
+            compute_sorted_mixed::<Lev<X>, _, _>(&u16a, &u32b),
+            compute_sorted_mixed::<Lcs<X>, _, _>(&u16a, &u32b),
+        ));
+    }
+    out.push((
+        compute_sorted::<Lev<X>, _>(&u32a, &u32b),
+        compute_sorted::<Lcs<X>, _>(&u32a, &u32b),
+    ));
+    out
+}
+
+/// Both copies of the hot path must agree with the oracle on every path of
+/// the pipeline (tiny patterns, mbleven, one word, two to eight words, bands
+/// and full matrices beyond), every string kind and both metrics.  The tests
+/// build for the x86-64-v1 ISA (`.cargo/config.toml`), so the `Baseline`
+/// copy, which pre-x86-64-v2 CPUs run, is tested on every CPU; the
+/// x86-64-v2 copy runs where the CPU has its features.
+#[test]
+fn copies_match_oracle() {
+    let mut state = 0xC0B1_E5C0_1234_5678_u64;
+    let alphabets: [&[char]; 3] = [
+        &['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'],
+        &['a', 'é', 'ü', 'ø', 'å', 'ß'],
+        &['日', '本', 'a', '語', '😀', 'あ'],
+    ];
+    for alpha in alphabets {
+        for &(m, edits) in &[
+            (5usize, 2usize),
+            (12, 1),
+            (12, 9),
+            (40, 3),
+            (63, 20),
+            (100, 2),
+            (200, 40),
+            (300, 300),
+            (500, 7),
+            (700, 10),
+            (700, 700),
+        ] {
+            let a: Vec<char> = (0..m)
+                .map(|_| alpha[lcg(&mut state) % alpha.len()])
+                .collect();
+            let mut b = a.clone();
+            for _ in 0..edits {
+                let i = lcg(&mut state) % b.len();
+                match lcg(&mut state) % 3 {
+                    0 => b[i] = alpha[lcg(&mut state) % alpha.len()],
+                    1 => b.insert(i, alpha[lcg(&mut state) % alpha.len()]),
+                    _ => {
+                        b.remove(i);
+                    }
+                }
+            }
+            let (s, l) = if a.len() <= b.len() {
+                (&a, &b)
+            } else {
+                (&b, &a)
+            };
+            let expected = (naive(s, l), naive_indel(s, l));
+            for got in copy_metrics::<Baseline>(s, l) {
+                assert_eq!(got, expected, "Baseline m={} n={}", s.len(), l.len());
+            }
+            #[cfg(target_arch = "x86_64")]
+            if super::x86_64::v2::detected() {
+                for got in copy_metrics::<super::x86_64::v2::V2>(s, l) {
+                    assert_eq!(got, expected, "V2 m={} n={}", s.len(), l.len());
+                }
+            }
+        }
     }
 }

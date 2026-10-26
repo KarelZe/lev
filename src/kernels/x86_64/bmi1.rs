@@ -1,22 +1,21 @@
-//! Kernels for x86-64 CPUs with BMI1 and POPCNT (every x86-64 CPU since
-//! 2013), selected by runtime feature detection.  The module is named after
-//! BMI1, the feature that defines the and-not form of `multiword` (`andn`);
-//! POPCNT only turns the final scores into hardware popcounts.  On the
-//! x86-64-v2 builds from `.cargo/config.toml`,
-//! `is_x86_feature_detected!("popcnt")` folds to `true` at compile time,
-//! since std checks `cfg!(target_feature)` first; only the BMI1 check is
-//! left at run time.
+//! Kernels for x86-64 CPUs with BMI1 (every x86-64 CPU since 2013, all of
+//! them with the x86-64-v2 features), selected by runtime feature detection
+//! in the x86-64-v2 copy of the hot path ([`super::v2`]).  The module is
+//! named after BMI1, the feature that defines the and-not form of
+//! `multiword` (`andn`).  The forms are compiled with the x86-64-v2
+//! features too, as the copy that calls them is: POPCNT turns the final
+//! scores into hardware popcounts, and SSE4.1 changes the code that loads
+//! the rows.
 
 use crate::kernels::delta;
 #[cfg(target_arch = "x86_64")]
 use crate::{lcs_multiword_kernel, LargeCtx};
 
-/// [`multiword_andn`] compiled with `bmi1` and `popcnt`, which run each
-/// `!a & b` as one `andn`.  The kernel is throughput-bound from two words
-/// on, so the fewer instructions (15-18% per column at `W` = 2 and 4)
-/// translate into time.
+/// [`multiword_andn`] compiled with BMI1, which runs each `!a & b` as one
+/// `andn`.  The kernel is throughput-bound from two words on, so the fewer
+/// instructions (15-18% per column at `W` = 2 and 4) translate into time.
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "bmi1,popcnt")]
+#[target_feature(enable = "bmi1,popcnt,sse3,ssse3,sse4.1,sse4.2")]
 pub(crate) unsafe fn multiword<const W: usize, I: Iterator<Item = [u64; W]>>(
     m: usize,
     pm_iter: I,
@@ -70,9 +69,9 @@ const LCS_STRIP: usize = 4;
 /// register on each word (`setb`, `bt`), a serial chain through the whole
 /// column; a strip runs its words as one `adc` chain.  The LCS step has no
 /// negation for BMI1 to fold, so the strips pay on their own; they share the
-/// module and its detection with [`multiword`] for POPCNT.
+/// module and its detection with [`multiword`].
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "bmi1,popcnt")]
+#[target_feature(enable = "bmi1,popcnt,sse3,ssse3,sse4.1,sse4.2")]
 pub(crate) unsafe fn lcs_full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {
     let mut carries = vec![0u8; ctx.n];
     let mut lcs = 0;
