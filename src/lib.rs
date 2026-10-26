@@ -843,15 +843,33 @@ fn mbleven_in<X: Isa, T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2], ub:
     mbleven::<X, T1, T2>(short, long, ub)
 }
 
+/// Common prefix of two code-unit slices.  Same-kind slices compare words via
+/// [`common_prefix_bytes`]; mixed-kind slices compare code units linearly.
+#[inline(always)]
+fn common_prefix<T1: CodeUnit, T2: CodeUnit>(a: &[T1], b: &[T2]) -> usize {
+    if std::mem::size_of::<T1>() == std::mem::size_of::<T2>() {
+        let size = std::mem::size_of::<T1>();
+        common_prefix_bytes(as_bytes(a), as_bytes(b)) / size
+    } else {
+        let n = a.len().min(b.len());
+        let mut i = 0;
+        while i < n && a[i].as_u64() == b[i].as_u64() {
+            i += 1;
+        }
+        i
+    }
+}
+
 /// Exact distance when an upper bound `ub` in `1..=3` is known (mbleven,
 /// Hyyrö 2018 formulation as used by rapidfuzz): try every candidate edit-op
 /// sequence of cost <= `ub` and take the cheapest that aligns the strings.
 ///
 /// Each sequence packs ops two bits per op from the LSB: `0b01` advances only
 /// `long` (deletion from the longer string), `0b10` advances only `short`
-/// (insertion), `0b11` advances both (substitution).  O(ub * n) worst case,
-/// no peq table, no allocation.  Instantiated per copy `X` of the hot path
-/// and called through [`mbleven_in`].
+/// (insertion), `0b11` advances both (substitution).  Identical matching runs
+/// are jumped via [`common_prefix`].  O(ub * n) worst case, no peq table, no
+/// allocation.  Instantiated per copy `X` of the hot path and called through
+/// [`mbleven_in`].
 fn mbleven<X: Isa, T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2], ub: usize) -> usize {
     if ub == 0 {
         return 0;
@@ -878,29 +896,26 @@ fn mbleven<X: Isa, T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2], ub: us
     for &seq in SEQS[row] {
         let mut ops = seq;
         let (mut sp, mut lp, mut cost) = (0usize, 0usize, 0usize);
-        while sp < short.len() && lp < long.len() {
-            // SAFETY: sp/lp are bounded by the loop condition.
-            let (cs, cl) = unsafe {
-                (
-                    short.get_unchecked(sp).as_u64(),
-                    long.get_unchecked(lp).as_u64(),
-                )
-            };
-            if cs != cl {
-                cost += 1;
-                if ops == 0 {
-                    break;
-                }
-                lp += (ops & 1) as usize;
-                sp += ((ops >> 1) & 1) as usize;
-                ops >>= 2;
-            } else {
-                sp += 1;
-                lp += 1;
+        loop {
+            let matched = common_prefix(&short[sp..], &long[lp..]);
+            sp += matched;
+            lp += matched;
+            if sp == short.len() || lp == long.len() {
+                break;
             }
+            cost += 1;
+            if ops == 0 {
+                break;
+            }
+            lp += (ops & 1) as usize;
+            sp += ((ops >> 1) & 1) as usize;
+            ops >>= 2;
         }
         cost += (short.len() - sp) + (long.len() - lp);
         best = best.min(cost);
+        if best == diff {
+            return diff;
+        }
     }
     best
 }
