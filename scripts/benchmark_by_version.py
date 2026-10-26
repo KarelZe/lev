@@ -384,7 +384,7 @@ def _render_line_chart(
     (line,) = plt.plot(x0, means, label="average", marker="o", markersize=4)
     plt.fill_between(x0, lower, upper, alpha=0.2, color=line.get_color())
 
-    _, tick_labels = plt.xticks(x0, version_labels)
+    _, tick_labels = plt.xticks(x0, version_labels, rotation=90, ha="right", va="center")
     for tick in tick_labels:
         if is_unreleased_version(tick.get_text()):
             tick.set_fontweight("bold")
@@ -426,7 +426,7 @@ def _render_bar_chart(
     plt.grid(True, axis="y", ls="--", alpha=0.5, color=grid_color, zorder=0)
     plt.grid(False, axis="x")
 
-    _, tick_labels = plt.xticks(x0, version_labels)
+    _, tick_labels = plt.xticks(x0, version_labels, rotation=90, ha="right", va="center")
     for tick in tick_labels:
         if is_unreleased_version(tick.get_text()):
             tick.set_fontweight("bold")
