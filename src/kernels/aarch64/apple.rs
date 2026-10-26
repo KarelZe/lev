@@ -4,10 +4,12 @@
 
 use crate::kernels::{delta, EDGE_ROW0};
 
-/// [`crate::kernels::portable::myers_step`] with its schedule pinned.  On
-/// Apple cores a logical op with a shifted operand has twice the latency of
-/// a plain one, yet LLVM folds the shifts into the ops on the chain and
-/// reassociates the `| 1` back onto it (10 cycles instead of 7 per column).
+/// [`crate::kernels::portable::myers_step`] with its schedule pinned.
+///
+/// Uses the identity `ph_s = !((X << 1) & !(vn << 1))` and
+/// `!(xv | ph_s) = (X << 1) & !(xv | (vn << 1))` to remove the `| 1` constant
+/// off the critical path, executing in 15 unshifted single-cycle ALU instructions
+/// across 5-6 cycles per column without shifted-operand penalties on Apple M cores.
 #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
 #[inline(always)]
 pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
@@ -17,30 +19,35 @@ pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
     unsafe {
         std::arch::asm!(
             "and  {sum}, {eq}, {vp}",
-            "orr  {t}, {eq}, {vp}",
+            "orr  {u}, {eq}, {vp}",
             "orr  {xv}, {eq}, {vn}",
+            "lsl  {vns}, {vn}, #1",
             "add  {sum}, {sum}, {vp}",
-            "orr  {t}, {t}, {sum}",
-            "orn  {ph}, {vn}, {t}",
+            "orr  {m}, {xv}, {vns}",
+            "orr  {x}, {u}, {sum}",
             "orn  {t}, {eq}, {sum}",
+            "lsl  {xs}, {x}, #1",
             "and  {mh}, {t}, {vp}",
-            "orr  {xv1}, {xv}, #1",
-            "lsl  {phs}, {ph}, #1",
-            "lsl  {vp}, {mh}, #1",
-            "orr  {t}, {xv1}, {phs}",
-            "orn  {vp}, {vp}, {t}",
-            "orr  {phs}, {phs}, #1",
-            "and  {vn}, {phs}, {xv}",
+            "lsl  {mhs}, {mh}, #1",
+            "bic  {s}, {xs}, {vns}",
+            "bic  {a}, {xs}, {m}",
+            "orr  {vp}, {mhs}, {a}",
+            "bic  {vn}, {xv}, {s}",
             eq = in(reg) eq,
             vp = inout(reg) vp,
             vn = inout(reg) vn,
             sum = out(reg) _,
-            t = out(reg) _,
+            u = out(reg) _,
             xv = out(reg) _,
-            xv1 = out(reg) _,
-            phs = out(reg) _,
-            ph = out(reg) _,
+            vns = out(reg) _,
+            m = out(reg) _,
+            x = out(reg) _,
+            t = out(reg) _,
+            xs = out(reg) _,
             mh = out(reg) _,
+            mhs = out(reg) _,
+            s = out(reg) _,
+            a = out(reg) _,
             options(pure, nomem, nostack, preserves_flags),
         );
     }
