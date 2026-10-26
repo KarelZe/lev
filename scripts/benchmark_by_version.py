@@ -18,7 +18,7 @@ Examples:
     uv run scripts/benchmark_by_version.py
 
     # Select specific versions via CLI:
-    uv run scripts/benchmark_by_version.py --versions 0.4.0 0.4.1 0.5.0 unreleased
+    uv run scripts/benchmark_by_version.py --versions 0.4.0 0.4.1 0.5.0 main
 
     # Save JSON results to a custom file:
     uv run scripts/benchmark_by_version.py --save baselines/versions.json
@@ -64,7 +64,7 @@ DEFAULT_VERSIONS: tuple[str, ...] = (
     "0.4.0",
     "0.4.1",
     "0.5.0",
-    "unreleased",
+    "main",
 )
 
 # Natural-length, real-world prose with realistic typos (identical to benchmark.py).
@@ -83,7 +83,7 @@ REPETITIONS_DEFAULT = 5_000
 REPEAT_DEFAULT = 10
 WARMUP_DEFAULT = 1_000
 
-UNRELEASED_ALIASES = frozenset({"unreleased", "current", "dev", "head", "local", "."})
+UNRELEASED_ALIASES = frozenset({"main", "unreleased", "current", "dev", "head", "local", "."})
 SEMVER_REGEX = re.compile(r"^\d+(\.\d+)*$")
 
 CHILD_RUNNER_CODE = """
@@ -384,7 +384,7 @@ def _render_line_chart(
     (line,) = plt.plot(x0, means, label="average", marker="o", markersize=4)
     plt.fill_between(x0, lower, upper, alpha=0.2, color=line.get_color())
 
-    _, tick_labels = plt.xticks(x0, version_labels, rotation=30, ha="right")
+    _, tick_labels = plt.xticks(x0, version_labels)
     for tick in tick_labels:
         if is_unreleased_version(tick.get_text()):
             tick.set_fontweight("bold")
@@ -426,7 +426,7 @@ def _render_bar_chart(
     plt.grid(True, axis="y", ls="--", alpha=0.5, color=grid_color, zorder=0)
     plt.grid(False, axis="x")
 
-    _, tick_labels = plt.xticks(x0, version_labels, rotation=30, ha="right")
+    _, tick_labels = plt.xticks(x0, version_labels)
     for tick in tick_labels:
         if is_unreleased_version(tick.get_text()):
             tick.set_fontweight("bold")
@@ -475,6 +475,7 @@ def plot_versions(
     results: dict[str, dict] = payload["results"]
     meta: dict = payload["meta"]
     labels_versions = list(results.keys())
+    version_display_labels = ["main" if is_unreleased_version(v) else v for v in labels_versions]
     x0 = np.arange(len(labels_versions))
 
     means = np.array([results[v]["mean_us"] for v in labels_versions])
@@ -496,9 +497,9 @@ def plot_versions(
         with plt.style.context(style):
             plt.figure(figsize=(10.5, 5.0))
             if chart_type == "line":
-                _render_line_chart(x0, means, mins, maxs, labels_versions, subtitle)
+                _render_line_chart(x0, means, mins, maxs, version_display_labels, subtitle)
             else:
-                _render_bar_chart(x0, means, labels_versions, results, theme, subtitle)
+                _render_bar_chart(x0, means, version_display_labels, results, theme, subtitle)
 
             for fmt in formats:
                 out_path = safe_dir / f"benchmark_by_version_{theme}.{fmt}"
@@ -528,7 +529,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Versions of lev to benchmark (space- or comma-separated, e.g. "
-            "'0.4.0 0.4.1 0.5.0 unreleased'). Defaults to DEFAULT_VERSIONS."
+            "'0.4.0 0.4.1 0.5.0 main'). Defaults to DEFAULT_VERSIONS."
         ),
     )
     p.add_argument(
