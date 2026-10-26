@@ -503,7 +503,7 @@ fn strip_affix_mixed<'a, T1: CodeUnit, T2: CodeUnit>(
 
 /// Reinterpret a code-unit slice as raw bytes (sound: u8/u16/u32 are plain data).
 #[inline(always)]
-fn as_bytes<T: CodeUnit>(s: &[T]) -> &[u8] {
+pub(crate) fn as_bytes<T: CodeUnit>(s: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<u8>(), std::mem::size_of_val(s)) }
 }
 
@@ -721,7 +721,7 @@ fn compute_u8<K: Kernel, const ASCII: bool>(a: &[u8], b: &[u8]) -> usize {
         return hyrro_64_tiny::<K, _, _>(a, b);
     }
     if K::MBLEVEN {
-        if let Some(ub) = small_ub(a, b) {
+        if let Some(ub) = small_ub::<K::Isa, _>(a, b) {
             return mbleven_in::<K::Isa, _, _>(a, b, ub);
         }
     }
@@ -745,23 +745,35 @@ fn compute_u8<K: Kernel, const ASCII: bool>(a: &[u8], b: &[u8]) -> usize {
 // ---------------------------------------------------------------------------
 
 /// Largest internally-derived upper bound handled by [`mbleven`].
-const MBLEVEN_MAX: usize = 3;
+pub(crate) const MBLEVEN_MAX: usize = 3;
 
 /// Longest pattern eligible for the mbleven gate.  Bounds the gate's
 /// hamming scan; beyond this the banded kernels already handle
 /// near-identical strings well.
-const MBLEVEN_MAX_LEN: usize = 512;
+pub(crate) const MBLEVEN_MAX_LEN: usize = 512;
 
 /// Gate for the mbleven fast path (same-kind slices): `Some(ub)` when
 /// `length difference + aligned mismatches <= MBLEVEN_MAX`.
 ///
 /// Adapted from SIMD string equality & mismatch scanning techniques (such as
-/// simdjson / rapidfuzz vector classification): compares chunks in 16-byte
-/// SIMD vector blocks on targets supporting NEON or SSE2, falling back to 8-byte
-/// scalar blocks. Only blocks containing differences inspect the mismatch count,
-/// and aborts as soon as `ub > MBLEVEN_MAX`.
+/// simdjson / rapidfuzz vector classification): compares chunks in 32-byte
+/// AVX2 blocks on x86-64 when available, or 16-byte SIMD vector blocks on targets
+/// supporting NEON or SSE2, falling back to 8-byte scalar blocks. Only blocks
+/// containing differences inspect the mismatch count, and aborts as soon as
+/// `ub > MBLEVEN_MAX`.
 #[inline(always)]
-fn small_ub<T: CodeUnit>(short: &[T], long: &[T]) -> Option<usize> {
+fn small_ub<X: Isa, T: CodeUnit>(short: &[T], long: &[T]) -> Option<usize> {
+    #[cfg(target_arch = "x86_64")]
+    if X::X86_64_V2 {
+        // SAFETY: the CPU runs `X` (see `Isa`).
+        return unsafe { kernels::x86_64::v2::small_ub::<T>(short, long) };
+    }
+    small_ub_body::<T>(short, long)
+}
+
+/// The body of [`small_ub`] for baseline ISAs.
+#[inline(always)]
+pub(crate) fn small_ub_body<T: CodeUnit>(short: &[T], long: &[T]) -> Option<usize> {
     debug_assert!(short.len() <= long.len());
     let mut ub = long.len() - short.len();
     if ub > MBLEVEN_MAX || short.len() > MBLEVEN_MAX_LEN {
@@ -1020,7 +1032,7 @@ fn compute_sorted<K: Kernel, T: CodeUnit>(a: &[T], b: &[T]) -> usize {
         return hyrro_64_tiny::<K, _, _>(a, b);
     }
     if K::MBLEVEN {
-        if let Some(ub) = small_ub(a, b) {
+        if let Some(ub) = small_ub::<K::Isa, _>(a, b) {
             return mbleven_in::<K::Isa, _, _>(a, b, ub);
         }
     }
@@ -1942,7 +1954,7 @@ mod tests {
             for lb in la..=11usize {
                 for a in strings(la) {
                     for b in strings(lb) {
-                        if let Some(ub) = small_ub(&a, &b) {
+                        if let Some(ub) = small_ub::<Baseline, _>(&a, &b) {
                             if ub == 0 {
                                 continue;
                             }

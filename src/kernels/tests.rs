@@ -358,3 +358,82 @@ fn copies_match_oracle() {
         }
     }
 }
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn small_ub_v2_matches_baseline() {
+    if super::x86_64::v2::detected() {
+        use super::x86_64::v2::V2;
+        use crate::small_ub;
+
+        for len in [0, 1, 7, 8, 15, 16, 31, 32, 33, 63, 64, 65, 100, 128, 256] {
+            let a: Vec<u8> = (0..len).map(|i| b'a' + (i % 26) as u8).collect();
+            let mut b = a.clone();
+            assert_eq!(
+                small_ub::<V2, _>(&a, &b),
+                small_ub::<Baseline, _>(&a, &b),
+                "identical len={len}"
+            );
+
+            if len > 0 {
+                // 1 mismatch at start, middle, end
+                for pos in [0, len / 2, len - 1] {
+                    b[pos] ^= 1;
+                    assert_eq!(
+                        small_ub::<V2, _>(&a, &b),
+                        small_ub::<Baseline, _>(&a, &b),
+                        "1 diff len={len} pos={pos}"
+                    );
+                    b[pos] ^= 1;
+                }
+            }
+
+            if len >= 3 {
+                // 3 mismatches
+                let (p0, p1, p2) = (0, len / 2, len - 1);
+                b[p0] ^= 1;
+                b[p1] ^= 1;
+                b[p2] ^= 1;
+                assert_eq!(
+                    small_ub::<V2, _>(&a, &b),
+                    small_ub::<Baseline, _>(&a, &b),
+                    "3 diffs len={len}"
+                );
+                // 4 mismatches (exceeds MBLEVEN_MAX)
+                if len >= 4 {
+                    let p3 = len / 4;
+                    b[p3] ^= 1;
+                    assert_eq!(small_ub::<V2, _>(&a, &b), None, "4 diffs len={len}");
+                    assert_eq!(small_ub::<V2, _>(&a, &b), small_ub::<Baseline, _>(&a, &b),);
+                    b[p3] ^= 1;
+                }
+                b[p0] ^= 1;
+                b[p1] ^= 1;
+                b[p2] ^= 1;
+            }
+
+            // Also test u16 and u32
+            let a16: Vec<u16> = a.iter().map(|&x| x as u16 + 0x300).collect();
+            let mut b16 = a16.clone();
+            if len > 0 {
+                b16[len - 1] += 1;
+                assert_eq!(
+                    small_ub::<V2, _>(&a16, &b16),
+                    small_ub::<Baseline, _>(&a16, &b16),
+                    "u16 len={len}"
+                );
+            }
+
+            let a32: Vec<u32> = a.iter().map(|&x| x as u32 + 0x10000).collect();
+            let mut b32 = a32.clone();
+            if len > 0 {
+                b32[len - 1] += 1;
+                assert_eq!(
+                    small_ub::<V2, _>(&a32, &b32),
+                    small_ub::<Baseline, _>(&a32, &b32),
+                    "u32 len={len}"
+                );
+            }
+        }
+    }
+}
