@@ -2,7 +2,7 @@
 //! on every target, not only on the one that selects it.
 
 use super::aarch64::{self, apple, neoverse};
-use super::x86_64::bmi1;
+use super::x86_64::{self, bmi1};
 use super::{myers_step, portable, EDGE_ROW0};
 use crate::tests::{lcg, mutate, naive, naive_indel, rand_string};
 use crate::{compute_sorted, compute_sorted_mixed, compute_u8, Baseline, Isa, LargeCtx, Lcs, Lev};
@@ -237,6 +237,12 @@ fn myers_step_matches_portable() {
         let expected = portable::myers_step(eq, vp, vn);
         assert_eq!(myers_step(eq, vp, vn), expected);
         assert_eq!(neoverse::myers_step(eq, vp, vn), expected, "neoverse");
+        assert_eq!(bmi1::myers_step_andn(eq, vp, vn), expected, "bmi1 andn");
+        assert_eq!(x86_64::myers_step(eq, vp, vn), expected, "x86_64");
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("bmi1") {
+            assert_eq!(unsafe { bmi1::myers_step(eq, vp, vn) }, expected, "bmi1");
+        }
         #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
         assert_eq!(apple::myers_step(eq, vp, vn), expected, "apple");
     }

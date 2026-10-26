@@ -6,7 +6,7 @@ use crate::{lcs_len, lcs_step, LargeCtx};
 
 /// One column of the single-word Levenshtein recurrence: returns the new
 /// `(vp, vn)`.
-#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+#[cfg_attr(any(target_arch = "aarch64", target_arch = "x86_64"), allow(dead_code))]
 #[inline(always)]
 pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
     let sum = (eq & vp).wrapping_add(vp);

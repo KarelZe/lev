@@ -100,15 +100,17 @@ const EDGE_ROW0: u8 = 0b010;
 /// [`crate::hyrro_inner`]): returns the new `(vp, vn)`.  Selects
 /// [`aarch64::apple::myers_step`] on Apple targets,
 /// [`aarch64::neoverse::myers_step`] on other AArch64 targets (by OS
-/// vendor, not by core; see *Layout*) and [`portable::myers_step`]
-/// elsewhere.
+/// vendor, not by core; see *Layout*), [`x86_64::myers_step`] on x86-64,
+/// and [`portable::myers_step`] elsewhere.
 #[inline(always)]
 pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
     #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
     return aarch64::apple::myers_step(eq, vp, vn);
     #[cfg(all(target_arch = "aarch64", not(target_vendor = "apple")))]
     return aarch64::neoverse::myers_step(eq, vp, vn);
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    return x86_64::myers_step(eq, vp, vn);
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     portable::myers_step(eq, vp, vn)
 }
 
