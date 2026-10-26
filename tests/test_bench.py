@@ -129,7 +129,21 @@ _SHORT = [
 
 _MEDIUM = [
     _pair(_ASCII, 100, 25, seed=20, id="ascii-100"),
+    pytest.param(
+        "fnwnujp gzpzqfqqhzaalsncezyhhwbnxyntobkrpwdulaex cdzaofrxkmpefvbp hcyggvzvyysxcdrpr mgkernjloqmkpmia cfwwpapcrtxqhstkrtd",
+        "fnwnujp gzpzqfqXhzaalsncezyhhwbnxyntobkrpwdulaex cdzaofrxkmpefvbp hcyggvzvyysxcdrpr mZkernjloqmkpmia cfwwpapcrtxqhstkrtd",
+        id="ascii-120-sim2",
+    ),
     _pair(_ASCII, 300, 75, seed=22, id="ascii-300"),
+    pytest.param(
+        "q" * 20
+        + "fnwnujp gzpzqfqXhzaalsncezyhhwbnxyntobkrpwdulaex cdzaofrxkmpefvbp hcyggvzvyysxcdrpr mZkernjloqmkpmia cfwwpapcrtxqhstkrtd"
+        + "q" * 20,
+        "q" * 20
+        + "fnwnujp gzpzqfqqhzaalsncezyhhwbnxyntobkrpwdulaex cdzaofrxkmpefvbp hcyggvzvyysxcdrpr mgkernjloqmkpmia cfwwpapcrtxqhstkrtd"
+        + "q" * 20,
+        id="ascii-160-sim2",
+    ),
     _pair(_LATIN1, 100, 25, seed=24, id="latin1-100"),
     _pair(_UCS2, 100, 25, seed=26, id="ucs2-100"),
     _pair(_UCS2, 300, None, seed=28, id="ucs2-300-dis"),
