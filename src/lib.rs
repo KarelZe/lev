@@ -503,7 +503,7 @@ fn strip_affix_mixed<'a, T1: CodeUnit, T2: CodeUnit>(
 
 /// Reinterpret a code-unit slice as raw bytes (sound: u8/u16/u32 are plain data).
 #[inline(always)]
-fn as_bytes<T: CodeUnit>(s: &[T]) -> &[u8] {
+pub(crate) fn as_bytes<T: CodeUnit>(s: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<u8>(), std::mem::size_of_val(s)) }
 }
 
@@ -721,7 +721,7 @@ fn compute_u8<K: Kernel, const ASCII: bool>(a: &[u8], b: &[u8]) -> usize {
         return hyrro_64_tiny::<K, _, _>(a, b);
     }
     if K::MBLEVEN {
-        if let Some(ub) = small_ub(a, b) {
+        if let Some(ub) = small_ub::<K::Isa, _>(a, b) {
             return mbleven_in::<K::Isa, _, _>(a, b, ub);
         }
     }
@@ -745,43 +745,139 @@ fn compute_u8<K: Kernel, const ASCII: bool>(a: &[u8], b: &[u8]) -> usize {
 // ---------------------------------------------------------------------------
 
 /// Largest internally-derived upper bound handled by [`mbleven`].
-const MBLEVEN_MAX: usize = 3;
+pub(crate) const MBLEVEN_MAX: usize = 3;
 
 /// Longest pattern eligible for the mbleven gate.  Bounds the gate's
 /// hamming scan; beyond this the banded kernels already handle
 /// near-identical strings well.
-const MBLEVEN_MAX_LEN: usize = 512;
+pub(crate) const MBLEVEN_MAX_LEN: usize = 512;
 
 /// Gate for the mbleven fast path (same-kind slices): `Some(ub)` when
 /// `length difference + aligned mismatches <= MBLEVEN_MAX`.
 ///
-/// Scans the raw bytes one u64 block at a time (element sizes divide 8, so a
-/// block always holds whole elements — same trick as
-/// [`common_prefix_bytes`]).  Clean blocks cost one XOR + branch; only blocks
-/// containing a difference are inspected per lane, and at most four such
-/// blocks are touched before aborting, so the worst case stays cheap on both
-/// early-mismatch and late-mismatch inputs.
+/// Adapted from SIMD string equality & mismatch scanning techniques (such as
+/// simdjson / rapidfuzz vector classification): compares chunks in 32-byte
+/// AVX2 blocks on x86-64 when available, or 16-byte SIMD vector blocks on targets
+/// supporting NEON or SSE2, falling back to 8-byte scalar blocks. Only blocks
+/// containing differences inspect the mismatch count, and aborts as soon as
+/// `ub > MBLEVEN_MAX`.
 #[inline(always)]
-fn small_ub<T: CodeUnit>(short: &[T], long: &[T]) -> Option<usize> {
+fn small_ub<X: Isa, T: CodeUnit>(short: &[T], long: &[T]) -> Option<usize> {
+    #[cfg(target_arch = "x86_64")]
+    if X::X86_64_V2 {
+        // SAFETY: the CPU runs `X` (see `Isa`).
+        return unsafe { kernels::x86_64::v2::small_ub::<T>(short, long) };
+    }
+    small_ub_body::<T>(short, long)
+}
+
+/// The body of [`small_ub`] for baseline ISAs.
+#[inline(always)]
+pub(crate) fn small_ub_body<T: CodeUnit>(short: &[T], long: &[T]) -> Option<usize> {
     debug_assert!(short.len() <= long.len());
     let mut ub = long.len() - short.len();
     if ub > MBLEVEN_MAX || short.len() > MBLEVEN_MAX_LEN {
         return None;
     }
     let size = std::mem::size_of::<T>();
+    let a = as_bytes(short);
+    let b = &as_bytes(long)[..a.len()];
+    let n = a.len();
+    let mut i = 0;
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        while i + 16 <= n {
+            let va = vld1q_u8(a.as_ptr().add(i));
+            let vb = vld1q_u8(b.as_ptr().add(i));
+            let eq = vceqq_u8(va, vb);
+            let neq = vmvnq_u8(eq);
+            if vmaxvq_u8(neq) != 0 {
+                let diff_lanes = match size {
+                    1 => vaddlvq_u8(vshrq_n_u8(neq, 7)) as usize,
+                    2 => {
+                        let neq16 = vmvnq_u16(vceqq_u16(
+                            vreinterpretq_u16_u8(va),
+                            vreinterpretq_u16_u8(vb),
+                        ));
+                        vaddlvq_u16(vshrq_n_u16(neq16, 15)) as usize
+                    }
+                    4 => {
+                        let neq32 = vmvnq_u32(vceqq_u32(
+                            vreinterpretq_u32_u8(va),
+                            vreinterpretq_u32_u8(vb),
+                        ));
+                        vaddlvq_u32(vshrq_n_u32(neq32, 31)) as usize
+                    }
+                    _ => unreachable!(),
+                };
+                ub += diff_lanes;
+                if ub > MBLEVEN_MAX {
+                    return None;
+                }
+            }
+            i += 16;
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use std::arch::x86_64::*;
+        while i + 16 <= n {
+            let va = _mm_loadu_si128(a.as_ptr().add(i) as *const __m128i);
+            let vb = _mm_loadu_si128(b.as_ptr().add(i) as *const __m128i);
+            match size {
+                1 => {
+                    let eq = _mm_cmpeq_epi8(va, vb);
+                    let mask = _mm_movemask_epi8(eq) as u32;
+                    let neq_mask = (!mask) & 0xFFFF;
+                    if neq_mask != 0 {
+                        ub += neq_mask.count_ones() as usize;
+                        if ub > MBLEVEN_MAX {
+                            return None;
+                        }
+                    }
+                }
+                2 => {
+                    let eq = _mm_cmpeq_epi16(va, vb);
+                    let mask = _mm_movemask_epi8(eq) as u32;
+                    let neq_mask = (!mask) & 0xFFFF;
+                    if neq_mask != 0 {
+                        ub += (neq_mask.count_ones() / 2) as usize;
+                        if ub > MBLEVEN_MAX {
+                            return None;
+                        }
+                    }
+                }
+                4 => {
+                    let eq = _mm_cmpeq_epi32(va, vb);
+                    let mask = _mm_movemask_epi8(eq) as u32;
+                    let neq_mask = (!mask) & 0xFFFF;
+                    if neq_mask != 0 {
+                        ub += (neq_mask.count_ones() / 4) as usize;
+                        if ub > MBLEVEN_MAX {
+                            return None;
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+            i += 16;
+        }
+    }
+
     let lane_bits = 8 * size;
     let lane_mask = if lane_bits >= 64 {
         u64::MAX
     } else {
         (1u64 << lane_bits) - 1
     };
-    let a = as_bytes(short);
-    let b = &as_bytes(long)[..a.len()];
 
-    let (chunks_a, rem_a) = a.as_chunks::<8>();
-    let (chunks_b, _) = b.as_chunks::<8>();
-    for (ca, cb) in chunks_a.iter().zip(chunks_b.iter()) {
-        let mut d = u64::from_le_bytes(*ca) ^ u64::from_le_bytes(*cb);
+    while i + 8 <= n {
+        let ca = a[i..i + 8].try_into().unwrap();
+        let cb = b[i..i + 8].try_into().unwrap();
+        let mut d = u64::from_le_bytes(ca) ^ u64::from_le_bytes(cb);
         while d != 0 {
             ub += 1;
             if ub > MBLEVEN_MAX {
@@ -790,8 +886,9 @@ fn small_ub<T: CodeUnit>(short: &[T], long: &[T]) -> Option<usize> {
             let lane = d.trailing_zeros() as usize / lane_bits;
             d &= !(lane_mask << (lane * lane_bits));
         }
+        i += 8;
     }
-    for e in (a.len() - rem_a.len()) / size..short.len() {
+    for e in i / size..short.len() {
         if short[e].as_u64() != long[e].as_u64() {
             ub += 1;
             if ub > MBLEVEN_MAX {
@@ -935,7 +1032,7 @@ fn compute_sorted<K: Kernel, T: CodeUnit>(a: &[T], b: &[T]) -> usize {
         return hyrro_64_tiny::<K, _, _>(a, b);
     }
     if K::MBLEVEN {
-        if let Some(ub) = small_ub(a, b) {
+        if let Some(ub) = small_ub::<K::Isa, _>(a, b) {
             return mbleven_in::<K::Isa, _, _>(a, b, ub);
         }
     }
@@ -1857,7 +1954,7 @@ mod tests {
             for lb in la..=11usize {
                 for a in strings(la) {
                     for b in strings(lb) {
-                        if let Some(ub) = small_ub(&a, &b) {
+                        if let Some(ub) = small_ub::<Baseline, _>(&a, &b) {
                             if ub == 0 {
                                 continue;
                             }

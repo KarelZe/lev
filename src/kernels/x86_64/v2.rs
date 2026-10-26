@@ -130,4 +130,147 @@ v2! {
     ) -> Result<usize, usize> {
         ctx.banded_body(t, pv, mv)
     }
+
+    /// [`crate::small_ub`] in this copy: widens to 32 bytes on AVX2 when
+    /// available, falling back to [`crate::small_ub_body`].
+    pub(crate) unsafe fn small_ub<T: CodeUnit>(short: &[T], long: &[T]) -> Option<usize> {
+        if std::is_x86_feature_detected!("avx2") {
+            small_ub_avx2::<T>(short, long)
+        } else {
+            crate::small_ub_body::<T>(short, long)
+        }
+    }
+}
+
+/// AVX2 32-byte chunk scan for [`crate::small_ub`].
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub(crate) unsafe fn small_ub_avx2<T: CodeUnit>(short: &[T], long: &[T]) -> Option<usize> {
+    use std::arch::x86_64::*;
+
+    debug_assert!(short.len() <= long.len());
+    let mut ub = long.len() - short.len();
+    if ub > crate::MBLEVEN_MAX || short.len() > crate::MBLEVEN_MAX_LEN {
+        return None;
+    }
+    let size = std::mem::size_of::<T>();
+    let a = crate::as_bytes(short);
+    let b = &crate::as_bytes(long)[..a.len()];
+    let n = a.len();
+    let mut i = 0;
+
+    while i + 32 <= n {
+        let va = _mm256_loadu_si256(a.as_ptr().add(i) as *const __m256i);
+        let vb = _mm256_loadu_si256(b.as_ptr().add(i) as *const __m256i);
+        match size {
+            1 => {
+                let eq = _mm256_cmpeq_epi8(va, vb);
+                let mask = _mm256_movemask_epi8(eq) as u32;
+                let neq_mask = !mask;
+                if neq_mask != 0 {
+                    ub += neq_mask.count_ones() as usize;
+                    if ub > crate::MBLEVEN_MAX {
+                        return None;
+                    }
+                }
+            }
+            2 => {
+                let eq = _mm256_cmpeq_epi16(va, vb);
+                let mask = _mm256_movemask_epi8(eq) as u32;
+                let neq_mask = !mask;
+                if neq_mask != 0 {
+                    ub += (neq_mask.count_ones() / 2) as usize;
+                    if ub > crate::MBLEVEN_MAX {
+                        return None;
+                    }
+                }
+            }
+            4 => {
+                let eq = _mm256_cmpeq_epi32(va, vb);
+                let mask = _mm256_movemask_epi8(eq) as u32;
+                let neq_mask = !mask;
+                if neq_mask != 0 {
+                    ub += (neq_mask.count_ones() / 4) as usize;
+                    if ub > crate::MBLEVEN_MAX {
+                        return None;
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+        i += 32;
+    }
+
+    while i + 16 <= n {
+        let va = _mm_loadu_si128(a.as_ptr().add(i) as *const __m128i);
+        let vb = _mm_loadu_si128(b.as_ptr().add(i) as *const __m128i);
+        match size {
+            1 => {
+                let eq = _mm_cmpeq_epi8(va, vb);
+                let mask = _mm_movemask_epi8(eq) as u32;
+                let neq_mask = (!mask) & 0xFFFF;
+                if neq_mask != 0 {
+                    ub += neq_mask.count_ones() as usize;
+                    if ub > crate::MBLEVEN_MAX {
+                        return None;
+                    }
+                }
+            }
+            2 => {
+                let eq = _mm_cmpeq_epi16(va, vb);
+                let mask = _mm_movemask_epi8(eq) as u32;
+                let neq_mask = (!mask) & 0xFFFF;
+                if neq_mask != 0 {
+                    ub += (neq_mask.count_ones() / 2) as usize;
+                    if ub > crate::MBLEVEN_MAX {
+                        return None;
+                    }
+                }
+            }
+            4 => {
+                let eq = _mm_cmpeq_epi32(va, vb);
+                let mask = _mm_movemask_epi8(eq) as u32;
+                let neq_mask = (!mask) & 0xFFFF;
+                if neq_mask != 0 {
+                    ub += (neq_mask.count_ones() / 4) as usize;
+                    if ub > crate::MBLEVEN_MAX {
+                        return None;
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+        i += 16;
+    }
+
+    let lane_bits = 8 * size;
+    let lane_mask = if lane_bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << lane_bits) - 1
+    };
+
+    while i + 8 <= n {
+        let ca = a[i..i + 8].try_into().unwrap();
+        let cb = b[i..i + 8].try_into().unwrap();
+        let mut d = u64::from_le_bytes(ca) ^ u64::from_le_bytes(cb);
+        while d != 0 {
+            ub += 1;
+            if ub > crate::MBLEVEN_MAX {
+                return None;
+            }
+            let lane = d.trailing_zeros() as usize / lane_bits;
+            d &= !(lane_mask << (lane * lane_bits));
+        }
+        i += 8;
+    }
+    for e in i / size..short.len() {
+        if short[e].as_u64() != long[e].as_u64() {
+            ub += 1;
+            if ub > crate::MBLEVEN_MAX {
+                return None;
+            }
+        }
+    }
+    Some(ub)
 }
