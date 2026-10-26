@@ -11,6 +11,37 @@ use crate::kernels::delta;
 #[cfg(target_arch = "x86_64")]
 use crate::{lcs_multiword_kernel, LargeCtx};
 
+/// Single-word Myers recurrence step taking advantage of BMI1 `andn` (`!a & b`)
+/// and the PR #221 algebraic simplification.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "bmi1")]
+#[allow(dead_code)]
+#[inline]
+pub(crate) unsafe fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
+    myers_step_andn(eq, vp, vn)
+}
+
+/// Plain-Rust form of [`myers_step`] taking advantage of and-not (`!a & b`),
+/// which compiles to `andn` when BMI1 is enabled.
+///
+/// Uses the identities `!ph_s = (X << 1) & !(vn << 1)` and
+/// `!(xv | ph_s) = (X << 1) & !(xv | (vn << 1))` with `X = sum | vp | eq`
+/// (from PR #221), removing the `| 1` constant off the critical recurrence
+/// path.
+#[inline(always)]
+pub(crate) fn myers_step_andn(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
+    let sum = (eq & vp).wrapping_add(vp);
+    let x = sum | (vp | eq);
+    let mh = vp & !(sum & !eq);
+    let xv = eq | vn;
+    let vns = vn << 1;
+    let xs = x << 1;
+    let m = xv | vns;
+    let s = !vns & xs;
+    let a = !m & xs;
+    ((mh << 1) | a, !s & xv)
+}
+
 /// [`multiword_andn`] compiled with BMI1, which runs each `!a & b` as one
 /// `andn`.  The kernel is throughput-bound from two words on, so the fewer
 /// instructions (15-18% per column at `W` = 2 and 4) translate into time.

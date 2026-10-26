@@ -32,16 +32,15 @@ fn opaque(x: u64) -> u64 {
     x
 }
 
-/// [`crate::kernels::portable::myers_step`] with every shift folded into a
-/// logical op.  With `X = sum | vp | eq`, `!ph = X & !vn`, and the bit
-/// shifted into `ph_s` is 1, so `!ph_s == !ph << 1` exactly.  Hence
-/// `vn' = xv & !((X & !vn) << 1)` and `!(xv | ph_s) = C & (X << 1)`, where
-/// `C = !xv & !(vn << 1)` does not depend on `vp` (its bit 0 is cleared by
-/// `X << 1`).  Each output is then one shifted op past `X`: `and`, `add`,
-/// `orr`, `and`, `orr` take 5 cycles from `vp` to `vp`, against 8 for the
-/// portable step as LLVM schedules it, with the same 13 ops.  Without
-/// [`opaque`], LLVM merges `C` into `X << 1 & !(xv | vn << 1)`, which
-/// needs `X << 1` in a register: one op and one cycle more.
+/// [`crate::kernels::portable::myers_step`] scheduled for Arm Neoverse cores.
+///
+/// Uses the identities `!ph_s = (X << 1) & !(vn << 1)` and
+/// `!(xv | ph_s) = (X << 1) & !(xv | (vn << 1))` with `X = sum | vp | eq`
+/// (from PR #221), removing the `| 1` constant off the critical recurrence
+/// path.  On Neoverse N1/N2/V1/V2, logical ops with a shifted operand take
+/// one cycle, allowing `m = xv | (vn << 1)`, `s = xs & !(vn << 1)`, and
+/// `vp' = (mh << 1) | a` to execute as single-cycle shifted instructions
+/// (`orr ..., lsl #1` and `bic ..., lsl #1`).
 #[cfg_attr(
     not(all(target_arch = "aarch64", not(target_vendor = "apple"))),
     allow(dead_code)
@@ -52,9 +51,11 @@ pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
     let x = sum | vp | eq;
     let mh = vp & (eq | !sum);
     let xv = eq | vn;
-    let c = opaque(!xv & !(vn << 1));
-    let nph = x & !vn;
-    ((mh << 1) | (c & (x << 1)), xv & !(nph << 1))
+    let m = xv | (vn << 1);
+    let xs = x << 1;
+    let s = xs & !(vn << 1);
+    let a = xs & !m;
+    ((mh << 1) | a, xv & !s)
 }
 
 /// [`crate::kernels::multiword`] in the short-chain step of
