@@ -1672,19 +1672,30 @@ fn hyrro_multiword_hash_body<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
     // round trips would cost as much as the kernel on ~100 chars.
     let (mut hash_stack, mut hash_heap) = ([MaybeUninit::uninit(); 2 * STACK_M], Vec::new());
     let hash = scratch(&mut hash_stack, &mut hash_heap, hash_size, EMPTY);
+    let mut ki_stack = [0u16; STACK_M];
+    let mut ki_heap = Vec::new();
+    let kis: &mut [u16] = if m <= STACK_M {
+        &mut ki_stack[..m]
+    } else {
+        ki_heap.resize(m, 0);
+        &mut ki_heap[..]
+    };
     let mut n_keys = 0u64;
-    for &c in short {
+    for (i, &c) in short.iter().enumerate() {
         let key = c.as_u64();
         debug_assert!(key <= u32::MAX as u64, "CodeUnit value must fit in 32 bits");
         let mut slot = hslot(key, hshift);
         loop {
             let entry = hash[slot];
             if entry == EMPTY {
-                hash[slot] = n_keys << 32 | key;
+                let ki = n_keys;
+                hash[slot] = ki << 32 | key;
+                kis[i] = ki as u16;
                 n_keys += 1;
                 break;
             }
             if entry & 0xFFFF_FFFF == key {
+                kis[i] = (entry >> 32) as u16;
                 break;
             }
             slot = (slot + 1) & hash_mask;
@@ -1713,25 +1724,21 @@ fn hyrro_multiword_hash_body<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
     let (mut data_stack, mut data_heap) =
         ([MaybeUninit::uninit(); (STACK_M + 1) * MAX_W], Vec::new());
     let data = scratch(&mut data_stack, &mut data_heap, (n_keys + 1) * w, 0);
-    for (i, &c) in short.iter().enumerate() {
-        let ki = row_of(c.as_u64());
+    for (i, &ki) in kis.iter().enumerate() {
+        let ki = ki as usize;
         debug_assert!(ki < n_keys, "pattern key must already be inserted");
         data[ki * w + i / 64] |= 1u64 << (i % 64);
     }
 
     macro_rules! run {
         ($W:literal) => {{
+            let (rows, _) = data.as_chunks::<$W>();
             K::words::<$W, _>(
                 m,
                 long.len(),
-                long.iter().map(|&c| {
-                    let base = row_of(c.as_u64()) * $W;
-                    let mut row = [0u64; $W];
-                    for k in 0..$W {
-                        row[k] = unsafe { *data.get_unchecked(base + k) };
-                    }
-                    row
-                }),
+                // SAFETY: row_of returns <= n_keys < rows.len().
+                long.iter()
+                    .map(|&c| unsafe { *rows.get_unchecked(row_of(c.as_u64())) }),
             )
         }};
     }
