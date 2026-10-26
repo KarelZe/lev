@@ -11,17 +11,17 @@
 Benchmark lev across released versions up to the current unreleased build.
 
 Measures average runtime (and spread) on realistic natural-language text.
-Produces GitHub-themed light and dark SVG and PNG plots using matplotlib and matplotx.
+Produces GitHub-themed light and dark SVG and PNG line plots using dufte and matplotx.
 
 Examples:
-    # Run default benchmark across all versions and generate plots:
+    # Run default benchmark across all versions and generate line plots:
     uv run scripts/benchmark_by_version.py
 
     # Select specific versions via CLI:
     uv run scripts/benchmark_by_version.py --versions 0.4.0 0.4.1 0.5.0 unreleased
 
-    # Use a line plot instead of a bar chart:
-    uv run scripts/benchmark_by_version.py --chart-type line
+    # Plot only the average metric:
+    uv run scripts/benchmark_by_version.py --metrics average
 
     # Save JSON results to a custom file:
     uv run scripts/benchmark_by_version.py --save baselines/versions.json
@@ -310,7 +310,8 @@ def run_benchmarks(
 def plot_versions(
     payload: dict,
     output_dir: Path = ASSETS_DIR,
-    chart_type: str = "bar",
+    chart_type: str = "line",
+    metrics: Sequence[str] = ("average", "min"),
     formats: tuple[str, ...] = ("svg", "png"),
 ) -> list[Path]:
     """
@@ -319,7 +320,8 @@ def plot_versions(
     Args:
         payload: Benchmark results payload.
         output_dir: Directory where plot images should be saved.
-        chart_type: 'bar' for vertical bar chart, 'line' for line plot.
+        chart_type: 'line' for line plot with dufte styling, 'bar' for bar chart.
+        metrics: Which metric series to plot (e.g. 'average', 'min').
         formats: File formats to export ('svg', 'png', etc.).
 
     Returns:
@@ -328,12 +330,27 @@ def plot_versions(
     """
     results: dict[str, dict] = payload["results"]
     meta: dict = payload["meta"]
-    labels = list(results.keys())
-    means = np.array([results[ver]["mean_us"] for ver in labels])
-    mins = np.array([results[ver]["min_us"] for ver in labels])
-    maxs = np.array([results[ver]["max_us"] for ver in labels])
-    p25s = np.array([results[ver]["p25_us"] for ver in labels])
-    p75s = np.array([results[ver]["p75_us"] for ver in labels])
+    labels_versions = list(results.keys())
+    x0 = np.arange(len(labels_versions))
+
+    # Assemble series to plot based on metrics
+    series: list[tuple[str, np.ndarray]] = []
+    if "average" in metrics:
+        means = np.array([results[ver]["mean_us"] for ver in labels_versions])
+        series.append(("average", means))
+    if "min" in metrics:
+        mins = np.array([results[ver]["min_us"] for ver in labels_versions])
+        series.append(("min", mins))
+    if "median" in metrics:
+        medians = np.array([results[ver]["median_us"] for ver in labels_versions])
+        series.append(("median", medians))
+
+    if not series:
+        means = np.array([results[ver]["mean_us"] for ver in labels_versions])
+        series.append(("average", means))
+
+    y = [s[1] for s in series]
+    labels = [s[0] for s in series]
 
     machine = meta["machine"]
     subtitle = (
@@ -345,111 +362,55 @@ def plot_versions(
     generated_files: list[Path] = []
 
     for theme in ("light", "dark"):
-        text_color = "white" if theme == "dark" else "black"
-        released_color = "#58a6ff" if theme == "dark" else "#0969da"
-        unreleased_color = "#3fb950" if theme == "dark" else "#1a7f37"
-        grid_color = "#30363d" if theme == "dark" else "#d0d7de"
+        style = matplotx.styles.dufte if theme == "light" else matplotx.styles.duftify(matplotx.styles.github["dark"])
 
-        with plt.style.context(matplotx.styles.duftify(matplotx.styles.github[theme])):
-            plt.rcParams.update({
-                "text.color": text_color,
-                "axes.labelcolor": text_color,
-                "xtick.color": text_color,
-                "ytick.color": text_color,
-                "axes.edgecolor": text_color,
-                "legend.edgecolor": text_color,
-            })
+        with plt.style.context(style):
+            plt.figure(figsize=(10.5, 5.0))
 
-            fig, ax = plt.subplots(figsize=(11, 5.2))
-            xs = np.arange(len(labels))
+            if chart_type == "line":
+                for yy, label in zip(y, labels):
+                    plt.plot(x0, yy, label=label, marker="o", markersize=4)
 
-            if chart_type == "bar":
-                colors = [unreleased_color if results[ver]["is_unreleased"] else released_color for ver in labels]
-                bars = ax.bar(xs, means, color=colors, width=0.62, edgecolor="none", zorder=3)
-                ax.bar_label(bars, fmt="%.2f μs", padding=4, fontsize=8.5, color=text_color)
-                ax.set_ylim(0, max(means) * 1.20)
-                ax.grid(True, axis="y", ls="--", alpha=0.5, color=grid_color, zorder=0)
-                ax.grid(False, axis="x")
+                _, tick_labels = plt.xticks(x0, labels_versions, rotation=30, ha="right")
+                for tick in tick_labels:
+                    if is_unreleased_version(tick.get_text()):
+                        tick.set_fontweight("bold")
+
+                plt.xlabel(f"version\n{subtitle}")
+                matplotx.ylabel_top("time [µs]")  # ruff: ignore[ambiguous-unicode-character-string]
+                matplotx.line_labels()
             else:
-                (line,) = ax.plot(
-                    xs,
-                    means,
-                    marker="o",
-                    markersize=6,
-                    linewidth=2.2,
-                    color=released_color,
-                    label="Average runtime",
-                    zorder=4,
-                )
-                ax.fill_between(
-                    xs,
-                    p25s,
-                    p75s,
-                    alpha=0.25,
-                    color=line.get_color(),
-                    label="25th-75th percentile band",
-                    zorder=2,
-                )
-                # Plot min-max whiskers / thin band
-                ax.fill_between(
-                    xs,
-                    mins,
-                    maxs,
-                    alpha=0.10,
-                    color=line.get_color(),
-                    label="Min-Max range",
-                    zorder=1,
-                )
+                means = np.array([results[ver]["mean_us"] for ver in labels_versions])
+                released_color = "#58a6ff" if theme == "dark" else "#0969da"
+                unreleased_color = "#3fb950" if theme == "dark" else "#1a7f37"
+                grid_color = "#30363d" if theme == "dark" else "#d0d7de"
+                text_color = "white" if theme == "dark" else "black"
 
-                # Special marker for unreleased version
-                for i, ver in enumerate(labels):
-                    if results[ver]["is_unreleased"]:
-                        ax.plot(
-                            xs[i],
-                            means[i],
-                            marker="*",
-                            markersize=13,
-                            color=unreleased_color,
-                            label="Current (unreleased)",
-                            zorder=5,
-                        )
+                colors = [
+                    unreleased_color if results[ver]["is_unreleased"] else released_color for ver in labels_versions
+                ]
+                bars = plt.bar(x0, means, color=colors, width=0.62, edgecolor="none", zorder=3)
+                plt.bar_label(bars, fmt="%.2f μs", padding=4, fontsize=8.5, color=text_color)
+                plt.ylim(0, max(means) * 1.20)
+                plt.grid(True, axis="y", ls="--", alpha=0.5, color=grid_color, zorder=0)
+                plt.grid(False, axis="x")
 
-                for x, y in zip(xs, means):
-                    ax.annotate(
-                        f"{y:.2f} μs",
-                        (x, y),
-                        textcoords="offset points",
-                        xytext=(0, 9),
-                        ha="center",
-                        fontsize=8,
-                        color=text_color,
-                    )
+                _, tick_labels = plt.xticks(x0, labels_versions, rotation=30, ha="right")
+                for tick in tick_labels:
+                    if is_unreleased_version(tick.get_text()):
+                        tick.set_fontweight("bold")
+                        tick.set_color(unreleased_color)
 
-                ax.set_ylim(0, max(maxs) * 1.22)
-                ax.grid(True, axis="y", ls="--", alpha=0.5, color=grid_color, zorder=0)
-                ax.grid(True, axis="x", ls=":", alpha=0.3, color=grid_color, zorder=0)
-                ax.legend(loc="upper right", framealpha=0.8)
-
-            ax.set_xticks(xs)
-            ax.set_xticklabels(labels, rotation=28, ha="right", fontsize=9.5)
-
-            for ticklabel in ax.get_xticklabels():
-                if is_unreleased_version(ticklabel.get_text()):
-                    ticklabel.set_fontweight("bold")
-                    ticklabel.set_color(unreleased_color)
-
-            ax.set_title("Levenshtein Distance Performance Across lev Versions", fontsize=13, pad=12)
-            ax.set_xlabel(f"Version\n{subtitle}", fontsize=9.5, labelpad=8)
-            ax.set_ylabel("Average runtime [μs / call]", fontsize=10.5)
-
-            fig.tight_layout()
+                plt.title("Levenshtein Distance Performance Across lev Versions", fontsize=13, pad=12)
+                plt.xlabel(f"version\n{subtitle}", fontsize=9.5, labelpad=8)
+                matplotx.ylabel_top("time [µs]")  # ruff: ignore[ambiguous-unicode-character-string]
 
             for fmt in formats:
                 out_path = output_dir / f"benchmark_by_version_{theme}.{fmt}"
-                fig.savefig(out_path, dpi=200, bbox_inches="tight")
+                plt.savefig(out_path, bbox_inches="tight")
                 generated_files.append(out_path)
 
-            plt.close(fig)
+            plt.close()
 
     return generated_files
 
@@ -501,9 +462,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--chart-type",
-        choices=["bar", "line"],
-        default="bar",
-        help="Visualization chart type (default: bar).",
+        choices=["line", "bar"],
+        default="line",
+        help="Visualization chart type (default: line).",
+    )
+    p.add_argument(
+        "--metrics",
+        nargs="*",
+        choices=["average", "min", "median"],
+        default=["average", "min"],
+        help="Metrics to plot as lines (default: average min).",
     )
     p.add_argument(
         "--format",
@@ -585,6 +553,7 @@ def main(argv: list[str] | None = None) -> int:
             payload,
             output_dir=args.output_dir,
             chart_type=args.chart_type,
+            metrics=args.metrics,
             formats=fmts,
         )
         print(f"Generated {len(generated)} plot files in {args.output_dir}:")
@@ -593,7 +562,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Summary table
     print("\nBenchmark Summary (Realistic Text):")
-    print(f"{'Version':<14} {'Average [μs]':>14} {'Median [μs]':>14} {'Min [μs]':>14} {'Std [μs]':>12}")
+    print(f"{'Version':<14} {'Average [μs]':>14} {'Median [μs]':>14} {'Min [µs]':>14} {'Std [μs]':>12}")  # ruff: ignore[ambiguous-unicode-character-string]
     print("-" * 72)
     for ver, data in payload["results"].items():
         label = f"{ver} *" if data["is_unreleased"] else ver
