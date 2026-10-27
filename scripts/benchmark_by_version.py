@@ -10,21 +10,25 @@
 """
 Benchmark lev across released versions up to the current unreleased build.
 
-Measures average runtime (and spread) across representative architectural regimes:
+Measures runtime and normalized speedup across representative architectural regimes:
 - Short: small strings (m <= 16) testing tiny SIMD and mbleven fast paths.
 - Medium: realistic natural-language text testing multi-word direct tables + affix stripping.
 - Long Similar: 2,048-char near-duplicate documents testing banded Ukkonen Myers.
 - Long Dissimilar: 2,048-char unrelated documents testing full-matrix DP.
 
-Produces GitHub-themed light and dark SVG and PNG line plots with filled uncertainty bands
-and end-of-line labels on a single unified plot.
+Produces GitHub-themed light and dark SVG and PNG line plots showing normalized speedup
+(relative to initial version 0.1.0) with filled uncertainty bands and end-of-line labels
+on a single unified plot.
 
 Examples:
-    # Run default benchmark across curated versions and regimes:
+    # Run default benchmark across curated versions and regimes (speedup plot):
     uv run scripts/benchmark_by_version.py
 
     # Select specific regimes or versions:
     uv run scripts/benchmark_by_version.py --regimes medium --versions 0.2.6 0.5.0 main
+
+    # Plot raw execution time [μs] on log scale instead of speedup:
+    uv run scripts/benchmark_by_version.py --metric runtime
 
     # Save JSON results to a custom file:
     uv run scripts/benchmark_by_version.py --save baselines/versions.json
@@ -404,6 +408,89 @@ def run_benchmarks(
     }
 
 
+def _extract_series_data(
+    results: dict[str, dict],
+    regime: str,
+    versions: Sequence[str],
+    metric: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Extract mean, lower, and upper metric values for a regime across versions.
+
+    Args:
+        results: Benchmark results mapping.
+        regime: Regime name.
+        versions: Sequence of versions.
+        metric: Metric mode ('speedup' or 'runtime').
+
+    Returns:
+        Tuple of (means, lowers, uppers) numpy arrays.
+
+    """
+    base_ver = versions[0]
+    if metric == "speedup":
+        base_mean = max(results[regime][base_ver]["mean_us"], 1e-9)
+        means = np.array([base_mean / max(results[regime][v]["mean_us"], 1e-9) for v in versions])
+        lowers = np.array([base_mean / max(results[regime][v]["max_us"], 1e-9) for v in versions])
+        uppers = np.array([base_mean / max(results[regime][v]["min_us"], 1e-9) for v in versions])
+    else:
+        means = np.array([results[regime][v]["mean_us"] for v in versions])
+        lowers = np.array([results[regime][v]["min_us"] for v in versions])
+        uppers = np.array([results[regime][v]["max_us"] for v in versions])
+    return means, lowers, uppers
+
+
+def _configure_multi_series_axes(
+    ax: plt.Axes,
+    x0: np.ndarray,
+    display_labels: Sequence[str],
+    y_min: float,
+    y_max: float,
+    scale: str,
+    metric: str,
+    base_ver: str,
+) -> None:
+    """
+    Configure ticks, limits, baseline reference, and labels for multi-series plot.
+
+    Args:
+        ax: Matplotlib axes object.
+        x0: X-axis indices.
+        display_labels: Formatted labels for x-axis ticks.
+        y_min: Minimum metric value across all series.
+        y_max: Maximum metric value across all series.
+        scale: Scaling mode ('auto', 'linear', or 'log').
+        metric: Metric mode ('speedup' or 'runtime').
+        base_ver: Baseline version string.
+
+    """
+    if metric == "speedup":
+        ax.axhline(1.0, color="#8b949e", linestyle=":", linewidth=1.0, alpha=0.6, zorder=1)
+        pad = max((y_max - y_min) * 0.08, 0.1)
+        ax.set_ylim(max(0.5, min(y_min, 1.0) - pad), y_max + pad)
+        ax.yaxis.set_major_formatter(
+            plt.FuncFormatter(lambda y, _: f"{y:.1f}×")  # ruff: ignore[ambiguous-unicode-character-string]
+        )
+        matplotx.ylabel_top(f"speedup vs {base_ver} [×]", ax=ax)  # ruff: ignore[ambiguous-unicode-character-string]
+    elif scale == "log":
+        ax.set_yscale("log")
+        pad_factor = (y_max / max(y_min, 1e-9)) ** 0.05
+        ax.set_ylim(max(y_min / pad_factor, 1e-9), y_max * pad_factor)
+        matplotx.ylabel_top("time [µs]", ax=ax)  # ruff: ignore[ambiguous-unicode-character-string]
+    else:
+        pad = (y_max - y_min) * 0.05
+        ax.set_ylim(max(0.0, y_min - pad), y_max + pad)
+        matplotx.ylabel_top("time [µs]", ax=ax)  # ruff: ignore[ambiguous-unicode-character-string]
+
+    ax.set_xticks(x0)
+    tick_labels = ax.set_xticklabels(display_labels, rotation=90, ha="right", va="top")
+    for tick in tick_labels:
+        if is_unreleased_version(tick.get_text()):
+            tick.set_fontweight("bold")
+
+    matplotx.line_labels(ax=ax)
+
+
 def _render_multi_series(
     ax: plt.Axes,
     x0: np.ndarray,
@@ -412,6 +499,7 @@ def _render_multi_series(
     versions: Sequence[str],
     display_labels: Sequence[str],
     scale: str,
+    metric: str = "speedup",
 ) -> None:
     """
     Render multiple regime series with confidence bands and end-of-line labels on a single axis.
@@ -424,15 +512,14 @@ def _render_multi_series(
         versions: Sequence of version identifiers.
         display_labels: Formatted labels for x-axis ticks.
         scale: Scaling mode ('auto', 'linear', or 'log').
+        metric: Metric mode ('speedup' or 'runtime').
 
     """
     all_lowers: list[float] = []
     all_uppers: list[float] = []
 
     for r in regimes:
-        means = np.array([results[r][v]["mean_us"] for v in versions])
-        lowers = np.array([results[r][v]["min_us"] for v in versions])
-        uppers = np.array([results[r][v]["max_us"] for v in versions])
+        means, lowers, uppers = _extract_series_data(results, r, versions, metric)
         all_lowers.extend(lowers.tolist())
         all_uppers.extend(uppers.tolist())
 
@@ -442,21 +529,7 @@ def _render_multi_series(
 
     y_min = float(min(all_lowers))
     y_max = float(max(all_uppers))
-    if scale == "log":
-        ax.set_yscale("log")
-        pad_factor = (y_max / max(y_min, 1e-9)) ** 0.05
-        ax.set_ylim(max(y_min / pad_factor, 1e-9), y_max * pad_factor)
-    else:
-        pad = (y_max - y_min) * 0.05
-        ax.set_ylim(max(0.0, y_min - pad), y_max + pad)
-    ax.set_xticks(x0)
-    tick_labels = ax.set_xticklabels(display_labels, rotation=90, ha="right", va="top")
-    for tick in tick_labels:
-        if is_unreleased_version(tick.get_text()):
-            tick.set_fontweight("bold")
-
-    matplotx.ylabel_top("time [µs]", ax=ax)  # ruff: ignore[ambiguous-unicode-character-string]
-    matplotx.line_labels(ax=ax)
+    _configure_multi_series_axes(ax, x0, display_labels, y_min, y_max, scale, metric, base_ver=versions[0])
 
 
 def _render_bar_chart(
@@ -526,6 +599,7 @@ def _render_theme_figure(
     payload: dict,
     chart_type: str,
     scale: str,
+    metric: str = "speedup",
 ) -> plt.Figure:
     """
     Construct the figure for a single theme.
@@ -535,6 +609,7 @@ def _render_theme_figure(
         payload: Full benchmark payload.
         chart_type: Chart type ('line' or 'bar').
         scale: Scaling mode ('auto', 'linear', or 'log').
+        metric: Metric mode ('speedup' or 'runtime').
 
     Returns:
         Rendered Matplotlib Figure.
@@ -556,8 +631,15 @@ def _render_theme_figure(
         means = np.array([results[r][v]["mean_us"] for v in versions])
         _render_bar_chart(ax, x0, means, display_labels, results[r], theme, machine_desc)
     else:
-        _render_multi_series(ax, x0, regimes, results, versions, display_labels, scale)
-        ax.set_title("Levenshtein Distance Performance Across lev Versions", fontsize=12, pad=12)
+        _render_multi_series(ax, x0, regimes, results, versions, display_labels, scale, metric)
+        if metric == "speedup":
+            ax.set_title(
+                f"Levenshtein Distance Performance Speedup vs {versions[0]} Across lev Versions",
+                fontsize=12,
+                pad=12,
+            )
+        else:
+            ax.set_title("Levenshtein Distance Performance Across lev Versions", fontsize=12, pad=12)
         ax.set_xlabel(f"version\n{machine_desc}", fontsize=9.5, labelpad=8)
 
     return fig
@@ -569,6 +651,7 @@ def plot_versions(
     chart_type: str = "line",
     formats: tuple[str, ...] = ("svg", "png"),
     scale: str = "log",
+    metric: str = "speedup",
 ) -> list[Path]:
     """
     Render and save light and dark benchmark plots for all tested versions.
@@ -579,6 +662,7 @@ def plot_versions(
         chart_type: 'line' for line plot with uncertainty band, 'bar' for bar chart.
         formats: File formats to export ('svg', 'png', etc.).
         scale: Scaling mode ('linear' or 'log').
+        metric: Metric mode ('speedup' or 'runtime').
 
     Returns:
         List of generated plot paths.
@@ -591,7 +675,7 @@ def plot_versions(
     for theme in ("light", "dark"):
         style = _get_theme_style(theme)
         with plt.style.context(style):
-            fig = _render_theme_figure(theme, payload, chart_type, scale)
+            fig = _render_theme_figure(theme, payload, chart_type, scale, metric)
             for fmt in formats:
                 out_path = safe_dir / f"benchmark_by_version_{theme}.{fmt}"
                 fig.savefig(out_path, bbox_inches="tight")
@@ -704,6 +788,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"Where to save JSON benchmark results (default: {DEFAULT_OUTPUT.relative_to(REPO_ROOT)}).",
     )
     p.add_argument(
+        "--metric",
+        choices=["speedup", "runtime"],
+        default="speedup",
+        help="Metric to plot: 'speedup' (normalized to initial version, default) or 'runtime' (raw [μs]).",
+    )
+    p.add_argument(
         "--chart-type",
         choices=["line", "bar"],
         default="line",
@@ -757,6 +847,7 @@ def main(argv: list[str] | None = None) -> int:
             chart_type=args.chart_type,
             formats=fmts,
             scale=args.scale,
+            metric=args.metric,
         )
         print(f"Generated {len(generated)} plot files in {ASSETS_DIR}:")
         for p in generated:
@@ -777,6 +868,20 @@ def main(argv: list[str] | None = None) -> int:
         for r in regimes:
             mean = payload["results"][r][ver]["mean_us"]
             row += f"{mean:>18.3f}"
+        print(row)
+
+    base_ver = versions[0]
+    print(f"\nBenchmark Summary (Speedup vs {base_ver} [×]):")  # ruff: ignore[ambiguous-unicode-character-string]
+    print(header)
+    print("-" * len(header))
+    for ver in versions:
+        is_unrel = payload["results"][regimes[0]][ver]["is_unreleased"]
+        label = f"{ver} *" if is_unrel else ver
+        row = f"{label:<12}"
+        for r in regimes:
+            base_m = max(payload["results"][r][base_ver]["mean_us"], 1e-9)
+            speedup = base_m / max(payload["results"][r][ver]["mean_us"], 1e-9)
+            row += f"{speedup:>17.3f}×"  # ruff: ignore[ambiguous-unicode-character-string]
         print(row)
 
     return 0
