@@ -2,6 +2,18 @@
 
 - build: move dev and docs to project dependencies🔧 (#160)
 
+## [0.5.1](https://github.com/KarelZe/lev/compare/0.5.0...0.5.1) (2026-10-27)
+
+
+### Performance
+
+* 6-cycle single-word Myers step on Apple silicon ⚡ ([#221](https://github.com/KarelZe/lev/issues/221)) ([8769302](https://github.com/KarelZe/lev/commit/8769302b8be3a434fa398e028738ebf36e5166a3))
+* expand TINY_M to 16 with 128-bit SIMD pattern matching ⚡ ([#229](https://github.com/KarelZe/lev/issues/229)) ([1ce4738](https://github.com/KarelZe/lev/commit/1ce4738c1c9705f4d154b00d535cd97cea309cd9))
+* jump matching runs in mbleven with word-level common prefix ⚡ ([#222](https://github.com/KarelZe/lev/issues/222)) ([28a3324](https://github.com/KarelZe/lev/commit/28a3324bf17f8c28cca4b0fd2d7762fa5eb08377))
+* populate multi-word hash table in a single probe pass ⚡ ([#220](https://github.com/KarelZe/lev/issues/220)) ([4215b4a](https://github.com/KarelZe/lev/commit/4215b4a632fd1d6805442c8ac4a02de2b7d3acea))
+* transfer Myers step algebraic rewrite to x86-64 and Neoverse ⚡ ([#231](https://github.com/KarelZe/lev/issues/231)) ([4c18cd7](https://github.com/KarelZe/lev/commit/4c18cd7df4656db492a18a27b445c685b156db9b))
+* widen small_ub chunk scan to 32 bytes on AVX2 in x86-64-v2 copy ⚡ ([#228](https://github.com/KarelZe/lev/issues/228)) ([8b5fd15](https://github.com/KarelZe/lev/commit/8b5fd15a1dbea03db07dfa9f767d0139636f6ccc))
+
 ## [0.5.0](https://github.com/KarelZe/lev/compare/0.4.1...0.5.0) (2026-10-23)
 
 
