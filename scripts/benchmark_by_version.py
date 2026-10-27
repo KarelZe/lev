@@ -11,7 +11,7 @@
 Benchmark lev across released versions up to the current unreleased build.
 
 Measures average runtime (and spread) across representative architectural regimes:
-- Short: small strings (m <= 16) testing tiny SIMD and mbleven fast paths (available via `--regimes short`).
+- Short: small strings (m <= 16) testing tiny SIMD and mbleven fast paths.
 - Medium: realistic natural-language text testing multi-word direct tables + affix stripping.
 - Long Similar: 2,048-char near-duplicate documents testing banded Ukkonen Myers.
 - Long Dissimilar: 2,048-char unrelated documents testing full-matrix DP.
@@ -25,9 +25,6 @@ Examples:
 
     # Select specific regimes or versions:
     uv run scripts/benchmark_by_version.py --regimes medium --versions 0.2.6 0.5.0 main
-
-    # Benchmark including short strings:
-    uv run scripts/benchmark_by_version.py --regimes all
 
     # Save JSON results to a custom file:
     uv run scripts/benchmark_by_version.py --save baselines/versions.json
@@ -129,7 +126,7 @@ REGIMES_CATALOG: dict[str, dict[str, Any]] = {
 }
 
 ALL_REGIMES: tuple[str, ...] = ("short", "medium", "long-similar", "long-dissimilar")
-DEFAULT_REGIMES: tuple[str, ...] = ("medium", "long-similar", "long-dissimilar")
+DEFAULT_REGIMES: tuple[str, ...] = ALL_REGIMES
 
 UNRELEASED_ALIASES = frozenset({"main", "unreleased", "current", "dev", "head", "local", "."})
 SEMVER_REGEX = re.compile(r"^\d+(\.\d+)*$")
@@ -694,10 +691,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--regimes",
         nargs="*",
-        default=None,
+        default=["all"],
         help=(
-            "Regimes to benchmark: 'medium', 'long-similar', 'long-dissimilar' "
-            "(default), or 'all' (includes 'short'). Can also select specific regimes."
+            "Regimes to benchmark: 'all' (default), or any of 'short', 'medium' "
+            "(alias 'realistic'), 'long-similar', 'long-dissimilar'."
         ),
     )
     p.add_argument(
