@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT = REPO_ROOT / "docs" / "assets" / "benchmark_by_version.json"
 ASSETS_DIR = DEFAULT_OUTPUT.parent
+TIME_AXIS_LABEL: str = "time [µs]"  # NOSONAR # ruff: ignore[ambiguous-unicode-character-string]
 
 # Default tuple of versions to benchmark: key releases that introduced
 # meaningful algorithmic or performance changes, plus the current unreleased
@@ -476,11 +477,11 @@ def _configure_multi_series_axes(
         ax.set_yscale("log")
         pad_factor = (y_max / max(y_min, 1e-9)) ** 0.05
         ax.set_ylim(max(y_min / pad_factor, 1e-9), y_max * pad_factor)
-        matplotx.ylabel_top("time [µs]", ax=ax)  # ruff: ignore[ambiguous-unicode-character-string]
+        matplotx.ylabel_top(TIME_AXIS_LABEL, ax=ax)  # NOSONAR
     else:
         pad = (y_max - y_min) * 0.05
         ax.set_ylim(max(0.0, y_min - pad), y_max + pad)
-        matplotx.ylabel_top("time [µs]", ax=ax)  # ruff: ignore[ambiguous-unicode-character-string]
+        matplotx.ylabel_top(TIME_AXIS_LABEL, ax=ax)  # NOSONAR
 
     ax.set_xticks(x0)
     tick_labels = ax.set_xticklabels(display_labels, rotation=90, ha="right", va="top")
@@ -575,7 +576,7 @@ def _render_bar_chart(
 
     ax.set_title("Levenshtein Distance Performance Across lev Versions", fontsize=13, pad=12)
     ax.set_xlabel(f"version\n{subtitle}", fontsize=9.5, labelpad=8)
-    matplotx.ylabel_top("time [µs]", ax=ax)  # ruff: ignore[ambiguous-unicode-character-string]
+    matplotx.ylabel_top(TIME_AXIS_LABEL, ax=ax)  # NOSONAR
 
 
 def _get_theme_style(theme: str) -> Any:
