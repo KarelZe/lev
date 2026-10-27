@@ -11,7 +11,7 @@
 Benchmark lev across released versions up to the current unreleased build.
 
 Measures average runtime (and spread) across representative architectural regimes:
-- Short: small strings (m <= 16) testing tiny SIMD and mbleven fast paths.
+- Short: small strings (m <= 16) testing tiny SIMD and mbleven fast paths (available via `--regimes short`).
 - Medium: realistic natural-language text testing multi-word direct tables + affix stripping.
 - Long Similar: 2,048-char near-duplicate documents testing banded Ukkonen Myers.
 - Long Dissimilar: 2,048-char unrelated documents testing full-matrix DP.
@@ -20,11 +20,14 @@ Produces GitHub-themed light and dark SVG and PNG line plots with filled uncerta
 and end-of-line labels on a single unified plot.
 
 Examples:
-    # Run default benchmark across all versions and regimes (default: all):
+    # Run default benchmark across curated versions and regimes:
     uv run scripts/benchmark_by_version.py
 
     # Select specific regimes or versions:
-    uv run scripts/benchmark_by_version.py --regimes medium --versions 0.4.0 0.5.0 main
+    uv run scripts/benchmark_by_version.py --regimes medium --versions 0.2.6 0.5.0 main
+
+    # Benchmark including short strings:
+    uv run scripts/benchmark_by_version.py --regimes all
 
     # Save JSON results to a custom file:
     uv run scripts/benchmark_by_version.py --save baselines/versions.json
@@ -55,20 +58,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT = REPO_ROOT / "docs" / "assets" / "benchmark_by_version.json"
 ASSETS_DIR = DEFAULT_OUTPUT.parent
 
-# Default tuple of versions to benchmark: all released versions on PyPI
-# plus the current unreleased development version in the local repository.
+# Default tuple of versions to benchmark: key releases that introduced
+# meaningful algorithmic or performance changes, plus the current unreleased
+# development version in the local repository.
 DEFAULT_VERSIONS: tuple[str, ...] = (
     "0.1.0",
-    "0.2.0",
-    "0.2.1",
-    "0.2.2",
-    "0.2.3",
     "0.2.4",
-    "0.2.5",
     "0.2.6",
-    "0.3.0",
-    "0.4.0",
-    "0.4.1",
     "0.5.0",
     "main",
 )
@@ -133,7 +129,7 @@ REGIMES_CATALOG: dict[str, dict[str, Any]] = {
 }
 
 ALL_REGIMES: tuple[str, ...] = ("short", "medium", "long-similar", "long-dissimilar")
-DEFAULT_REGIMES: tuple[str, ...] = ALL_REGIMES
+DEFAULT_REGIMES: tuple[str, ...] = ("medium", "long-similar", "long-dissimilar")
 
 UNRELEASED_ALIASES = frozenset({"main", "unreleased", "current", "dev", "head", "local", "."})
 SEMVER_REGEX = re.compile(r"^\d+(\.\d+)*$")
@@ -639,7 +635,7 @@ def resolve_regimes(arg_regimes: list[str] | None) -> tuple[str, ...]:
 
     raw_tokens = [tok for item in arg_regimes for tok in item.split(",") if tok.strip()]
     if any(t.strip().lower() == "all" for t in raw_tokens):
-        return DEFAULT_REGIMES
+        return ALL_REGIMES
 
     seen: set[str] = set()
     result: list[str] = []
@@ -692,16 +688,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Versions of lev to benchmark (space- or comma-separated, e.g. "
-            "'0.4.0 0.4.1 0.5.0 main'). Defaults to DEFAULT_VERSIONS."
+            "'0.2.4 0.2.6 0.5.0 main'). Defaults to DEFAULT_VERSIONS."
         ),
     )
     p.add_argument(
         "--regimes",
         nargs="*",
-        default=["all"],
+        default=None,
         help=(
-            "Regimes to benchmark: 'all' (default), or any of 'short', 'medium' "
-            "(alias 'realistic'), 'long-similar', 'long-dissimilar'."
+            "Regimes to benchmark: 'medium', 'long-similar', 'long-dissimilar' "
+            "(default), or 'all' (includes 'short'). Can also select specific regimes."
         ),
     )
     p.add_argument(
