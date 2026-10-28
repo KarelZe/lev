@@ -13,6 +13,10 @@ use crate::{lcs_multiword_kernel, LargeCtx};
 
 /// Single-word Myers recurrence step taking advantage of BMI1 `andn` (`!a & b`)
 /// and the PR #221 algebraic simplification.
+///
+/// # Safety
+///
+/// The CPU must support BMI1 target features.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "bmi1")]
 #[allow(dead_code)]
@@ -45,6 +49,10 @@ pub(crate) fn myers_step_andn(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
 /// [`multiword_andn`] compiled with BMI1, which runs each `!a & b` as one
 /// `andn`.  The kernel is throughput-bound from two words on, so the fewer
 /// instructions (15-18% per column at `W` = 2 and 4) translate into time.
+///
+/// # Safety
+///
+/// The CPU must support BMI1 and x86-64-v2 target features.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "bmi1,popcnt,sse3,ssse3,sse4.1,sse4.2")]
 pub(crate) unsafe fn multiword<const W: usize, I: Iterator<Item = [u64; W]>>(
@@ -101,6 +109,10 @@ const LCS_STRIP: usize = 4;
 /// column; a strip runs its words as one `adc` chain.  The LCS step has no
 /// negation for BMI1 to fold, so the strips pay on their own; they share the
 /// module and its detection with [`multiword`].
+///
+/// # Safety
+///
+/// The CPU must support BMI1 and x86-64-v2 target features.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "bmi1,popcnt,sse3,ssse3,sse4.1,sse4.2")]
 pub(crate) unsafe fn lcs_full<F: Fn(usize) -> usize>(ctx: &LargeCtx<'_, F>) -> usize {

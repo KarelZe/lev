@@ -67,6 +67,10 @@ impl Isa for V2 {
 #[cfg(target_arch = "x86_64")]
 v2! {
     /// [`crate::distance`] in this copy.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support x86-64-v2 target features.
     pub(crate) unsafe fn distance(
         s1: Borrowed<'_, '_, PyString>,
         s2: Borrowed<'_, '_, PyString>,
@@ -75,6 +79,10 @@ v2! {
     }
 
     /// [`crate::ratio`] in this copy.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support x86-64-v2 target features.
     pub(crate) unsafe fn ratio(
         s1: Borrowed<'_, '_, PyString>,
         s2: Borrowed<'_, '_, PyString>,
@@ -83,6 +91,10 @@ v2! {
     }
 
     /// [`crate::hyrro_64_tiny`] in this copy.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support x86-64-v2 target features.
     pub(crate) unsafe fn hyrro_64_tiny<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
         pattern: &[T1],
         text: &[T2],
@@ -92,6 +104,10 @@ v2! {
 
     /// [`crate::mbleven`] in this copy: LLVM inlines its instance for this
     /// copy, which has no other caller.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support x86-64-v2 target features.
     pub(crate) unsafe fn mbleven<X: Isa, T1: CodeUnit, T2: CodeUnit>(
         short: &[T1],
         long: &[T2],
@@ -101,6 +117,10 @@ v2! {
     }
 
     /// [`crate::hyrro_multiword_direct`] in this copy.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support x86-64-v2 target features.
     pub(crate) unsafe fn hyrro_multiword_direct<
         K: Kernel,
         const ROWS: usize,
@@ -114,6 +134,10 @@ v2! {
     }
 
     /// [`crate::hyrro_multiword_hash`] in this copy.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support x86-64-v2 target features.
     pub(crate) unsafe fn hyrro_multiword_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
         short: &[T1],
         long: &[T2],
@@ -122,6 +146,10 @@ v2! {
     }
 
     /// [`crate::LargeCtx::banded`] in this copy.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support x86-64-v2 target features.
     pub(crate) unsafe fn banded<F: Fn(usize) -> usize>(
         ctx: &LargeCtx<'_, F>,
         t: usize,
@@ -133,9 +161,14 @@ v2! {
 
     /// [`crate::small_ub`] in this copy: widens to 32 bytes on AVX2 when
     /// available, falling back to [`crate::small_ub_body`].
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support x86-64-v2 target features.
     pub(crate) unsafe fn small_ub<T: CodeUnit>(short: &[T], long: &[T]) -> Option<usize> {
         if std::is_x86_feature_detected!("avx2") {
-            small_ub_avx2::<T>(short, long)
+            // SAFETY: AVX2 feature was verified above.
+            unsafe { small_ub_avx2::<T>(short, long) }
         } else {
             crate::small_ub_body::<T>(short, long)
         }
@@ -143,6 +176,10 @@ v2! {
 }
 
 /// AVX2 32-byte chunk scan for [`crate::small_ub`].
+///
+/// # Safety
+///
+/// The CPU must support AVX2 target features.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub(crate) unsafe fn small_ub_avx2<T: CodeUnit>(short: &[T], long: &[T]) -> Option<usize> {
@@ -251,9 +288,13 @@ pub(crate) unsafe fn small_ub_avx2<T: CodeUnit>(short: &[T], long: &[T]) -> Opti
     };
 
     while i + 8 <= n {
-        let ca = a[i..i + 8].try_into().unwrap();
-        let cb = b[i..i + 8].try_into().unwrap();
-        let mut d = u64::from_le_bytes(ca) ^ u64::from_le_bytes(cb);
+        let Some(ca) = a[i..].first_chunk::<8>() else {
+            break;
+        };
+        let Some(cb) = b[i..].first_chunk::<8>() else {
+            break;
+        };
+        let mut d = u64::from_le_bytes(*ca) ^ u64::from_le_bytes(*cb);
         while d != 0 {
             ub += 1;
             if ub > crate::MBLEVEN_MAX {

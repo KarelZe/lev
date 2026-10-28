@@ -104,7 +104,7 @@ impl CodeUnit for u32 {}
 /// See <https://en.wikipedia.org/wiki/Hash_function#Fibonacci_hashing>.
 #[inline(always)]
 fn hslot(key: u64, shift: u32) -> usize {
-    (key.wrapping_mul(0x9e3779b9_7f4a7c15_u64) >> shift) as usize
+    (key.wrapping_mul(0x9e37_79b9_7f4a_7c15_u64) >> shift) as usize
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +124,10 @@ struct UniView {
 /// Read kind + ascii flag + data ptr + length from a Python string in one go.
 /// Subsequent dispatch matches on `(view1.kind, view2.kind)` without
 /// re-traversing pyo3's PyUnicode helpers.
+///
+/// # Safety
+///
+/// `s` must reference a valid, fully-initialized CPython `PyString` (`PyUnicodeObject`).
 #[cfg(not(all(
     Py_3_14,
     target_endian = "little",
@@ -161,6 +165,10 @@ unsafe fn view(s: &Bound<'_, PyString>) -> UniView {
 /// atomically), which moves the flags up to bit 8.  MSVC does not pack a
 /// bitfield into the byte before it, so its free-threaded `state` is wider
 /// than pyo3-ffi's `u32`; that combination takes the C-API path above.
+///
+/// # Safety
+///
+/// `s` must reference a valid, fully-initialized CPython `PyString` (`PyUnicodeObject`).
 #[cfg(all(
     Py_3_14,
     target_endian = "little",
@@ -202,17 +210,37 @@ unsafe fn view(s: &Bound<'_, PyString>) -> UniView {
     }
 }
 
+/// Reinterpret a [`UniView`]'s data as a `u8` slice.
+///
+/// # Safety
+///
+/// `v.data` must point to `v.len` valid, initialized `u8` code units.
 #[inline(always)]
 unsafe fn as_u8(v: &UniView) -> &[u8] {
-    std::slice::from_raw_parts(v.data, v.len)
+    // SAFETY: caller guarantees v.data points to v.len valid u8 elements.
+    unsafe { std::slice::from_raw_parts(v.data, v.len) }
 }
+
+/// Reinterpret a [`UniView`]'s data as a `u16` slice.
+///
+/// # Safety
+///
+/// `v.data` must be properly aligned for `u16` and point to `v.len` valid, initialized `u16` code units.
 #[inline(always)]
 unsafe fn as_u16(v: &UniView) -> &[u16] {
-    std::slice::from_raw_parts(v.data.cast::<u16>(), v.len)
+    // SAFETY: caller guarantees v.data is aligned and points to v.len valid u16 elements.
+    unsafe { std::slice::from_raw_parts(v.data.cast::<u16>(), v.len) }
 }
+
+/// Reinterpret a [`UniView`]'s data as a `u32` slice.
+///
+/// # Safety
+///
+/// `v.data` must be properly aligned for `u32` and point to `v.len` valid, initialized `u32` code units.
 #[inline(always)]
 unsafe fn as_u32(v: &UniView) -> &[u32] {
-    std::slice::from_raw_parts(v.data.cast::<u32>(), v.len)
+    // SAFETY: caller guarantees v.data is aligned and points to v.len valid u32 elements.
+    unsafe { std::slice::from_raw_parts(v.data.cast::<u32>(), v.len) }
 }
 
 /// [`distance`] in the copy `X` of the hot path.
@@ -411,6 +439,11 @@ impl Isa for Baseline {
 // ---------------------------------------------------------------------------
 
 /// Dispatch on `(kind, ascii)` tuples and return the `K` edit distance directly.
+///
+/// # Safety
+///
+/// Both views must point to valid initialized code-unit buffers corresponding
+/// to their respective `kind` flags.
 #[inline(always)]
 unsafe fn compute<K: Kernel>(v1: &UniView, v2: &UniView) -> usize {
     use ffi::{PyUnicode_1BYTE_KIND as K1, PyUnicode_2BYTE_KIND as K2, PyUnicode_4BYTE_KIND as K4};
@@ -421,22 +454,25 @@ unsafe fn compute<K: Kernel>(v1: &UniView, v2: &UniView) -> usize {
     // 2. Dispatch based on kinds.
     match (v1.kind, v2.kind) {
         (K1, K1) => {
-            let (b1, b2) = (as_u8(v1), as_u8(v2));
+            // SAFETY: kind is 1-byte, so data is valid &[u8].
+            let (b1, b2) = unsafe { (as_u8(v1), as_u8(v2)) };
             if v1.ascii && v2.ascii {
                 compute_u8::<K, true>(b1, b2)
             } else {
                 compute_u8::<K, false>(b1, b2)
             }
         }
-        (K2, K2) => compute_sorted::<K, _>(as_u16(v1), as_u16(v2)),
-        (K4, K4) => compute_sorted::<K, _>(as_u32(v1), as_u32(v2)),
+        // SAFETY: kind is 2-byte, so data is valid &[u16].
+        (K2, K2) => compute_sorted::<K, _>(unsafe { as_u16(v1) }, unsafe { as_u16(v2) }),
+        // SAFETY: kind is 4-byte, so data is valid &[u32].
+        (K4, K4) => compute_sorted::<K, _>(unsafe { as_u32(v1) }, unsafe { as_u32(v2) }),
         // Mixed kinds compare code units in place, without a widened copy.
-        (K1, K2) => compute_sorted_mixed::<K, _, _>(as_u8(v1), as_u16(v2)),
-        (K1, K4) => compute_sorted_mixed::<K, _, _>(as_u8(v1), as_u32(v2)),
-        (K2, K1) => compute_sorted_mixed::<K, _, _>(as_u16(v1), as_u8(v2)),
-        (K2, K4) => compute_sorted_mixed::<K, _, _>(as_u16(v1), as_u32(v2)),
-        (K4, K1) => compute_sorted_mixed::<K, _, _>(as_u32(v1), as_u8(v2)),
-        (K4, K2) => compute_sorted_mixed::<K, _, _>(as_u32(v1), as_u16(v2)),
+        (K1, K2) => compute_sorted_mixed::<K, _, _>(unsafe { as_u8(v1) }, unsafe { as_u16(v2) }),
+        (K1, K4) => compute_sorted_mixed::<K, _, _>(unsafe { as_u8(v1) }, unsafe { as_u32(v2) }),
+        (K2, K1) => compute_sorted_mixed::<K, _, _>(unsafe { as_u16(v1) }, unsafe { as_u8(v2) }),
+        (K2, K4) => compute_sorted_mixed::<K, _, _>(unsafe { as_u16(v1) }, unsafe { as_u32(v2) }),
+        (K4, K1) => compute_sorted_mixed::<K, _, _>(unsafe { as_u32(v1) }, unsafe { as_u8(v2) }),
+        (K4, K2) => compute_sorted_mixed::<K, _, _>(unsafe { as_u32(v1) }, unsafe { as_u16(v2) }),
         _ => unreachable!("unknown PyUnicode kind"),
     }
 }
@@ -451,9 +487,10 @@ const MIXED_BLOCK: usize = 16;
 /// Number of positions where two blocks of different code-unit types
 /// differ.  No early exit, so LLVM widens and compares the block as vectors.
 #[inline(always)]
-fn block_mismatches<T1: CodeUnit, T2: CodeUnit>(x: &[T1], y: &[T2]) -> usize {
-    let x: &[T1; MIXED_BLOCK] = x.try_into().unwrap();
-    let y: &[T2; MIXED_BLOCK] = y.try_into().unwrap();
+fn block_mismatches<T1: CodeUnit, T2: CodeUnit>(
+    x: &[T1; MIXED_BLOCK],
+    y: &[T2; MIXED_BLOCK],
+) -> usize {
     x.iter()
         .zip(y)
         .map(|(p, q)| (p.as_u32() != q.as_u32()) as usize)
@@ -469,12 +506,16 @@ fn strip_affix_mixed<'a, T1: CodeUnit, T2: CodeUnit>(
 ) -> (&'a [T1], &'a [T2]) {
     let n = a.len().min(b.len());
     let mut prefix = 0;
-    while prefix + MIXED_BLOCK <= n
-        && block_mismatches(
-            &a[prefix..prefix + MIXED_BLOCK],
-            &b[prefix..prefix + MIXED_BLOCK],
-        ) == 0
-    {
+    while prefix + MIXED_BLOCK <= n {
+        let Some(blk_a) = a[prefix..].first_chunk::<MIXED_BLOCK>() else {
+            break;
+        };
+        let Some(blk_b) = b[prefix..].first_chunk::<MIXED_BLOCK>() else {
+            break;
+        };
+        if block_mismatches(blk_a, blk_b) != 0 {
+            break;
+        }
         prefix += MIXED_BLOCK;
     }
     while prefix < n && a[prefix].as_u64() == b[prefix].as_u64() {
@@ -486,12 +527,16 @@ fn strip_affix_mixed<'a, T1: CodeUnit, T2: CodeUnit>(
 
     let (n, la, lb) = (n - prefix, a.len(), b.len());
     let mut suffix = 0;
-    while suffix + MIXED_BLOCK <= n
-        && block_mismatches(
-            &a[la - suffix - MIXED_BLOCK..la - suffix],
-            &b[lb - suffix - MIXED_BLOCK..lb - suffix],
-        ) == 0
-    {
+    while suffix + MIXED_BLOCK <= n {
+        let Some(blk_a) = a[..la - suffix].last_chunk::<MIXED_BLOCK>() else {
+            break;
+        };
+        let Some(blk_b) = b[..lb - suffix].last_chunk::<MIXED_BLOCK>() else {
+            break;
+        };
+        if block_mismatches(blk_a, blk_b) != 0 {
+            break;
+        }
         suffix += MIXED_BLOCK;
     }
     while suffix < n && a[la - suffix - 1].as_u64() == b[lb - suffix - 1].as_u64() {
@@ -504,6 +549,9 @@ fn strip_affix_mixed<'a, T1: CodeUnit, T2: CodeUnit>(
 /// Reinterpret a code-unit slice as raw bytes (sound: u8/u16/u32 are plain data).
 #[inline(always)]
 pub(crate) fn as_bytes<T: CodeUnit>(s: &[T]) -> &[u8] {
+    // SAFETY: `s` is a valid slice of `CodeUnit` primitives (`u8`, `u16`, or `u32`),
+    // which are plain data with no uninitialized bytes or padding. The total byte
+    // length `std::mem::size_of_val(s)` correctly represents the backing memory.
     unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<u8>(), std::mem::size_of_val(s)) }
 }
 
@@ -527,18 +575,26 @@ fn blocks_differ(x: &[u8; AFFIX_BLOCK], y: &[u8; AFFIX_BLOCK]) -> bool {
 fn common_prefix_bytes(a: &[u8], b: &[u8]) -> usize {
     let n = a.len().min(b.len());
     let mut i = 0;
-    while i + AFFIX_BLOCK <= n
-        && !blocks_differ(
-            a[i..i + AFFIX_BLOCK].try_into().unwrap(),
-            b[i..i + AFFIX_BLOCK].try_into().unwrap(),
-        )
-    {
+    while i + AFFIX_BLOCK <= n {
+        let Some(blk_a) = a[i..].first_chunk::<AFFIX_BLOCK>() else {
+            break;
+        };
+        let Some(blk_b) = b[i..].first_chunk::<AFFIX_BLOCK>() else {
+            break;
+        };
+        if blocks_differ(blk_a, blk_b) {
+            break;
+        }
         i += AFFIX_BLOCK;
     }
     while i + 8 <= n {
-        let x = u64::from_le_bytes(a[i..i + 8].try_into().unwrap());
-        let y = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
-        let diff = x ^ y;
+        let Some(chunk_a) = a[i..].first_chunk::<8>() else {
+            break;
+        };
+        let Some(chunk_b) = b[i..].first_chunk::<8>() else {
+            break;
+        };
+        let diff = u64::from_le_bytes(*chunk_a) ^ u64::from_le_bytes(*chunk_b);
         if diff != 0 {
             return i + (diff.trailing_zeros() / 8) as usize;
         }
@@ -557,18 +613,26 @@ fn common_suffix_bytes(a: &[u8], b: &[u8]) -> usize {
     let n = a.len().min(b.len());
     let (la, lb) = (a.len(), b.len());
     let mut i = 0;
-    while i + AFFIX_BLOCK <= n
-        && !blocks_differ(
-            a[la - i - AFFIX_BLOCK..la - i].try_into().unwrap(),
-            b[lb - i - AFFIX_BLOCK..lb - i].try_into().unwrap(),
-        )
-    {
+    while i + AFFIX_BLOCK <= n {
+        let Some(blk_a) = a[..la - i].last_chunk::<AFFIX_BLOCK>() else {
+            break;
+        };
+        let Some(blk_b) = b[..lb - i].last_chunk::<AFFIX_BLOCK>() else {
+            break;
+        };
+        if blocks_differ(blk_a, blk_b) {
+            break;
+        }
         i += AFFIX_BLOCK;
     }
     while i + 8 <= n {
-        let x = u64::from_le_bytes(a[la - i - 8..la - i].try_into().unwrap());
-        let y = u64::from_le_bytes(b[lb - i - 8..lb - i].try_into().unwrap());
-        let diff = x ^ y;
+        let Some(chunk_a) = a[..la - i].last_chunk::<8>() else {
+            break;
+        };
+        let Some(chunk_b) = b[..lb - i].last_chunk::<8>() else {
+            break;
+        };
+        let diff = u64::from_le_bytes(*chunk_a) ^ u64::from_le_bytes(*chunk_b);
         if diff != 0 {
             return i + (diff.leading_zeros() / 8) as usize;
         }
@@ -640,10 +704,14 @@ fn hyrro_64_tiny_body<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], tex
         }
         #[cfg(target_arch = "aarch64")]
         {
+            // SAFETY: AArch64 baseline guarantees NEON support, and `pattern` code units
+            // are single-byte (`size_of::<T1>() == 1`).
             return unsafe { tiny_u8_simd::<K, T1, T2>(pattern, text) };
         }
         #[cfg(target_arch = "x86_64")]
         {
+            // SAFETY: x86_64 baseline guarantees SSE2 support, and `pattern` code units
+            // are single-byte (`size_of::<T1>() == 1`).
             return unsafe { tiny_u8_simd::<K, T1, T2>(pattern, text) };
         }
     }
@@ -669,6 +737,11 @@ fn hyrro_64_tiny_body<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], tex
 }
 
 /// [`hyrro_64_tiny`] for single-byte patterns using 128-bit NEON vector comparisons.
+///
+/// # Safety
+///
+/// Requires `size_of::<T1>() == 1` and `pattern.len() <= TINY_M`.
+/// Target must support AArch64 NEON vector instructions.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn tiny_u8_simd<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
@@ -709,6 +782,11 @@ unsafe fn tiny_u8_simd<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
 }
 
 /// [`hyrro_64_tiny`] for single-byte patterns using 128-bit SSE2 vector comparisons.
+///
+/// # Safety
+///
+/// Requires `size_of::<T1>() == 1` and `pattern.len() <= TINY_M`.
+/// Target must support x86-64 SSE2 vector instructions.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn tiny_u8_simd<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
@@ -874,6 +952,9 @@ pub(crate) fn small_ub_body<T: CodeUnit>(short: &[T], long: &[T]) -> Option<usiz
     let mut i = 0;
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: `i + 16 <= n`, so reading 16 bytes starting at `a.as_ptr().add(i)` and
+    // `b.as_ptr().add(i)` is within the bounds of `a` and `b`. NEON intrinsics are part
+    // of the baseline AArch64 ISA.
     unsafe {
         use std::arch::aarch64::*;
         while i + 16 <= n {
@@ -910,6 +991,8 @@ pub(crate) fn small_ub_body<T: CodeUnit>(short: &[T], long: &[T]) -> Option<usiz
     }
 
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: `i + 16 <= n`, so unaligned 16-byte reads from `a.as_ptr().add(i)` and
+    // `b.as_ptr().add(i)` are within bounds. SSE2 is part of the baseline x86-64 ISA.
     unsafe {
         use std::arch::x86_64::*;
         while i + 16 <= n {
@@ -963,9 +1046,13 @@ pub(crate) fn small_ub_body<T: CodeUnit>(short: &[T], long: &[T]) -> Option<usiz
     };
 
     while i + 8 <= n {
-        let ca = a[i..i + 8].try_into().unwrap();
-        let cb = b[i..i + 8].try_into().unwrap();
-        let mut d = u64::from_le_bytes(ca) ^ u64::from_le_bytes(cb);
+        let Some(ca) = a[i..].first_chunk::<8>() else {
+            break;
+        };
+        let Some(cb) = b[i..].first_chunk::<8>() else {
+            break;
+        };
+        let mut d = u64::from_le_bytes(*ca) ^ u64::from_le_bytes(*cb);
         while d != 0 {
             ub += 1;
             if ub > MBLEVEN_MAX {
@@ -998,7 +1085,13 @@ fn small_ub_mixed<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2]) -> Opti
     }
     let blocks = short.len() / MIXED_BLOCK * MIXED_BLOCK;
     for i in (0..blocks).step_by(MIXED_BLOCK) {
-        ub += block_mismatches(&short[i..i + MIXED_BLOCK], &long[i..i + MIXED_BLOCK]);
+        let Some(blk_s) = short[i..].first_chunk::<MIXED_BLOCK>() else {
+            break;
+        };
+        let Some(blk_l) = long[i..].first_chunk::<MIXED_BLOCK>() else {
+            break;
+        };
+        ub += block_mismatches(blk_s, blk_l);
         if ub > MBLEVEN_MAX {
             return None;
         }
@@ -1190,8 +1283,11 @@ fn hyrro_64_u8<K: Kernel, const SLOTS: usize>(pattern: &[u8], text: &[u8]) -> us
     K::word(
         pattern.len(),
         text.len(),
-        text.iter()
-            .map(|&c| unsafe { *peq.get_unchecked(c as usize) }),
+        text.iter().map(|&c| {
+            // SAFETY: When SLOTS == 128, input is verified ASCII (c < 128);
+            // when SLOTS == 256, any u8 is < 256.
+            unsafe { *peq.get_unchecked(c as usize) }
+        }),
     )
 }
 
@@ -1234,11 +1330,14 @@ fn hyrro_64_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[
             let c = c.as_u64();
             let mut slot = hslot(c, shift);
             loop {
+                // SAFETY: `slot` is produced by `hslot` and masked with `MASK = SLOTS - 1`,
+                // ensuring `slot < SLOTS` is invariant.
                 let v = unsafe { *vals.get_unchecked(slot) };
                 if v == 0 {
                     return 0;
                 }
-                // SAFETY: v != 0, so keys[slot] was written.
+                // SAFETY: `v != 0`, meaning `keys[slot]` was initialized during table setup,
+                // and `slot < SLOTS` as established above.
                 if unsafe { keys.get_unchecked(slot).assume_init().as_u64() } == c {
                     return v;
                 }
@@ -1827,7 +1926,7 @@ fn scratch<'a, const N: usize>(
         for x in buf.iter_mut() {
             x.write(value);
         }
-        // SAFETY: all `len` elements were just initialized.
+        // SAFETY: All `len` elements in `buf` were initialized above with `x.write(value)`.
         unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u64>(), len) }
     } else {
         *heap = vec![value; len];
@@ -1882,7 +1981,10 @@ fn hyrro_multiword_hash_body<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
     let mut n_keys = 0u64;
     for (i, &c) in short.iter().enumerate() {
         let key = c.as_u64();
-        debug_assert!(key <= u32::MAX as u64, "CodeUnit value must fit in 32 bits");
+        debug_assert!(
+            key <= u64::from(u32::MAX),
+            "CodeUnit value must fit in 32 bits"
+        );
         let mut slot = hslot(key, hshift);
         loop {
             let entry = hash[slot];
@@ -1907,6 +2009,8 @@ fn hyrro_multiword_hash_body<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
     let row_of = |key: u64| -> usize {
         let mut slot = hslot(key, hshift);
         loop {
+            // SAFETY: `slot` is produced by `hslot` and masked with `hash_mask = hash_slots - 1`,
+            // ensuring `slot < hash.len()` is invariant.
             let entry = unsafe { *hash.get_unchecked(slot) };
             if entry == EMPTY {
                 return n_keys;
