@@ -418,6 +418,10 @@ unsafe fn compute<K: Kernel>(v1: &UniView, v2: &UniView) -> usize {
     // 1. Normalize: v1 is the shorter pattern string (m), v2 is the text (n).
     let (v1, v2) = if v1.len <= v2.len { (v1, v2) } else { (v2, v1) };
 
+    if v1.len == 0 {
+        return v2.len;
+    }
+
     // 2. Dispatch based on kinds.
     match (v1.kind, v2.kind) {
         (K1, K1) => {
@@ -480,6 +484,9 @@ fn strip_affix_mixed<'a, T1: CodeUnit, T2: CodeUnit>(
     while prefix < n && a[prefix].as_u64() == b[prefix].as_u64() {
         prefix += 1;
     }
+    if prefix == a.len() {
+        return (&a[..0], &b[prefix..]);
+    }
 
     let a = &a[prefix..];
     let b = &b[prefix..];
@@ -535,6 +542,24 @@ fn common_prefix_bytes(a: &[u8], b: &[u8]) -> usize {
     {
         i += AFFIX_BLOCK;
     }
+    if i + AFFIX_BLOCK <= n {
+        let (Some(ca0), Some(cb0)) = (a[i..].first_chunk::<16>(), b[i..].first_chunk::<16>())
+        else {
+            unreachable!();
+        };
+        let diff0 = u128::from_le_bytes(*ca0) ^ u128::from_le_bytes(*cb0);
+        if diff0 != 0 {
+            return i + (diff0.trailing_zeros() / 8) as usize;
+        }
+        let (Some(ca1), Some(cb1)) = (
+            a[i + 16..].first_chunk::<16>(),
+            b[i + 16..].first_chunk::<16>(),
+        ) else {
+            unreachable!();
+        };
+        let diff1 = u128::from_le_bytes(*ca1) ^ u128::from_le_bytes(*cb1);
+        return i + 16 + (diff1.trailing_zeros() / 8) as usize;
+    }
     while i + 8 <= n {
         let x = u64::from_le_bytes(a[i..i + 8].try_into().unwrap());
         let y = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
@@ -565,6 +590,26 @@ fn common_suffix_bytes(a: &[u8], b: &[u8]) -> usize {
     {
         i += AFFIX_BLOCK;
     }
+    if i + AFFIX_BLOCK <= n {
+        let (Some(ca0), Some(cb0)) = (
+            a[..la - i].last_chunk::<16>(),
+            b[..lb - i].last_chunk::<16>(),
+        ) else {
+            unreachable!();
+        };
+        let diff0 = u128::from_le_bytes(*ca0) ^ u128::from_le_bytes(*cb0);
+        if diff0 != 0 {
+            return i + (diff0.leading_zeros() / 8) as usize;
+        }
+        let (Some(ca1), Some(cb1)) = (
+            a[..la - i - 16].last_chunk::<16>(),
+            b[..lb - i - 16].last_chunk::<16>(),
+        ) else {
+            unreachable!();
+        };
+        let diff1 = u128::from_le_bytes(*ca1) ^ u128::from_le_bytes(*cb1);
+        return i + 16 + (diff1.leading_zeros() / 8) as usize;
+    }
     while i + 8 <= n {
         let x = u64::from_le_bytes(a[la - i - 8..la - i].try_into().unwrap());
         let y = u64::from_le_bytes(b[lb - i - 8..lb - i].try_into().unwrap());
@@ -590,6 +635,9 @@ fn common_suffix_bytes(a: &[u8], b: &[u8]) -> usize {
 fn strip_affix<'a, T: CodeUnit>(a: &'a [T], b: &'a [T]) -> (&'a [T], &'a [T]) {
     let size = std::mem::size_of::<T>();
     let prefix = common_prefix_bytes(as_bytes(a), as_bytes(b)) / size;
+    if prefix == a.len() {
+        return (&a[..0], &b[prefix..]);
+    }
 
     let a = &a[prefix..];
     let b = &b[prefix..];
@@ -1196,20 +1244,23 @@ fn hyrro_64_u8<K: Kernel, const SLOTS: usize>(pattern: &[u8], text: &[u8]) -> us
 }
 
 /// Single-word variant for UCS-2/4 and mixed kinds, with the peq table in a
-/// stack-allocated open-addressing hash.
+/// stack-allocated open-addressing hash of `SLOTS` entries.
 #[inline(always)]
-fn hyrro_64_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[T2]) -> usize {
+fn hyrro_64_hash_slots<K: Kernel, const SLOTS: usize, T1: CodeUnit, T2: CodeUnit>(
+    pattern: &[T1],
+    text: &[T2],
+) -> usize {
     let m = pattern.len();
-    debug_assert!((1..=64).contains(&m));
+    debug_assert!((1..=SLOTS).contains(&m));
+    const { assert!(SLOTS.is_power_of_two()) };
 
-    const SLOTS: usize = 128;
-    const MASK: usize = SLOTS - 1;
+    let mask = SLOTS - 1;
+    let shift = 64 - mask.count_ones();
     // A slot's key is written before its value becomes non-zero and read only
     // after, so `vals` alone marks occupancy and `keys` needs no fill.
     let mut keys = [const { MaybeUninit::<T1>::uninit() }; SLOTS];
     let mut vals = [0u64; SLOTS];
 
-    let shift = 64 - MASK.count_ones();
     for (i, &c) in pattern.iter().enumerate() {
         let mut slot = hslot(c.as_u64(), shift);
         loop {
@@ -1223,7 +1274,7 @@ fn hyrro_64_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[
                 vals[slot] |= 1u64 << i;
                 break;
             }
-            slot = (slot + 1) & MASK;
+            slot = (slot + 1) & mask;
         }
     }
 
@@ -1242,10 +1293,25 @@ fn hyrro_64_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[
                 if unsafe { keys.get_unchecked(slot).assume_init().as_u64() } == c {
                     return v;
                 }
-                slot = (slot + 1) & MASK;
+                slot = (slot + 1) & mask;
             }
         }),
     )
+}
+
+/// Single-word variant for UCS-2/4 and mixed kinds, with the peq table in a
+/// stack-allocated open-addressing hash. Adapts table size between 64 and 128
+/// slots based on pattern length to cut stack zeroing overhead when `m <= 32`.
+#[inline(always)]
+fn hyrro_64_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[T2]) -> usize {
+    let m = pattern.len();
+    debug_assert!((1..=64).contains(&m));
+
+    if m <= 32 {
+        hyrro_64_hash_slots::<K, 64, T1, T2>(pattern, text)
+    } else {
+        hyrro_64_hash_slots::<K, 128, T1, T2>(pattern, text)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1656,18 +1722,15 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
             }
             let mut hin: i32 = 1;
             debug_assert!(first <= last && last < w);
-            for k in first..=last {
+            for k in first..last {
                 let eq = self.peq(base, k);
-                // SAFETY: k <= last < w = pv.len() = mv.len().
+                // SAFETY: k < last < w = pv.len() = mv.len().
                 let (pv_k, mv_k) = unsafe { (*pv.get_unchecked(k), *mv.get_unchecked(k)) };
                 let xv = eq | mv_k;
                 let eq_in = eq | ((hin < 0) as u64);
                 let xh = ((eq_in & pv_k).wrapping_add(pv_k) ^ pv_k) | eq_in;
                 let ph = mv_k | !(xh | pv_k);
                 let mh = pv_k & xh;
-                if k == last {
-                    score += ((ph >> top_bit) & 1) as isize - ((mh >> top_bit) & 1) as isize;
-                }
                 let hout = ((ph >> 63) & 1) as i32 - ((mh >> 63) & 1) as i32;
                 let ph_s = (ph << 1) | ((hin > 0) as u64);
                 let mh_s = (mh << 1) | ((hin < 0) as u64);
@@ -1677,6 +1740,25 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
                     *mv.get_unchecked_mut(k) = ph_s & xv;
                 }
                 hin = hout;
+            }
+            // Peeling the final iteration `k = last`:
+            // - Updates `score` at `top_bit`.
+            // - Outgoing carry `hout` is not needed since `hin` is column-local.
+            let eq = self.peq(base, last);
+            // SAFETY: last < w = pv.len() = mv.len().
+            let (pv_last, mv_last) = unsafe { (*pv.get_unchecked(last), *mv.get_unchecked(last)) };
+            let xv = eq | mv_last;
+            let eq_in = eq | ((hin < 0) as u64);
+            let xh = ((eq_in & pv_last).wrapping_add(pv_last) ^ pv_last) | eq_in;
+            let ph = mv_last | !(xh | pv_last);
+            let mh = pv_last & xh;
+            score += ((ph >> top_bit) & 1) as isize - ((mh >> top_bit) & 1) as isize;
+            let ph_s = (ph << 1) | ((hin > 0) as u64);
+            let mh_s = (mh << 1) | ((hin < 0) as u64);
+            // SAFETY: as for the reads above.
+            unsafe {
+                *pv.get_unchecked_mut(last) = mh_s | !(xv | ph_s);
+                *mv.get_unchecked_mut(last) = ph_s & xv;
             }
             // `score` never underestimates D[bottom(last)][j], and finishing
             // from there takes at least `score - excess` edits (D never
@@ -2860,6 +2942,33 @@ mod tests {
                     let (sa, la) = (astral(&short), astral(&long));
                     assert_eq!(levenshtein(&sa, &la), d, "astral m={m} n={n}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn hyrro_64_hash_matches_oracle() {
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let alphabet: Vec<u32> = (0x3041..0x3090).collect();
+        for &m in &[1, 2, 7, 16, 25, 31, 32, 33, 48, 63, 64] {
+            for &n in &[m, m + 1, m + 5, 2 * m + 10] {
+                let pat: Vec<u32> = (0..m)
+                    .map(|_| {
+                        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        alphabet[(state as usize) % alphabet.len()]
+                    })
+                    .collect();
+                let text: Vec<u32> = (0..n)
+                    .map(|_| {
+                        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        alphabet[(state as usize) % alphabet.len()]
+                    })
+                    .collect();
+                let pc: Vec<char> = pat.iter().map(|&c| char::from_u32(c).unwrap()).collect();
+                let tc: Vec<char> = text.iter().map(|&c| char::from_u32(c).unwrap()).collect();
+                let expected = naive(&pc, &tc);
+                let got = hyrro_64_hash::<Lev, _, _>(&pat, &text);
+                assert_eq!(got, expected, "m={m}, n={n}");
             }
         }
     }
