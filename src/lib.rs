@@ -467,11 +467,17 @@ unsafe fn compute<K: Kernel>(v1: &UniView, v2: &UniView) -> usize {
         // SAFETY: kind is 4-byte, so data is valid &[u32].
         (K4, K4) => compute_sorted::<K, _>(unsafe { as_u32(v1) }, unsafe { as_u32(v2) }),
         // Mixed kinds compare code units in place, without a widened copy.
+        // SAFETY: kinds are 1- and 2-byte, so data are valid &[u8] and &[u16].
         (K1, K2) => compute_sorted_mixed::<K, _, _>(unsafe { as_u8(v1) }, unsafe { as_u16(v2) }),
+        // SAFETY: kinds are 1- and 4-byte, so data are valid &[u8] and &[u32].
         (K1, K4) => compute_sorted_mixed::<K, _, _>(unsafe { as_u8(v1) }, unsafe { as_u32(v2) }),
+        // SAFETY: kinds are 2- and 1-byte, so data are valid &[u16] and &[u8].
         (K2, K1) => compute_sorted_mixed::<K, _, _>(unsafe { as_u16(v1) }, unsafe { as_u8(v2) }),
+        // SAFETY: kinds are 2- and 4-byte, so data are valid &[u16] and &[u32].
         (K2, K4) => compute_sorted_mixed::<K, _, _>(unsafe { as_u16(v1) }, unsafe { as_u32(v2) }),
+        // SAFETY: kinds are 4- and 1-byte, so data are valid &[u32] and &[u8].
         (K4, K1) => compute_sorted_mixed::<K, _, _>(unsafe { as_u32(v1) }, unsafe { as_u8(v2) }),
+        // SAFETY: kinds are 4- and 2-byte, so data are valid &[u32] and &[u16].
         (K4, K2) => compute_sorted_mixed::<K, _, _>(unsafe { as_u32(v1) }, unsafe { as_u16(v2) }),
         _ => unreachable!("unknown PyUnicode kind"),
     }
@@ -704,14 +710,16 @@ fn hyrro_64_tiny_body<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], tex
         }
         #[cfg(target_arch = "aarch64")]
         {
-            // SAFETY: AArch64 baseline guarantees NEON support, and `pattern` code units
-            // are single-byte (`size_of::<T1>() == 1`).
+            // SAFETY: AArch64 baseline guarantees NEON support, `pattern` code units
+            // are single-byte (`size_of::<T1>() == 1`), and `pattern.len() <= TINY_M`
+            // (caller contract, asserted above).
             return unsafe { tiny_u8_simd::<K, T1, T2>(pattern, text) };
         }
         #[cfg(target_arch = "x86_64")]
         {
-            // SAFETY: x86_64 baseline guarantees SSE2 support, and `pattern` code units
-            // are single-byte (`size_of::<T1>() == 1`).
+            // SAFETY: x86_64 baseline guarantees SSE2 support, `pattern` code units
+            // are single-byte (`size_of::<T1>() == 1`), and `pattern.len() <= TINY_M`
+            // (caller contract, asserted above).
             return unsafe { tiny_u8_simd::<K, T1, T2>(pattern, text) };
         }
     }
@@ -1085,11 +1093,13 @@ fn small_ub_mixed<T1: CodeUnit, T2: CodeUnit>(short: &[T1], long: &[T2]) -> Opti
     }
     let blocks = short.len() / MIXED_BLOCK * MIXED_BLOCK;
     for i in (0..blocks).step_by(MIXED_BLOCK) {
+        // `i + MIXED_BLOCK <= blocks <= short.len() <= long.len()`, so both chunks exist;
+        // a silent `break` here would skip blocks and undercount `ub`.
         let Some(blk_s) = short[i..].first_chunk::<MIXED_BLOCK>() else {
-            break;
+            unreachable!("block lies within short");
         };
         let Some(blk_l) = long[i..].first_chunk::<MIXED_BLOCK>() else {
-            break;
+            unreachable!("block lies within long");
         };
         ub += block_mismatches(blk_s, blk_l);
         if ub > MBLEVEN_MAX {
@@ -1330,8 +1340,8 @@ fn hyrro_64_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[
             let c = c.as_u64();
             let mut slot = hslot(c, shift);
             loop {
-                // SAFETY: `slot` is produced by `hslot` and masked with `MASK = SLOTS - 1`,
-                // ensuring `slot < SLOTS` is invariant.
+                // SAFETY: `slot < SLOTS`: `hslot` with `shift = 64 - log2(SLOTS)` keeps
+                // only the top `log2(SLOTS)` bits, and each probe step is masked with `MASK`.
                 let v = unsafe { *vals.get_unchecked(slot) };
                 if v == 0 {
                     return 0;
@@ -2009,8 +2019,9 @@ fn hyrro_multiword_hash_body<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
     let row_of = |key: u64| -> usize {
         let mut slot = hslot(key, hshift);
         loop {
-            // SAFETY: `slot` is produced by `hslot` and masked with `hash_mask = hash_slots - 1`,
-            // ensuring `slot < hash.len()` is invariant.
+            // SAFETY: `slot < hash_size == hash.len()`: `hslot` with
+            // `hshift = 64 - log2(hash_size)` keeps only the top `log2(hash_size)` bits,
+            // and each probe step is masked with `hash_mask = hash_size - 1`.
             let entry = unsafe { *hash.get_unchecked(slot) };
             if entry == EMPTY {
                 return n_keys;
