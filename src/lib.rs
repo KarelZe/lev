@@ -5,49 +5,59 @@
 //! * [`distance`] – the Levenshtein edit distance between two strings.
 //! * [`ratio`]    – the indel similarity score in `[0.0, 1.0]`.
 //!
-//! # Algorithm
+//! Supported on Python 3.10 through 3.15, including free-threaded builds (PEP 703).
+//!
+//! # Algorithmic Architecture
 //!
 //! See <https://en.wikipedia.org/wiki/Levenshtein_distance> for the distance
-//! definition.  Several optimizations are layered to minimise the constant factor:
+//! definition.  Five performance layers are composed to minimize constant factors
+//! across all string length and similarity regimes:
 //!
-//! 1. **Identity short-circuit** – the same object passed twice returns
-//!    immediately.
+//! 1. **Identity short-circuit** – if both arguments point to the identical Python
+//!    string object (`s1.is(s2)`), return `0` (or `1.0` for `ratio`) immediately
+//!    without examining string contents.
 //! 2. **Common-affix stripping** – shared leading and trailing code units are
-//!    removed before the main computation.
+//!    stripped before the main computation using vectorized 16-element/32-byte
+//!    block comparisons followed by scalar word scans (`strip_affix`, `strip_affix_mixed`).
 //! 3. **Zero-copy CPython buffer access** – Python stores strings in one of
 //!    three compact internal encodings (UCS-1 / UCS-2 / UCS-4); see
 //!    [PEP 393](https://peps.python.org/pep-0393/).  Kind, ascii flag, data
-//!    pointer, and length are read from the object header into a [`UniView`]
-//!    without any copy; subsequent dispatch operates on those locals only.
+//!    pointer, and length are extracted from the `PyASCIIObject` header into a
+//!    [`UniView`] in a single pass without copying; subsequent dispatch operates
+//!    exclusively on local slices.
 //!    - *UCS-1* (`u8`, ≤ U+00FF): peq is a flat `[u64; 128]` (pure ASCII) or
 //!      `[u64; 256]` (Latin-1) stack array — O(1) direct-index lookup.
 //!    - *UCS-2* (`u16`) and *UCS-4* (`u32`): peq is a 128-slot stack-allocated
 //!      open-addressing hash table with Fibonacci hashing — O(1) amortized
-//!      lookup at ≤ 50 % load.  Mixed-kind pairs compare code units in place;
-//!      no UTF-8 round-trip, lone surrogates preserved.
-//! 4. **Hyyrö's bit-parallel algorithm** – O(⌈m/w⌉ · n) time with w = 64;
-//!    see H. Hyyrö, "A Bit-Vector Algorithm for Computing Levenshtein and
-//!    Damerau Edit Distances", *Nordic Journal of Computing*, 2003.
-//!    - *Tiny* (`m ≤ 8`): no peq table; the match word is computed per text
-//!      char (SWAR for byte patterns, an unrolled scan otherwise).
-//!    - *Single-word* (`m ≤ 64`): one 64-bit word covers the whole pattern.
-//!    - *Multi-word* (`m > 64`): ⌈m/64⌉ words with carry propagation.
-//!      UCS-1 uses a `[[u64; W]; 128 or 256]` stack peq (O(1) lookup, no
-//!      heap).  UCS-2/4 use a peq data array addressed through the same kind
-//!      of open-addressing hash index, on the stack up to `m ≤ 512`.
-//!    - *Large* (`m > 512`): one loop over all words per column; on
+//!      lookup at ≤ 50% load.  Mixed-kind pairs compare code units in place;
+//!      no UTF-8 transcoding or allocations, preserving lone surrogates.
+//! 4. **Bit-parallel algorithm (Hyyrö/Myers) & mbleven fast path** – O(⌈m/w⌉ · n)
+//!    time with w = 64 (Hyyrö 2003, Myers 1999):
+//!    - *Tiny patterns* (`m ≤ 16`): table-free execution; the match word is
+//!      computed per text character using SWAR for byte patterns up to length 8,
+//!      128-bit SIMD (NEON on AArch64, SSE2 on x86-64) for byte patterns 9..=16,
+//!      or unrolled scalar scans for wider code units.
+//!    - *Small-distance fast path* (`ub ≤ 3`, `m ≤ 512`): for strings differing by
+//!      very few edits, a SIMD Hamming scan (`small_ub`) establishes an upper bound
+//!      and gates into `mbleven` (Hyyrö 2018), evaluating candidate branch patterns
+//!      in O(ub · n) time without building peq tables or allocating memory.
+//!    - *Single-word* (`m ≤ 64`): one 64-bit word covers the entire pattern.
+//!    - *Multi-word* (`64 < m ≤ 512`): ⌈m/64⌉ words with carry propagation.
+//!      UCS-1 uses a `[[u64; W]; 128 or 256]` stack peq (O(1) direct lookup, no heap).
+//!      UCS-2/4 use stack-allocated open-addressing hash tables.
+//!    - *Large strings* (`m > 512`): one loop over all words per column; on
 //!      AArch64, strips of eight words sweep the text one after another
 //!      with the const-width kernel instead, handing the per-column carry
 //!      and boundary bits upwards, so each strip's state stays in registers.
 //!      The LCS full matrix runs in strips of four words on x86-64 too.
 //!    - Steps with target-specific forms live in [`kernels`], one module per
-//!      target, with a dispatcher that picks the form for the build target
-//!      and CPU.
-//! 5. **Ukkonen banding** (`m > 512`) – similar strings are resolved by a
-//!    narrow diagonal band over Myers' blocked recurrence (O(n · d/w) instead
-//!    of O(n · m/w)).  Band widths double until one proves its result; each
-//!    pass aborts early, which keeps the overhead on dissimilar strings to a
-//!    few percent before falling back to the full matrix.
+//!      target.  On x86-64 the dispatchers pick a form at runtime by CPU
+//!      feature detection; on AArch64 the form is fixed at compile time by
+//!      `cfg` (Apple or Neoverse tuning).
+//! 5. **Ukkonen diagonal banding (`m > 512`) & LCS ratio** – similar long strings
+//!    are resolved by a narrow diagonal band over Myers' blocked recurrence (O(n · d/w)
+//!    instead of O(n · m/w)).  Band widths double geometrically until certifying the
+//!    exact result, with early bailout on dissimilar pairs.
 //!
 //! [`ratio`] reuses steps 1–3 verbatim and swaps step 4 for the bit-parallel
 //! LCS recurrence of Crochemore et al. (2001) / Hyyrö (2004), from which the
@@ -305,6 +315,8 @@ macro_rules! entry_points {
         ///     2
         ///     >>> lev.distance("résumé", "resume")
         ///     2
+        ///     >>> lev.distance("日本語", "日本")
+        ///     1
         // `pass_module` binds the functions to the module instead of registering
         // them `METH_STATIC`, which PyO3 0.28 does otherwise at a cost of a few ns per
         // call on CPython 3.11+ (PyO3 issue #6426).
@@ -353,6 +365,8 @@ macro_rules! entry_points {
         ///     0.0
         ///     >>> lev.ratio("", "")
         ///     1.0
+        ///     >>> lev.ratio("résumé", "resume")
+        ///     0.6666666666666667
         #[pyfunction]
         #[pyo3(pass_module, signature = (s1, s2, /))]
         pub(crate) fn ratio(

@@ -16,7 +16,7 @@ or if you prefer slow:
 pip install lev-rs
 ```
 
-Wheels are available for Python 3.10+, including free-threaded builds, on Linux, macOS, and Windows.
+Wheels are available for Python 3.10 through 3.15, including free-threaded builds (PEP 703), on Linux, macOS, and Windows.
 
 ## Usage
 
@@ -73,3 +73,18 @@ A short customer support message with a few natural typos.
 
 ![Realistic text benchmark – light](assets/benchmark_realistic_light.svg#only-light){ width="75%" }
 ![Realistic text benchmark – dark](assets/benchmark_realistic_dark.svg#only-dark){ width="75%" }
+
+### Benchmark Scripts
+
+Reproduce benchmarks locally using the provided scripts:
+
+```bash
+# Compare against other libraries:
+uv run scripts/benchmark.py
+
+# Benchmark scaling across string lengths:
+uv run scripts/benchmark_by_length.py
+
+# Benchmark speedup across released versions:
+uv run scripts/benchmark_by_version.py
+```
