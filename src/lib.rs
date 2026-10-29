@@ -542,24 +542,6 @@ fn common_prefix_bytes(a: &[u8], b: &[u8]) -> usize {
     {
         i += AFFIX_BLOCK;
     }
-    if i + AFFIX_BLOCK <= n {
-        let (Some(ca0), Some(cb0)) = (a[i..].first_chunk::<16>(), b[i..].first_chunk::<16>())
-        else {
-            unreachable!();
-        };
-        let diff0 = u128::from_le_bytes(*ca0) ^ u128::from_le_bytes(*cb0);
-        if diff0 != 0 {
-            return i + (diff0.trailing_zeros() / 8) as usize;
-        }
-        let (Some(ca1), Some(cb1)) = (
-            a[i + 16..].first_chunk::<16>(),
-            b[i + 16..].first_chunk::<16>(),
-        ) else {
-            unreachable!();
-        };
-        let diff1 = u128::from_le_bytes(*ca1) ^ u128::from_le_bytes(*cb1);
-        return i + 16 + (diff1.trailing_zeros() / 8) as usize;
-    }
     while i + 8 <= n {
         let x = u64::from_le_bytes(a[i..i + 8].try_into().unwrap());
         let y = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
@@ -589,26 +571,6 @@ fn common_suffix_bytes(a: &[u8], b: &[u8]) -> usize {
         )
     {
         i += AFFIX_BLOCK;
-    }
-    if i + AFFIX_BLOCK <= n {
-        let (Some(ca0), Some(cb0)) = (
-            a[..la - i].last_chunk::<16>(),
-            b[..lb - i].last_chunk::<16>(),
-        ) else {
-            unreachable!();
-        };
-        let diff0 = u128::from_le_bytes(*ca0) ^ u128::from_le_bytes(*cb0);
-        if diff0 != 0 {
-            return i + (diff0.leading_zeros() / 8) as usize;
-        }
-        let (Some(ca1), Some(cb1)) = (
-            a[..la - i - 16].last_chunk::<16>(),
-            b[..lb - i - 16].last_chunk::<16>(),
-        ) else {
-            unreachable!();
-        };
-        let diff1 = u128::from_le_bytes(*ca1) ^ u128::from_le_bytes(*cb1);
-        return i + 16 + (diff1.leading_zeros() / 8) as usize;
     }
     while i + 8 <= n {
         let x = u64::from_le_bytes(a[la - i - 8..la - i].try_into().unwrap());
@@ -1251,7 +1213,10 @@ fn hyrro_64_hash_slots<K: Kernel, const SLOTS: usize, T1: CodeUnit, T2: CodeUnit
     text: &[T2],
 ) -> usize {
     let m = pattern.len();
-    debug_assert!((1..=SLOTS).contains(&m));
+    // At most half the slots fill, so every probe chain ends at an empty slot
+    // within a few steps; a full table would make a lookup of an absent key
+    // loop forever.
+    debug_assert!((1..=64).contains(&m) && 2 * m <= SLOTS);
     const { assert!(SLOTS.is_power_of_two()) };
 
     let mask = SLOTS - 1;
@@ -1624,6 +1589,24 @@ struct LargeCtx<'a, F> {
     base_of: F,
 }
 
+/// One block of the Myers column step in [`LargeCtx::banded_body`]: updates
+/// the block's vertical deltas `pv`/`mv` for match mask `eq` and incoming
+/// horizontal delta `hin`, and returns its horizontal deltas `(ph, mh)`.
+#[inline(always)]
+fn banded_step(eq: u64, hin: i32, pv: &mut u64, mv: &mut u64) -> (u64, u64) {
+    let (pv_k, mv_k) = (*pv, *mv);
+    let xv = eq | mv_k;
+    let eq_in = eq | ((hin < 0) as u64);
+    let xh = ((eq_in & pv_k).wrapping_add(pv_k) ^ pv_k) | eq_in;
+    let ph = mv_k | !(xh | pv_k);
+    let mh = pv_k & xh;
+    let ph_s = (ph << 1) | ((hin > 0) as u64);
+    let mh_s = (mh << 1) | ((hin < 0) as u64);
+    *pv = mh_s | !(xv | ph_s);
+    *mv = ph_s & xv;
+    (ph, mh)
+}
+
 impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
     /// Copy of `self` that reads row offsets from `bases`, one per text char.
     /// Resolving rows once pays off when the band passes sweep the text
@@ -1725,41 +1708,17 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
             for k in first..last {
                 let eq = self.peq(base, k);
                 // SAFETY: k < last < w = pv.len() = mv.len().
-                let (pv_k, mv_k) = unsafe { (*pv.get_unchecked(k), *mv.get_unchecked(k)) };
-                let xv = eq | mv_k;
-                let eq_in = eq | ((hin < 0) as u64);
-                let xh = ((eq_in & pv_k).wrapping_add(pv_k) ^ pv_k) | eq_in;
-                let ph = mv_k | !(xh | pv_k);
-                let mh = pv_k & xh;
-                let hout = ((ph >> 63) & 1) as i32 - ((mh >> 63) & 1) as i32;
-                let ph_s = (ph << 1) | ((hin > 0) as u64);
-                let mh_s = (mh << 1) | ((hin < 0) as u64);
-                // SAFETY: as for the reads above.
-                unsafe {
-                    *pv.get_unchecked_mut(k) = mh_s | !(xv | ph_s);
-                    *mv.get_unchecked_mut(k) = ph_s & xv;
-                }
-                hin = hout;
+                let (pv_k, mv_k) = unsafe { (pv.get_unchecked_mut(k), mv.get_unchecked_mut(k)) };
+                let (ph, mh) = banded_step(eq, hin, pv_k, mv_k);
+                hin = ((ph >> 63) & 1) as i32 - ((mh >> 63) & 1) as i32;
             }
-            // Peeling the final iteration `k = last`:
-            // - Updates `score` at `top_bit`.
-            // - Outgoing carry `hout` is not needed since `hin` is column-local.
+            // The final iteration `k = last` is peeled: only it updates
+            // `score` at `top_bit`, and its outgoing carry is not needed.
             let eq = self.peq(base, last);
             // SAFETY: last < w = pv.len() = mv.len().
-            let (pv_last, mv_last) = unsafe { (*pv.get_unchecked(last), *mv.get_unchecked(last)) };
-            let xv = eq | mv_last;
-            let eq_in = eq | ((hin < 0) as u64);
-            let xh = ((eq_in & pv_last).wrapping_add(pv_last) ^ pv_last) | eq_in;
-            let ph = mv_last | !(xh | pv_last);
-            let mh = pv_last & xh;
+            let (pv_l, mv_l) = unsafe { (pv.get_unchecked_mut(last), mv.get_unchecked_mut(last)) };
+            let (ph, mh) = banded_step(eq, hin, pv_l, mv_l);
             score += ((ph >> top_bit) & 1) as isize - ((mh >> top_bit) & 1) as isize;
-            let ph_s = (ph << 1) | ((hin > 0) as u64);
-            let mh_s = (mh << 1) | ((hin < 0) as u64);
-            // SAFETY: as for the reads above.
-            unsafe {
-                *pv.get_unchecked_mut(last) = mh_s | !(xv | ph_s);
-                *mv.get_unchecked_mut(last) = ph_s & xv;
-            }
             // `score` never underestimates D[bottom(last)][j], and finishing
             // from there takes at least `score - excess` edits (D never
             // decreases along diagonal steps); once that exceeds `t` this band
