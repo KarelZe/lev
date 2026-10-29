@@ -54,6 +54,13 @@ testpaths = ["tests"]
 [tool.maturin]
 # bindings = "bin"
 module-name = "lev._lev"
+features = ["python"]
+# Cargo.toml's `include` keeps the crate to the Rust sources; the sdist also
+# needs the x86-64 rustflags and the test suite.
+include = [
+  { path = ".cargo/config.toml", format = "sdist" },
+  { path = "tests/*.py", format = "sdist" },
+]
 python-source = "python"
 strip = true
 

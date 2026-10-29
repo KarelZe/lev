@@ -2,8 +2,10 @@
 
 ## Project Overview
 `lev` is a Python library exposing Levenshtein distance and similarity ratio.
-The hot path is implemented in Rust via PyO3; Python bindings live in `src/lib.rs`
-and type stubs in `python/lev/_lev.pyi`. Performance is the primary design constraint —
+The hot path is implemented in Rust and also published as the `lev-rs` crate.
+The Rust API lives in `src/lib.rs`; the PyO3 bindings live in `src/python.rs`
+behind the `python` Cargo feature (enabled by maturin via `pyproject.toml`), and
+type stubs in `python/lev/_lev.pyi`. Performance is the primary design constraint —
 prefer Rust-side optimizations over Python wrappers.
 
 ## Environment Setup
@@ -56,7 +58,7 @@ a test in `kernels/tests.rs` against the portable form or the DP oracle.
 
 ## Testing
 - Python: `pytest tests/`
-- Rust: `cargo test`
+- Rust: `cargo test` (pure-Rust build; the bindings are tested through pytest)
 - Rust changes require a rebuild before pytest will pick them up. You can trigger a rebuild with `uv run maturin develop --release`.
 
 ## Benchmarking
@@ -86,12 +88,13 @@ a test in `kernels/tests.rs` against the portable form or the DP oracle.
 - PRs are squash-merged, so the PR title becomes the commit on `main` and must be
   a conventional commit (checked by `.github/workflows/pr-title.yml`).
 - release-please keeps a release PR open that bumps `Cargo.toml` and `CHANGELOG.md`.
-  Merging it tags the release, creates the GitHub Release and publishes to PyPI.
+  Merging it tags the release, creates the GitHub Release and publishes to PyPI
+  and crates.io.
 - Never bump versions or push tags by hand. To rebuild an existing release, run
   the `release` workflow manually with its tag.
 
 ## Project Structure
-- `src/` — Rust crate (core library + PyO3 bindings)
+- `src/` — Rust crate `lev-rs` (core library in `lib.rs`, PyO3 bindings in `python.rs`)
 - `python/lev/` — Python package: `__init__.py` re-exports the private `_lev`
   extension, `_lev.pyi` holds its type stubs
 - `tests/` — pytest suite

@@ -1,11 +1,20 @@
-//! High-performance Python bindings for the Levenshtein distance.
-//!
-//! This crate exposes two functions to Python via PyO3:
+//! An extremely fast Levenshtein distance and similarity ratio.
 //!
 //! * [`distance`] – the Levenshtein edit distance between two strings.
 //! * [`ratio`]    – the indel similarity score in `[0.0, 1.0]`.
 //!
-//! Supported on Python 3.10 through 3.15, including free-threaded builds (PEP 703).
+//! ```
+//! assert_eq!(lev::distance("kitten", "sitting"), 3);
+//! assert_eq!(lev::ratio("abc", "abc"), 1.0);
+//! ```
+//!
+//! Characters are counted as Unicode scalar values (`char`s), so an accented
+//! letter or an emoji counts as one character.
+//!
+//! The same code backs the [`lev-rs`](https://pypi.org/project/lev-rs/)
+//! Python package.  Its bindings are behind the `python` feature, which
+//! only the Python build enables; Python 3.10 through 3.15 are supported,
+//! including free-threaded builds (PEP 703).
 //!
 //! # Algorithmic Architecture
 //!
@@ -13,9 +22,9 @@
 //! definition.  Five performance layers are composed to minimize constant factors
 //! across all string length and similarity regimes:
 //!
-//! 1. **Identity short-circuit** – if both arguments point to the identical Python
-//!    string object (`s1.is(s2)`), return `0` (or `1.0` for `ratio`) immediately
-//!    without examining string contents.
+//! 1. **Identity short-circuit** (Python only) – if both arguments point to the
+//!    identical Python string object (`s1.is(s2)`), return `0` (or `1.0` for
+//!    `ratio`) immediately without examining string contents.
 //! 2. **Common-affix stripping** – shared leading and trailing code units are
 //!    stripped before the main computation using vectorized 16-element/32-byte
 //!    block comparisons followed by scalar word scans (`strip_affix`, `strip_affix_mixed`).
@@ -24,7 +33,9 @@
 //!    [PEP 393](https://peps.python.org/pep-0393/).  Kind, ascii flag, data
 //!    pointer, and length are extracted from the `PyASCIIObject` header into a
 //!    [`UniView`] in a single pass without copying; subsequent dispatch operates
-//!    exclusively on local slices.
+//!    exclusively on local slices.  The Rust API borrows pure-ASCII `&str`s as
+//!    they are and transcodes any other string into the narrowest of the three
+//!    encodings that holds it (see [`Units`]).
 //!    - *UCS-1* (`u8`, ≤ U+00FF): peq is a flat `[u64; 128]` (pure ASCII) or
 //!      `[u64; 256]` (Latin-1) stack array — O(1) direct-index lookup.
 //!    - *UCS-2* (`u16`) and *UCS-4* (`u32`): peq is a 128-slot stack-allocated
@@ -75,11 +86,122 @@ use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::os::raw::c_uint;
 
-use pyo3::ffi;
-use pyo3::prelude::*;
-use pyo3::types::PyString;
-
 mod kernels;
+#[cfg(feature = "python")]
+mod python;
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Levenshtein edit distance between two strings.
+///
+/// The distance is the minimum number of single-character insertions,
+/// deletions, or substitutions required to transform `s1` into `s2`.
+///
+/// Characters are counted as Unicode scalar values (`char`s), so an accented
+/// letter or an emoji counts as one character.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(lev::distance("kitten", "sitting"), 3);
+/// assert_eq!(lev::distance("flaw", "lawn"), 2);
+/// assert_eq!(lev::distance("résumé", "resume"), 2);
+/// assert_eq!(lev::distance("日本語", "日本"), 1);
+/// ```
+#[must_use]
+pub fn distance(s1: &str, s2: &str) -> usize {
+    let (u1, u2) = (Units::new(s1), Units::new(s2));
+    let (v1, v2) = (u1.view(), u2.view());
+    #[cfg(target_arch = "x86_64")]
+    if kernels::x86_64::v2::detected() {
+        // SAFETY: the CPU has the features of `V2`, and the views borrow `u1` and `u2`.
+        return unsafe { kernels::x86_64::v2::distance_views(&v1, &v2) };
+    }
+    // SAFETY: the views borrow `u1` and `u2`.
+    unsafe { compute::<Lev<Baseline>>(&v1, &v2) }
+}
+
+/// Calculate how similar two strings are, as a score from `0.0` to `1.0`.
+///
+/// A score of `1.0` means the strings are identical, and `0.0` means they
+/// have no character in common.  In between, the score is the share of
+/// characters the two strings have in common, known as the indel similarity
+/// ratio:
+///
+/// $$
+/// \mathrm{ratio}(s_1, s_2)
+///   = \frac{2 \cdot \mathrm{LCS}(s_1, s_2)}{|s_1| + |s_2|}
+/// $$
+///
+/// where $\mathrm{LCS}$ is the length of the longest common subsequence and
+/// $|s|$ is the length of $s$.  Two empty strings score `1.0`.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(lev::ratio("kitten", "sitting"), 0.6153846153846154);
+/// assert_eq!(lev::ratio("abc", "xyz"), 0.0);
+/// assert_eq!(lev::ratio("", ""), 1.0);
+/// assert_eq!(lev::ratio("résumé", "resume"), 0.6666666666666667);
+/// ```
+#[must_use]
+pub fn ratio(s1: &str, s2: &str) -> f64 {
+    let (u1, u2) = (Units::new(s1), Units::new(s2));
+    let (v1, v2) = (u1.view(), u2.view());
+    let total = v1.len + v2.len;
+    if total == 0 {
+        return 1.0;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if kernels::x86_64::v2::detected() {
+        // SAFETY: the CPU has the features of `V2`, and the views borrow `u1` and `u2`.
+        let indel = unsafe { kernels::x86_64::v2::indel_views(&v1, &v2) };
+        return 1.0 - indel as f64 / total as f64;
+    }
+    // SAFETY: the views borrow `u1` and `u2`.
+    1.0 - unsafe { compute::<Lcs<Baseline>>(&v1, &v2) } as f64 / total as f64
+}
+
+/// A `&str` as code units in the narrowest of CPython's three string
+/// encodings that holds it, so Rust strings take the same paths through
+/// [`compute`] as Python strings with the same characters.  Pure-ASCII
+/// strings are borrowed as they are; others are transcoded once.
+enum Units<'a> {
+    Ascii(&'a [u8]),
+    Latin1(Vec<u8>),
+    Ucs2(Vec<u16>),
+    Ucs4(Vec<u32>),
+}
+
+impl<'a> Units<'a> {
+    fn new(s: &'a str) -> Self {
+        if s.is_ascii() {
+            return Units::Ascii(s.as_bytes());
+        }
+        match s.chars().max().map_or(0, u32::from) {
+            0..=0xFF => Units::Latin1(s.chars().map(|c| c as u8).collect()),
+            0x100..=0xFFFF => Units::Ucs2(s.chars().map(|c| c as u16).collect()),
+            _ => Units::Ucs4(s.chars().map(u32::from).collect()),
+        }
+    }
+
+    fn view(&self) -> UniView {
+        let (kind, ascii, data, len) = match self {
+            Units::Ascii(b) => (KIND_1BYTE, true, b.as_ptr(), b.len()),
+            Units::Latin1(b) => (KIND_1BYTE, false, b.as_ptr(), b.len()),
+            Units::Ucs2(u) => (KIND_2BYTE, false, u.as_ptr().cast::<u8>(), u.len()),
+            Units::Ucs4(u) => (KIND_4BYTE, false, u.as_ptr().cast::<u8>(), u.len()),
+        };
+        UniView {
+            kind,
+            ascii,
+            data,
+            len,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Code units of the three CPython string kinds (UCS-1 / UCS-2 / UCS-4).
@@ -121,103 +243,22 @@ fn hslot(key: u64, shift: u32) -> usize {
 // CPython internal-buffer accessors
 // ---------------------------------------------------------------------------
 
-/// Snapshot of a Python string's internal layout.  All four fields are
-/// derived from a single PyASCIIObject header read; subsequent dispatch
-/// branches operate on locals only — no further FFI calls.
+/// [`UniView::kind`] of UCS-1 (`u8`) code units, as in CPython's `PyUnicode_Kind`.
+const KIND_1BYTE: c_uint = 1;
+/// [`UniView::kind`] of UCS-2 (`u16`) code units.
+const KIND_2BYTE: c_uint = 2;
+/// [`UniView::kind`] of UCS-4 (`u32`) code units.
+const KIND_4BYTE: c_uint = 4;
+
+/// Snapshot of a string's code units, laid out like a Python string's
+/// internals.  For a Python string all four fields are derived from a
+/// single PyASCIIObject header read; subsequent dispatch branches operate
+/// on locals only — no further FFI calls.
 struct UniView {
     kind: c_uint,
     ascii: bool,
     data: *const u8,
     len: usize,
-}
-
-/// Read kind + ascii flag + data ptr + length from a Python string in one go.
-/// Subsequent dispatch matches on `(view1.kind, view2.kind)` without
-/// re-traversing pyo3's PyUnicode helpers.
-///
-/// # Safety
-///
-/// `s` must reference a valid, fully-initialized CPython `PyString` (`PyUnicodeObject`).
-#[cfg(not(all(
-    Py_3_14,
-    target_endian = "little",
-    not(all(Py_GIL_DISABLED, target_env = "msvc"))
-)))]
-#[inline(always)]
-unsafe fn view(s: &Bound<'_, PyString>) -> UniView {
-    let ptr = s.as_ptr();
-    let kind = ffi::PyUnicode_KIND(ptr);
-    UniView {
-        kind,
-        // PyUnicode_IS_ASCII and the PyASCIIObject state bitfield are opaque
-        // on Python 3.14+; fall back to the 256-entry Latin-1 table (correct
-        // for all u8 values; small perf cost for pure-ASCII strings on 3.14).
-        #[cfg(not(Py_3_14))]
-        ascii: ffi::PyUnicode_IS_ASCII(ptr) != 0,
-        #[cfg(Py_3_14)]
-        ascii: false,
-        data: ffi::PyUnicode_DATA(ptr) as *const u8,
-        len: ffi::PyUnicode_GET_LENGTH(ptr) as usize,
-    }
-}
-
-/// Python 3.14+ fast path: pyo3-ffi routes `PyUnicode_KIND` / `PyUnicode_DATA`
-/// through exported C functions there and drops `PyUnicode_IS_ASCII` entirely
-/// (four cross-library calls per distance/ratio call, and the pure-ASCII peq
-/// path would be lost).  The `PyASCIIObject` header layout is unchanged in
-/// CPython 3.14/3.15 (state bitfield: `interned:2, kind:3, compact:1, ascii:1`,
-/// LSB-first on little-endian targets — the same assumption pyo3-ffi itself
-/// makes up to 3.13), so decode the header directly.  kind/compact/ascii are
-/// immutable after string creation, so reading them needs no synchronization
-/// on free-threaded builds.  Debug builds cross-check against the C API.
-///
-/// Free-threaded builds store `interned` as a whole byte (it is accessed
-/// atomically), which moves the flags up to bit 8.  MSVC does not pack a
-/// bitfield into the byte before it, so its free-threaded `state` is wider
-/// than pyo3-ffi's `u32`; that combination takes the C-API path above.
-///
-/// # Safety
-///
-/// `s` must reference a valid, fully-initialized CPython `PyString` (`PyUnicodeObject`).
-#[cfg(all(
-    Py_3_14,
-    target_endian = "little",
-    not(all(Py_GIL_DISABLED, target_env = "msvc"))
-))]
-#[inline(always)]
-unsafe fn view(s: &Bound<'_, PyString>) -> UniView {
-    const KIND_SHIFT: u32 = if cfg!(Py_GIL_DISABLED) { 8 } else { 2 };
-    let ptr = s.as_ptr();
-    let obj = ptr as *mut ffi::PyASCIIObject;
-    let state = (*obj).state;
-    let kind = ((state >> KIND_SHIFT) & 0b111) as c_uint;
-    let compact = (state >> (KIND_SHIFT + 3)) & 1 != 0;
-    let ascii = (state >> (KIND_SHIFT + 4)) & 1 != 0;
-    let data = if compact {
-        if ascii {
-            obj.add(1) as *const u8
-        } else {
-            (ptr as *mut ffi::PyCompactUnicodeObject).add(1) as *const u8
-        }
-    } else {
-        (*(ptr as *mut ffi::PyUnicodeObject)).data.any as *const u8
-    };
-    debug_assert_eq!(
-        kind,
-        ffi::PyUnicode_KIND(ptr),
-        "state bitfield layout changed"
-    );
-    debug_assert_eq!(
-        data,
-        ffi::PyUnicode_DATA(ptr) as *const u8,
-        "compact data offset changed"
-    );
-    UniView {
-        kind,
-        ascii,
-        data,
-        len: (*obj).length as usize,
-    }
 }
 
 /// Reinterpret a [`UniView`]'s data as a `u8` slice.
@@ -251,155 +292,6 @@ unsafe fn as_u16(v: &UniView) -> &[u16] {
 unsafe fn as_u32(v: &UniView) -> &[u32] {
     // SAFETY: caller guarantees v.data is aligned and points to v.len valid u32 elements.
     unsafe { std::slice::from_raw_parts(v.data.cast::<u32>(), v.len) }
-}
-
-/// [`distance`] in the copy `X` of the hot path.
-///
-/// # Safety
-///
-/// The CPU must support the instruction set `X`.
-#[inline(always)]
-unsafe fn distance_in<X: Isa>(
-    s1: Borrowed<'_, '_, PyString>,
-    s2: Borrowed<'_, '_, PyString>,
-) -> usize {
-    if s1.is(s2) {
-        return 0;
-    }
-    compute::<Lev<X>>(&view(&s1), &view(&s2))
-}
-
-/// [`ratio`] in the copy `X` of the hot path.
-///
-/// # Safety
-///
-/// The CPU must support the instruction set `X`.
-#[inline(always)]
-unsafe fn ratio_in<X: Isa>(s1: Borrowed<'_, '_, PyString>, s2: Borrowed<'_, '_, PyString>) -> f64 {
-    if s1.is(s2) {
-        return 1.0;
-    }
-    let (v1, v2) = (view(&s1), view(&s2));
-    let total = v1.len + v2.len;
-    if total == 0 {
-        return 1.0;
-    }
-    1.0 - compute::<Lcs<X>>(&v1, &v2) as f64 / total as f64
-}
-
-/// Define the PyO3 [`distance`] and [`ratio`] entry points for one copy of the
-/// hot path, calling `$distance` and `$ratio` with `Borrowed` handles so the
-/// object pointers cross any `#[target_feature]` boundary in registers.
-macro_rules! entry_points {
-    ($distance:path, $ratio:path) => {
-        /// Levenshtein edit distance between two strings.
-        ///
-        /// The distance is the minimum number of single-character insertions,
-        /// deletions, or substitutions required to transform `s1` into `s2`.
-        ///
-        /// Characters are counted as Unicode code points, so an accented letter or an
-        /// emoji counts as one character.
-        ///
-        /// Args:
-        ///     s1 (str): First input string.
-        ///     s2 (str): Second input string.
-        ///
-        /// Returns:
-        ///     Non-negative integer edit distance.
-        ///
-        /// Examples:
-        ///     >>> import lev
-        ///     >>> lev.distance("kitten", "sitting")
-        ///     3
-        ///     >>> lev.distance("flaw", "lawn")
-        ///     2
-        ///     >>> lev.distance("résumé", "resume")
-        ///     2
-        ///     >>> lev.distance("日本語", "日本")
-        ///     1
-        // `pass_module` binds the functions to the module instead of registering
-        // them `METH_STATIC`, which PyO3 0.28 does otherwise at a cost of a few ns per
-        // call on CPython 3.11+ (PyO3 issue #6426).
-        #[pyfunction]
-        #[pyo3(pass_module, signature = (s1, s2, /))]
-        pub(crate) fn distance(
-            _m: &Bound<'_, PyModule>,
-            s1: &Bound<'_, PyString>,
-            s2: &Bound<'_, PyString>,
-        ) -> usize {
-            // SAFETY: `_lev` registers this copy's functions only when the CPU
-            // has its features (`Baseline` always does).
-            unsafe { $distance(s1.as_borrowed(), s2.as_borrowed()) }
-        }
-
-        /// Calculate how similar two strings are, as a score from `0.0` to `1.0`.
-        ///
-        /// A score of `1.0` means the strings are identical, and `0.0` means they
-        /// have no character in common.  In between, the score is the share of
-        /// characters the two strings have in common, known as the indel similarity
-        /// ratio:
-        ///
-        /// $$
-        /// \mathrm{ratio}(s_1, s_2)
-        ///   = \frac{2 \cdot \mathrm{LCS}(s_1, s_2)}{|s_1| + |s_2|}
-        /// $$
-        ///
-        /// where $\mathrm{LCS}$ is the length of the longest common subsequence and
-        /// $|s|$ is the length of $s$.
-        ///
-        /// Characters are counted as Unicode code points, so an accented letter or an
-        /// emoji counts as one character.
-        ///
-        /// Args:
-        ///     s1 (str): First input string.
-        ///     s2 (str): Second input string.
-        ///
-        /// Returns:
-        ///     Similarity score between `0.0` (nothing in common) and `1.0` (identical).
-        ///
-        /// Examples:
-        ///     >>> import lev
-        ///     >>> lev.ratio("kitten", "sitting")
-        ///     0.6153846153846154
-        ///     >>> lev.ratio("abc", "xyz")
-        ///     0.0
-        ///     >>> lev.ratio("", "")
-        ///     1.0
-        ///     >>> lev.ratio("résumé", "resume")
-        ///     0.6666666666666667
-        #[pyfunction]
-        #[pyo3(pass_module, signature = (s1, s2, /))]
-        pub(crate) fn ratio(
-            _m: &Bound<'_, PyModule>,
-            s1: &Bound<'_, PyString>,
-            s2: &Bound<'_, PyString>,
-        ) -> f64 {
-            // SAFETY: see `distance`.
-            unsafe { $ratio(s1.as_borrowed(), s2.as_borrowed()) }
-        }
-    };
-}
-#[cfg(target_arch = "x86_64")]
-pub(crate) use entry_points;
-
-entry_points!(distance_in::<Baseline>, ratio_in::<Baseline>);
-
-/// The compiled extension backing the `lev` package.
-///
-/// Private: the public API is re-exported from `lev/__init__.py`, so the name
-/// is underscore-prefixed to keep it out of the package namespace.
-#[pymodule]
-fn _lev(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    #[cfg(target_arch = "x86_64")]
-    if kernels::x86_64::v2::detected() {
-        use kernels::x86_64::v2::py;
-        m.add_function(wrap_pyfunction!(py::distance, m)?)?;
-        m.add_function(wrap_pyfunction!(py::ratio, m)?)?;
-        return Ok(());
-    }
-    m.add_function(wrap_pyfunction!(distance, m)?)?;
-    m.add_function(wrap_pyfunction!(ratio, m)?)?;
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -460,7 +352,7 @@ impl Isa for Baseline {
 /// to their respective `kind` flags.
 #[inline(always)]
 unsafe fn compute<K: Kernel>(v1: &UniView, v2: &UniView) -> usize {
-    use ffi::{PyUnicode_1BYTE_KIND as K1, PyUnicode_2BYTE_KIND as K2, PyUnicode_4BYTE_KIND as K4};
+    use self::{KIND_1BYTE as K1, KIND_2BYTE as K2, KIND_4BYTE as K4};
 
     // 1. Normalize: v1 is the shorter pattern string (m), v2 is the text (n).
     let (v1, v2) = if v1.len <= v2.len { (v1, v2) } else { (v2, v1) };
@@ -497,7 +389,7 @@ unsafe fn compute<K: Kernel>(v1: &UniView, v2: &UniView) -> usize {
         (K4, K1) => compute_sorted_mixed::<K, _, _>(unsafe { as_u32(v1) }, unsafe { as_u8(v2) }),
         // SAFETY: kinds are 4- and 2-byte, so data are valid &[u32] and &[u16].
         (K4, K2) => compute_sorted_mixed::<K, _, _>(unsafe { as_u32(v1) }, unsafe { as_u16(v2) }),
-        _ => unreachable!("unknown PyUnicode kind"),
+        _ => unreachable!("unknown string kind"),
     }
 }
 
@@ -3036,6 +2928,38 @@ mod tests {
                     assert_eq!(levenshtein(&long, &short), d, "m={m} n={n} swapped");
                     let (sa, la) = (astral(&short), astral(&long));
                     assert_eq!(levenshtein(&sa, &la), d, "astral m={m} n={n}");
+                }
+            }
+        }
+    }
+
+    /// The public API, which transcodes each `&str` into the narrowest
+    /// encoding that holds it, matches the oracles for every pair of
+    /// encodings and every length regime.
+    #[test]
+    fn public_api_matches_oracle() {
+        let alphabets: [&[char]; 4] = [
+            &['a', 'b', 'c', 'd'],
+            &['a', 'é', 'ß', 'ü'],
+            &['a', 'é', 'Ω', '日'],
+            &['a', 'é', '日', '😀'],
+        ];
+        let mut state = 0x5eed_u64;
+        for a1 in alphabets {
+            for a2 in alphabets {
+                for &(m, n) in &[(0, 0), (0, 5), (3, 7), (40, 45), (70, 90), (600, 640)] {
+                    let s1: String = (0..m).map(|_| a1[lcg(&mut state) % a1.len()]).collect();
+                    let s2: String = (0..n).map(|_| a2[lcg(&mut state) % a2.len()]).collect();
+                    let (c1, c2): (Vec<char>, Vec<char>) =
+                        (s1.chars().collect(), s2.chars().collect());
+                    assert_eq!(distance(&s1, &s2), naive(&c1, &c2), "{s1:?} {s2:?}");
+                    let total = m + n;
+                    let expected = if total == 0 {
+                        1.0
+                    } else {
+                        1.0 - naive_indel(&c1, &c2) as f64 / total as f64
+                    };
+                    assert_eq!(ratio(&s1, &s2), expected, "{s1:?} {s2:?}");
                 }
             }
         }
