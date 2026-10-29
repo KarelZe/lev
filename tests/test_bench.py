@@ -114,6 +114,12 @@ _UCS2 = "ぁあぃいぅうぇえぉお"
 _UCS4 = "".join(chr(0x1F600 + i) for i in range(10))
 
 _SHORT = [
+    pytest.param("", "a" * 100, id="zero-length-empty-vs-100"),
+    pytest.param(
+        "The quick brown fox",
+        "The quick brown fox jumps over the lazy dog",
+        id="prefix-contained-fox",
+    ),
     pytest.param("a", "b", id="ascii-1"),
     pytest.param("kitten", "sitting", id="ascii-6"),
     pytest.param("hello", "hello", id="equal-5"),

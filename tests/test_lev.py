@@ -38,6 +38,8 @@ _DISTANCE_PAIRS = [
     ("", ""),
     ("abc", ""),
     ("", "abc"),
+    ("", "a" * 100),
+    ("The quick brown fox", "The quick brown fox jumps over the lazy dog"),
     ("hello", "hello"),
     ("kitten", "sitting"),
     ("saturday", "sunday"),
@@ -358,6 +360,8 @@ def expected_ratio(s1: str, s2: str) -> float:
 
 _RATIO_PAIRS = [
     ("", ""),
+    ("", "a" * 100),
+    ("The quick brown fox", "The quick brown fox jumps over the lazy dog"),
     ("abc", "abc"),
     # No common subsequence at all: the ratio bottoms out at exactly 0.0.
     ("abc", "xyz"),
@@ -410,6 +414,74 @@ def test_ratio_across_kinds_and_lengths(s1: str, s2: str, expected_ratio: float)
 
     """
     assert math.isclose(lev.ratio(s1, s2), expected_ratio, abs_tol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Zero-length short-circuit and prefix-containment early-exit
+# ---------------------------------------------------------------------------
+
+_ZERO_LENGTH_CASES = [
+    pytest.param("", "", id="empty-empty"),
+    pytest.param("", "a" * 100, id="empty-ascii-100"),
+    pytest.param("a" * 100, "", id="ascii-100-empty"),
+    pytest.param("", "café résumé naïve façade", id="empty-latin1"),
+    pytest.param("", "日本語のテスト文字列", id="empty-ucs2"),
+    pytest.param("", "😀🎉🚀✨🦀🐍", id="empty-ucs4"),
+    pytest.param("", "abc\xff\u0400\U0001f400", id="empty-mixed"),
+]
+
+_PREFIX_CONTAINED_CASES = [
+    # ASCII
+    pytest.param("The quick brown fox", "The quick brown fox jumps over the lazy dog", id="ascii-fox"),
+    pytest.param("a" * 10, "a" * 20, id="ascii-repeated"),
+    pytest.param("short", "short_extended", id="ascii-words"),
+    # Latin-1
+    pytest.param("café naïve", "café naïve façade jalapeño", id="latin1-cafe"),
+    pytest.param("résumé", "résumé complet", id="latin1-resume"),
+    # UCS-2
+    pytest.param("日本", "日本語", id="ucs2-nihon"),
+    pytest.param("日本語", "日本語のテスト文字列", id="ucs2-nihongo"),
+    # UCS-4
+    pytest.param("🦀🐍", "🦀🐍🚀✨", id="ucs4-crab-snake"),
+    pytest.param("😀🎉", "😀🎉🚀✨", id="ucs4-party"),
+    # Mixed kinds (prefix in narrower kind, suffix introduces wider kind)
+    pytest.param("The quick brown fox", "The quick brown fox café", id="mixed-ascii-latin1"),
+    pytest.param("The quick brown fox", "The quick brown fox 日本語", id="mixed-ascii-ucs2"),
+    pytest.param("The quick brown fox", "The quick brown fox 🦊", id="mixed-ascii-ucs4"),
+    pytest.param("café", "café 日本語", id="mixed-latin1-ucs2"),
+    pytest.param("café", "café 🥐", id="mixed-latin1-ucs4"),
+    pytest.param("日本語", "日本語 🇯🇵", id="mixed-ucs2-ucs4"),
+]
+
+
+@pytest.mark.parametrize(("s1", "s2"), _ZERO_LENGTH_CASES + _PREFIX_CONTAINED_CASES)
+def test_distance_zero_length_and_prefix_contained(s1: str, s2: str, expected: int) -> None:
+    """
+    Test lev.distance on zero-length and prefix-contained pairs across kinds.
+
+    Args:
+        s1 (str): First input string.
+        s2 (str): Second input string.
+        expected (int): Expected Levenshtein distance.
+
+    """
+    assert lev.distance(s1, s2) == expected
+    assert lev.distance(s2, s1) == expected  # symmetric
+
+
+@pytest.mark.parametrize(("s1", "s2"), _ZERO_LENGTH_CASES + _PREFIX_CONTAINED_CASES)
+def test_ratio_zero_length_and_prefix_contained(s1: str, s2: str, expected_ratio: float) -> None:
+    """
+    Test lev.ratio on zero-length and prefix-contained pairs across kinds.
+
+    Args:
+        s1 (str): First input string.
+        s2 (str): Second input string.
+        expected_ratio (float): Expected ratio.
+
+    """
+    assert math.isclose(lev.ratio(s1, s2), expected_ratio, abs_tol=1e-12)
+    assert math.isclose(lev.ratio(s2, s1), expected_ratio, abs_tol=1e-12)  # symmetric
 
 
 # ---------------------------------------------------------------------------
