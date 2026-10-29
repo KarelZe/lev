@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import random
+import sys
 from collections import deque
 from itertools import repeat
 from typing import TYPE_CHECKING
@@ -113,6 +114,12 @@ _UCS2 = "ぁあぃいぅうぇえぉお"
 _UCS4 = "".join(chr(0x1F600 + i) for i in range(10))
 
 _SHORT = [
+    pytest.param("", "a" * 100, id="zero-length-empty-vs-100"),
+    pytest.param(
+        "The quick brown fox",
+        "The quick brown fox jumps over the lazy dog",
+        id="prefix-contained-fox",
+    ),
     pytest.param("a", "b", id="ascii-1"),
     pytest.param("kitten", "sitting", id="ascii-6"),
     pytest.param("hello", "hello", id="equal-5"),
@@ -190,15 +197,29 @@ _LONG = [
 # DP-size rule for pairs whose cost follows their size, explicit counts where
 # affix stripping or banding makes a pair far cheaper than its size.
 # CodSpeed rejects the same benchmark name from two jobs of one workflow, so the
-# jobs that measure another architecture prefix their names (e.g. "aarch64-").
+# jobs that measure another architecture prefix their names (e.g. "aarch64-"),
+# and the running interpreter version is tagged to keep matrix jobs distinct.
+_PY_TAG = f"py{sys.version_info.major}.{sys.version_info.minor}"
 _PREFIX = os.environ.get("LEV_BENCH_PREFIX", "")
 
+
+def _case_id(name: str) -> str:
+    """
+    Format benchmark case ID with architecture prefix and Python version tag.
+
+    Returns:
+        str: benchmark case ID.
+
+    """
+    return f"{_PREFIX}{name}][{_PY_TAG}"
+
+
 _CASES = [
-    *[pytest.param(*p.values, _batch_size(*p.values), id=f"{_PREFIX}short-{p.id}") for p in _SHORT],
-    *[pytest.param(*p.values, _batch_size(*p.values), id=f"{_PREFIX}medium-{p.id}") for p in _MEDIUM],
-    *[pytest.param(*p.values, _batch_size(*p.values), id=f"{_PREFIX}mixed-{p.id}") for p in _MIXED],
-    *[pytest.param(*p.values, 2_000, id=f"{_PREFIX}affix-{p.id}") for p in _AFFIX],
-    *[pytest.param(*p.values, 4, id=f"{_PREFIX}long-{p.id}") for p in _LONG],
+    *[pytest.param(*p.values, _batch_size(*p.values), id=_case_id(f"short-{p.id}")) for p in _SHORT],
+    *[pytest.param(*p.values, _batch_size(*p.values), id=_case_id(f"medium-{p.id}")) for p in _MEDIUM],
+    *[pytest.param(*p.values, _batch_size(*p.values), id=_case_id(f"mixed-{p.id}")) for p in _MIXED],
+    *[pytest.param(*p.values, 2_000, id=_case_id(f"affix-{p.id}")) for p in _AFFIX],
+    *[pytest.param(*p.values, 4, id=_case_id(f"long-{p.id}")) for p in _LONG],
 ]
 
 
