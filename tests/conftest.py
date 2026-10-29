@@ -18,4 +18,13 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Append the Python version to each benchmark's node id."""
     for item in items:
         if item.get_closest_marker("benchmark") is not None or "benchmark" in getattr(item, "fixturenames", ()):
-            item._nodeid = f"{item._nodeid}[{_PY_TAG}]"
+            new_id = f"{item.nodeid}[{_PY_TAG}]"
+            if hasattr(item, "_id"):
+                try:
+                    from _pytest.nodes import coerce_node_id
+
+                    item._id = coerce_node_id(new_id)
+                except Exception:
+                    item._id = new_id
+            if hasattr(item, "_nodeid"):
+                item._nodeid = new_id

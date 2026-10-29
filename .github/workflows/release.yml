@@ -141,7 +141,7 @@ jobs:
       # free-threaded build installed alongside shadows the regular one. So the
       # regular versions are built first, and the free-threaded ones afterwards
       # from their explicit paths.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-versions }}
           architecture: ${{ matrix.architecture }}
@@ -151,12 +151,12 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist --find-interpreter
       - id: py314t
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: 3.14t
           architecture: ${{ matrix.architecture }}
       - id: py315t
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: 3.15t
           architecture: ${{ matrix.architecture }}
@@ -203,7 +203,7 @@ jobs:
       # free-threaded build installed alongside shadows the regular one. So the
       # regular versions are built first, and the free-threaded ones afterwards
       # from their explicit paths.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: |
             3.10
@@ -218,11 +218,11 @@ jobs:
           target: universal2-apple-darwin
           args: --release --out dist --find-interpreter
       - id: py314t
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: 3.14t
       - id: py315t
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: 3.15t
           allow-prereleases: true
