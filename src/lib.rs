@@ -45,9 +45,15 @@
 //!    - *Multi-word* (`64 < m ≤ 512`): ⌈m/64⌉ words with carry propagation.
 //!      UCS-1 uses a `[[u64; W]; 128 or 256]` stack peq (O(1) direct lookup, no heap).
 //!      UCS-2/4 use stack-allocated open-addressing hash tables.
-//!    - *Large strings* (`m > 512`): register-blocked strips (e.g. 8 words on AArch64,
-//!      4 words on x86-64) or unrolled column loops.  Hardware-specialized forms
-//!      live in [`kernels`] with runtime ISA dispatch.
+//!    - *Large strings* (`m > 512`): one loop over all words per column; on
+//!      AArch64, strips of eight words sweep the text one after another
+//!      with the const-width kernel instead, handing the per-column carry
+//!      and boundary bits upwards, so each strip's state stays in registers.
+//!      The LCS full matrix runs in strips of four words on x86-64 too.
+//!    - Steps with target-specific forms live in [`kernels`], one module per
+//!      target.  On x86-64 the dispatchers pick a form at runtime by CPU
+//!      feature detection; on AArch64 the form is fixed at compile time by
+//!      `cfg` (Apple or Neoverse tuning).
 //! 5. **Ukkonen diagonal banding (`m > 512`) & LCS ratio** – similar long strings
 //!    are resolved by a narrow diagonal band over Myers' blocked recurrence (O(n · d/w)
 //!    instead of O(n · m/w)).  Band widths double geometrically until certifying the
@@ -281,6 +287,8 @@ macro_rules! entry_points {
         ///     2
         ///     >>> lev.distance("résumé", "resume")
         ///     2
+        ///     >>> lev.distance("日本語", "日本")
+        ///     1
         // `pass_module` binds the functions to the module instead of registering
         // them `METH_STATIC`, which PyO3 0.28 does otherwise at a cost of a few ns per
         // call on CPython 3.11+ (PyO3 issue #6426).
@@ -329,6 +337,8 @@ macro_rules! entry_points {
         ///     0.0
         ///     >>> lev.ratio("", "")
         ///     1.0
+        ///     >>> lev.ratio("résumé", "resume")
+        ///     0.6666666666666667
         #[pyfunction]
         #[pyo3(pass_module, signature = (s1, s2, /))]
         pub(crate) fn ratio(

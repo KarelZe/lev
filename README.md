@@ -80,15 +80,6 @@ A short customer support message with a few natural typos.
   <img alt="Realistic text benchmark" src="https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_realistic_light.svg">
 </picture>
 
-### Speedup Across Versions
-
-Normalized speedup relative to `v0.1.0` across architectural regimes (short strings with tiny SIMD/mbleven, medium realistic text with affix stripping, long similar strings with banded Ukkonen, and long dissimilar strings with full-matrix DP).
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_by_version_dark.svg">
-  <img alt="Benchmark by version" src="https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_by_version_light.svg">
-</picture>
-
 ### Benchmark Scripts
 
 Reproduce benchmarks locally using the provided scripts:

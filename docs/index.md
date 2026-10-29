@@ -74,13 +74,6 @@ A short customer support message with a few natural typos.
 ![Realistic text benchmark – light](assets/benchmark_realistic_light.svg#only-light){ width="75%" }
 ![Realistic text benchmark – dark](assets/benchmark_realistic_dark.svg#only-dark){ width="75%" }
 
-### Speedup Across Versions
-
-Normalized speedup relative to `v0.1.0` across architectural regimes (short strings with tiny SIMD/mbleven, medium realistic text with affix stripping, long similar strings with banded Ukkonen, and long dissimilar strings with full-matrix DP).
-
-![Speedup across versions – light](assets/benchmark_by_version_light.svg#only-light){ width="75%" }
-![Speedup across versions – dark](assets/benchmark_by_version_dark.svg#only-dark){ width="75%" }
-
 ### Benchmark Scripts
 
 Reproduce benchmarks locally using the provided scripts:
