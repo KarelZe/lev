@@ -1589,22 +1589,19 @@ struct LargeCtx<'a, F> {
     base_of: F,
 }
 
-/// One block of the Myers column step in [`LargeCtx::banded_body`]: updates
-/// the block's vertical deltas `pv`/`mv` for match mask `eq` and incoming
-/// horizontal delta `hin`, and returns its horizontal deltas `(ph, mh)`.
+/// One block of the Myers column step in [`LargeCtx::banded_body`] for match
+/// mask `eq`, incoming horizontal delta `hin` and vertical deltas `pv`/`mv`:
+/// returns the new `(pv, mv)` and the block's horizontal deltas `(ph, mh)`.
 #[inline(always)]
-fn banded_step(eq: u64, hin: i32, pv: &mut u64, mv: &mut u64) -> (u64, u64) {
-    let (pv_k, mv_k) = (*pv, *mv);
-    let xv = eq | mv_k;
+fn banded_step(eq: u64, hin: i32, pv: u64, mv: u64) -> ((u64, u64), (u64, u64)) {
+    let xv = eq | mv;
     let eq_in = eq | ((hin < 0) as u64);
-    let xh = ((eq_in & pv_k).wrapping_add(pv_k) ^ pv_k) | eq_in;
-    let ph = mv_k | !(xh | pv_k);
-    let mh = pv_k & xh;
+    let xh = ((eq_in & pv).wrapping_add(pv) ^ pv) | eq_in;
+    let ph = mv | !(xh | pv);
+    let mh = pv & xh;
     let ph_s = (ph << 1) | ((hin > 0) as u64);
     let mh_s = (mh << 1) | ((hin < 0) as u64);
-    *pv = mh_s | !(xv | ph_s);
-    *mv = ph_s & xv;
-    (ph, mh)
+    ((mh_s | !(xv | ph_s), ph_s & xv), (ph, mh))
 }
 
 impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
@@ -1708,17 +1705,27 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
             for k in first..last {
                 let eq = self.peq(base, k);
                 // SAFETY: k < last < w = pv.len() = mv.len().
-                let (pv_k, mv_k) = unsafe { (pv.get_unchecked_mut(k), mv.get_unchecked_mut(k)) };
-                let (ph, mh) = banded_step(eq, hin, pv_k, mv_k);
+                let (pv_k, mv_k) = unsafe { (*pv.get_unchecked(k), *mv.get_unchecked(k)) };
+                let ((pv_n, mv_n), (ph, mh)) = banded_step(eq, hin, pv_k, mv_k);
                 hin = ((ph >> 63) & 1) as i32 - ((mh >> 63) & 1) as i32;
+                // SAFETY: as for the reads above.
+                unsafe {
+                    *pv.get_unchecked_mut(k) = pv_n;
+                    *mv.get_unchecked_mut(k) = mv_n;
+                }
             }
             // The final iteration `k = last` is peeled: only it updates
             // `score` at `top_bit`, and its outgoing carry is not needed.
             let eq = self.peq(base, last);
             // SAFETY: last < w = pv.len() = mv.len().
-            let (pv_l, mv_l) = unsafe { (pv.get_unchecked_mut(last), mv.get_unchecked_mut(last)) };
-            let (ph, mh) = banded_step(eq, hin, pv_l, mv_l);
+            let (pv_l, mv_l) = unsafe { (*pv.get_unchecked(last), *mv.get_unchecked(last)) };
+            let ((pv_n, mv_n), (ph, mh)) = banded_step(eq, hin, pv_l, mv_l);
             score += ((ph >> top_bit) & 1) as isize - ((mh >> top_bit) & 1) as isize;
+            // SAFETY: as for the reads above.
+            unsafe {
+                *pv.get_unchecked_mut(last) = pv_n;
+                *mv.get_unchecked_mut(last) = mv_n;
+            }
             // `score` never underestimates D[bottom(last)][j], and finishing
             // from there takes at least `score - excess` edits (D never
             // decreases along diagonal steps); once that exceeds `t` this band
