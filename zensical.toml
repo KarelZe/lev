@@ -1,6 +1,6 @@
 [project]
 site_name = "lev"
-site_description = "lev is an extremely fast Python library for Levenshtein distance and a rapidfuzz-compatible similarity ratio, written in Rust. 🦀"
+site_description = "lev is an extremely fast Python library for Levenshtein distance and an LCS-based similarity ratio, written in Rust. 🦀"
 site_author = "KarelZe"
 site_url = "https://KarelZe.github.io/lev/"
 repo_url = "https://github.com/KarelZe/lev"
