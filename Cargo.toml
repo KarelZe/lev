@@ -4,6 +4,8 @@
 name = "lev-rs"
 version = "0.5.1"
 edition = "2021"
+# `u64::carrying_add` in the AArch64 kernels, which every target compiles.
+rust-version = "1.91"
 description = "An extremely fast Levenshtein distance and similarity ratio, also available for Python."
 authors = ["Markus Bilz <github@markusbilz.com>"]
 license = "MIT"

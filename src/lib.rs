@@ -11,76 +11,81 @@
 //! Characters are counted as Unicode scalar values (`char`s), so an accented
 //! letter or an emoji counts as one character.
 //!
+//! Both functions use bit-parallel algorithms (Myers 1999, Hyyrö 2003)
+//! after stripping common prefixes and suffixes, and a diagonal band for
+//! long, similar strings.  On x86-64 the hot path is compiled a second time
+//! for x86-64-v2 and picked at run time.
+//!
 //! The same code backs the [`lev-rs`](https://pypi.org/project/lev-rs/)
 //! Python package.  Its bindings are behind the `python` feature, which
 //! only the Python build enables; Python 3.10 through 3.15 are supported,
 //! including free-threaded builds (PEP 703).
-//!
-//! # Algorithmic Architecture
-//!
-//! See <https://en.wikipedia.org/wiki/Levenshtein_distance> for the distance
-//! definition.  Five performance layers are composed to minimize constant factors
-//! across all string length and similarity regimes:
-//!
-//! 1. **Identity short-circuit** (Python only) – if both arguments point to the
-//!    identical Python string object (`s1.is(s2)`), return `0` (or `1.0` for
-//!    `ratio`) immediately without examining string contents.
-//! 2. **Common-affix stripping** – shared leading and trailing code units are
-//!    stripped before the main computation using vectorized 16-element/32-byte
-//!    block comparisons followed by scalar word scans (`strip_affix`, `strip_affix_mixed`).
-//! 3. **Zero-copy CPython buffer access** – Python stores strings in one of
-//!    three compact internal encodings (UCS-1 / UCS-2 / UCS-4); see
-//!    [PEP 393](https://peps.python.org/pep-0393/).  Kind, ascii flag, data
-//!    pointer, and length are extracted from the `PyASCIIObject` header into a
-//!    [`UniView`] in a single pass without copying; subsequent dispatch operates
-//!    exclusively on local slices.  The Rust API borrows pure-ASCII `&str`s as
-//!    they are and transcodes any other string into the narrowest of the three
-//!    encodings that holds it (see [`Units`]).
-//!    - *UCS-1* (`u8`, ≤ U+00FF): peq is a flat `[u64; 128]` (pure ASCII) or
-//!      `[u64; 256]` (Latin-1) stack array — O(1) direct-index lookup.
-//!    - *UCS-2* (`u16`) and *UCS-4* (`u32`): peq is a 128-slot stack-allocated
-//!      open-addressing hash table with Fibonacci hashing — O(1) amortized
-//!      lookup at ≤ 50% load.  Mixed-kind pairs compare code units in place;
-//!      no UTF-8 transcoding or allocations, preserving lone surrogates.
-//! 4. **Bit-parallel algorithm (Hyyrö/Myers) & mbleven fast path** – O(⌈m/w⌉ · n)
-//!    time with w = 64 (Hyyrö 2003, Myers 1999):
-//!    - *Tiny patterns* (`m ≤ 16`): table-free execution; the match word is
-//!      computed per text character using SWAR for byte patterns up to length 8,
-//!      128-bit SIMD (NEON on AArch64, SSE2 on x86-64) for byte patterns 9..=16,
-//!      or unrolled scalar scans for wider code units.
-//!    - *Small-distance fast path* (`ub ≤ 3`, `m ≤ 512`): for strings differing by
-//!      very few edits, a SIMD Hamming scan (`small_ub`) establishes an upper bound
-//!      and gates into `mbleven` (Hyyrö 2018), evaluating candidate branch patterns
-//!      in O(ub · n) time without building peq tables or allocating memory.
-//!    - *Single-word* (`m ≤ 64`): one 64-bit word covers the entire pattern.
-//!    - *Multi-word* (`64 < m ≤ 512`): ⌈m/64⌉ words with carry propagation.
-//!      UCS-1 uses a `[[u64; W]; 128 or 256]` stack peq (O(1) direct lookup, no heap).
-//!      UCS-2/4 use stack-allocated open-addressing hash tables.
-//!    - *Large strings* (`m > 512`): one loop over all words per column; on
-//!      AArch64, strips of eight words sweep the text one after another
-//!      with the const-width kernel instead, handing the per-column carry
-//!      and boundary bits upwards, so each strip's state stays in registers.
-//!      The LCS full matrix runs in strips of four words on x86-64 too.
-//!    - Steps with target-specific forms live in [`kernels`], one module per
-//!      target.  On x86-64 the dispatchers pick a form at runtime by CPU
-//!      feature detection; on AArch64 the form is fixed at compile time by
-//!      `cfg` (Apple or Neoverse tuning).
-//! 5. **Ukkonen diagonal banding (`m > 512`) & LCS ratio** – similar long strings
-//!    are resolved by a narrow diagonal band over Myers' blocked recurrence (O(n · d/w)
-//!    instead of O(n · m/w)).  Band widths double geometrically until certifying the
-//!    exact result, with early bailout on dissimilar pairs.
-//!
-//! [`ratio`] reuses steps 1–3 verbatim and swaps step 4 for the bit-parallel
-//! LCS recurrence of Crochemore et al. (2001) / Hyyrö (2004), from which the
-//! indel distance follows as `m + n - 2 · LLCS`; indel distance is invariant
-//! under common-affix stripping for the same reason Levenshtein distance is.
-//! Step 5 has an LCS counterpart that restricts the recurrence to a band of
-//! diagonals and certifies its result (see `LargeCtx::lcs_banded`).  mbleven
-//! stays Levenshtein-only: against the three-op LCS step it does not pay.
-//!
-//! The crate builds for each target's baseline ISA.  On x86-64 the whole
-//! pipeline is compiled a second time with the x86-64-v2 features, and the
-//! module picks one of the two copies when it loads (see [`Isa`]).
+
+// # Algorithmic Architecture
+//
+// See <https://en.wikipedia.org/wiki/Levenshtein_distance> for the distance
+// definition.  Five performance layers are composed to minimize constant factors
+// across all string length and similarity regimes:
+//
+// 1. **Identity short-circuit** (Python only) – if both arguments point to the
+//    identical Python string object (`s1.is(s2)`), return `0` (or `1.0` for
+//    `ratio`) immediately without examining string contents.
+// 2. **Common-affix stripping** – shared leading and trailing code units are
+//    stripped before the main computation using vectorized 16-element/32-byte
+//    block comparisons followed by scalar word scans (`strip_affix`, `strip_affix_mixed`).
+// 3. **Zero-copy CPython buffer access** – Python stores strings in one of
+//    three compact internal encodings (UCS-1 / UCS-2 / UCS-4); see
+//    [PEP 393](https://peps.python.org/pep-0393/).  Kind, ascii flag, data
+//    pointer, and length are extracted from the `PyASCIIObject` header into a
+//    [`UniView`] in a single pass without copying; subsequent dispatch operates
+//    exclusively on local slices.  The Rust API borrows pure-ASCII `&str`s as
+//    they are and transcodes any other string into the narrowest of the three
+//    encodings that holds it (see [`Units`]).
+//    - *UCS-1* (`u8`, ≤ U+00FF): peq is a flat `[u64; 128]` (pure ASCII) or
+//      `[u64; 256]` (Latin-1) stack array — O(1) direct-index lookup.
+//    - *UCS-2* (`u16`) and *UCS-4* (`u32`): peq is a 128-slot stack-allocated
+//      open-addressing hash table with Fibonacci hashing — O(1) amortized
+//      lookup at ≤ 50% load.  Mixed-kind pairs compare code units in place;
+//      no UTF-8 transcoding or allocations, preserving lone surrogates.
+// 4. **Bit-parallel algorithm (Hyyrö/Myers) & mbleven fast path** – O(⌈m/w⌉ · n)
+//    time with w = 64 (Hyyrö 2003, Myers 1999):
+//    - *Tiny patterns* (`m ≤ 16`): table-free execution; the match word is
+//      computed per text character using SWAR for byte patterns up to length 8,
+//      128-bit SIMD (NEON on AArch64, SSE2 on x86-64) for byte patterns 9..=16,
+//      or unrolled scalar scans for wider code units.
+//    - *Small-distance fast path* (`ub ≤ 3`, `m ≤ 512`): for strings differing by
+//      very few edits, a SIMD Hamming scan (`small_ub`) establishes an upper bound
+//      and gates into `mbleven` (Hyyrö 2018), evaluating candidate branch patterns
+//      in O(ub · n) time without building peq tables or allocating memory.
+//    - *Single-word* (`m ≤ 64`): one 64-bit word covers the entire pattern.
+//    - *Multi-word* (`64 < m ≤ 512`): ⌈m/64⌉ words with carry propagation.
+//      UCS-1 uses a `[[u64; W]; 128 or 256]` stack peq (O(1) direct lookup, no heap).
+//      UCS-2/4 use stack-allocated open-addressing hash tables.
+//    - *Large strings* (`m > 512`): one loop over all words per column; on
+//      AArch64, strips of eight words sweep the text one after another
+//      with the const-width kernel instead, handing the per-column carry
+//      and boundary bits upwards, so each strip's state stays in registers.
+//      The LCS full matrix runs in strips of four words on x86-64 too.
+//    - Steps with target-specific forms live in [`kernels`], one module per
+//      target.  On x86-64 the dispatchers pick a form at runtime by CPU
+//      feature detection; on AArch64 the form is fixed at compile time by
+//      `cfg` (Apple or Neoverse tuning).
+// 5. **Ukkonen diagonal banding (`m > 512`) & LCS ratio** – similar long strings
+//    are resolved by a narrow diagonal band over Myers' blocked recurrence (O(n · d/w)
+//    instead of O(n · m/w)).  Band widths double geometrically until certifying the
+//    exact result, with early bailout on dissimilar pairs.
+//
+// [`ratio`] reuses steps 1–3 verbatim and swaps step 4 for the bit-parallel
+// LCS recurrence of Crochemore et al. (2001) / Hyyrö (2004), from which the
+// indel distance follows as `m + n - 2 · LLCS`; indel distance is invariant
+// under common-affix stripping for the same reason Levenshtein distance is.
+// Step 5 has an LCS counterpart that restricts the recurrence to a band of
+// diagonals and certifies its result (see `LargeCtx::lcs_banded`).  mbleven
+// stays Levenshtein-only: against the three-op LCS step it does not pay.
+//
+// The crate builds for each target's baseline ISA.  On x86-64 the whole
+// pipeline is compiled a second time with the x86-64-v2 features, and the
+// module picks one of the two copies when it loads (see [`Isa`]).
 
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
@@ -130,13 +135,12 @@ pub fn distance(s1: &str, s2: &str) -> usize {
 /// characters the two strings have in common, known as the indel similarity
 /// ratio:
 ///
-/// $$
-/// \mathrm{ratio}(s_1, s_2)
-///   = \frac{2 \cdot \mathrm{LCS}(s_1, s_2)}{|s_1| + |s_2|}
-/// $$
+/// ```text
+/// ratio(s1, s2) = 2 · LCS(s1, s2) / (|s1| + |s2|)
+/// ```
 ///
-/// where $\mathrm{LCS}$ is the length of the longest common subsequence and
-/// $|s|$ is the length of $s$.  Two empty strings score `1.0`.
+/// where `LCS` is the length of the longest common subsequence and `|s|` is
+/// the number of characters in `s`.  Two empty strings score `1.0`.
 ///
 /// # Examples
 ///

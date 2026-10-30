@@ -47,7 +47,7 @@ assert_eq!(lev::distance("kitten", "sitting"), 3);
 assert_eq!(lev::ratio("abc", "xyz"), 0.0);
 ```
 
-See [docs.rs](https://docs.rs/lev-rs) for details.
+The crate requires Rust 1.91 or newer. See [docs.rs](https://docs.rs/lev-rs) for details.
 
 ## Benchmarks
 
