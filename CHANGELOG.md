@@ -2,6 +2,19 @@
 
 - build: move dev and docs to project dependencies🔧 (#160)
 
+## [0.6.0](https://github.com/KarelZe/lev/compare/0.5.1...0.6.0) (2026-10-30)
+
+
+### Features
+
+* publish the crate to crates.io as lev-rs ✨ ([3fb0e4c](https://github.com/KarelZe/lev/commit/3fb0e4cde0327110f76c40c6b436c4b965d3ba8a))
+
+
+### Performance
+
+* affix early-exit, adaptive hash sizing, and banded loop peeling ⚡ ([#241](https://github.com/KarelZe/lev/issues/241)) ([8782bb7](https://github.com/KarelZe/lev/commit/8782bb74144bf51f56507fbe952a8285b3877c8e))
+* preallocate transcoded code units in the Rust API ⚡ ([cea86df](https://github.com/KarelZe/lev/commit/cea86dfb65670128f194fbd5122463809d693ca2))
+
 ## [0.5.1](https://github.com/KarelZe/lev/compare/0.5.0...0.5.1) (2026-10-27)
 
 
