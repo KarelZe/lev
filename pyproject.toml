@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.14.1,<2.0"]
+requires = ["maturin>=1.15.0,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -41,7 +41,7 @@ docs = ["zensical", "mkdocstrings[python]"]
 dev = [
   { include-group = "test" },
   { include-group = "docs" },
-  "maturin>=1.14.1,<2.0",
+  "maturin>=1.15.0,<2.0",
   "prek>=0.5.5",
   "ruff",
 ]
