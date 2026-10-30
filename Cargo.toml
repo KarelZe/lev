@@ -2,7 +2,7 @@
 [package]
 # `lev` is taken on crates.io; the library is still imported as `lev`.
 name = "lev-rs"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 # `u64::carrying_add` in the AArch64 kernels, which every target compiles.
 rust-version = "1.91"
