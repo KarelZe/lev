@@ -7,8 +7,9 @@ def distance(s1: str, s2: str, /) -> int:
     The distance is the minimum number of single-character insertions,
     deletions, or substitutions required to transform `s1` into `s2`.
 
-    Characters are counted as Unicode code points, so an accented letter or an
-    emoji counts as one character.
+    Characters are counted as Unicode code points, not as visible characters:
+    `"é"` written as one code point counts as 1, but `"e"` plus a combining
+    accent, flags, and emoji with skin tones or joiners count as 2 or more.
 
     Args:
         s1 (str): First input string.
@@ -48,8 +49,11 @@ def ratio(s1: str, s2: str, /) -> float:
     where $\mathrm{LCS}$ is the length of the longest common subsequence and
     $|s|$ is the length of $s$.
 
-    Characters are counted as Unicode code points, so an accented letter or an
-    emoji counts as one character.
+    This matches `rapidfuzz.fuzz.ratio(s1, s2) / 100` and `Levenshtein.ratio`.
+
+    Characters are counted as Unicode code points, not as visible characters:
+    `"é"` written as one code point counts as 1, but `"e"` plus a combining
+    accent, flags, and emoji with skin tones or joiners count as 2 or more.
 
     Args:
         s1 (str): First input string.

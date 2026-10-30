@@ -1,6 +1,6 @@
 # lev
 
-`lev` is an extremely fast Python library for the [Levenshtein distance](https://en.wikipedia.org/wiki/Levenshtein_distance) and similarity ratio, written in Rust. 🦀
+`lev` is an extremely fast Python library for comparing strings, written in Rust. 🦀 It computes the [Levenshtein distance](https://en.wikipedia.org/wiki/Levenshtein_distance) and a similarity ratio based on the [longest common subsequence](https://en.wikipedia.org/wiki/Longest_common_subsequence).
 
 ## Installation
 
@@ -8,13 +8,13 @@
 uv add lev-rs
 ```
 
-or if you prefer slow:
+or with pip:
 
 ```bash
 pip install lev-rs
 ```
 
-Wheels are available for Python 3.10 through 3.15, including free-threaded builds (PEP 703), on Linux, macOS, and Windows.
+Wheels are available for Python 3.10 through 3.15, including free-threaded Python (3.13t+), on Linux, macOS, and Windows.
 
 ## Usage
 
@@ -29,6 +29,8 @@ lev.ratio("kitten", "sitting")  # 0.615...
 lev.ratio("abc", "xyz")  # 0.0
 lev.ratio("", "")  # 1.0
 ```
+
+`lev.ratio` returns the same values as `rapidfuzz.fuzz.ratio(s1, s2) / 100` and `Levenshtein.ratio`.
 
 See the [API Reference](https://karelze.github.io/lev/api/) for details.
 
