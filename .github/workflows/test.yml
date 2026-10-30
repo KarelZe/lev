@@ -67,8 +67,9 @@ jobs:
       - name: Run cargo test
         run: cargo test
 
-  # Targets the wheels never cover but crate users may build for: 32-bit
-  # `usize`, and no x86-64 or AArch64 kernels.
+  # The crate (without the `python` feature) on targets whose `cargo test`
+  # no other job runs: 32-bit `usize` and the fallback kernel dispatch. The
+  # win32 wheels cover the same dispatch for Python but only run pytest.
   cross:
     name: Test crate on ${{ matrix.target }}
     runs-on: ubuntu-latest
