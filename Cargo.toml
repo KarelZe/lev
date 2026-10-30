@@ -1,21 +1,37 @@
 
 [package]
-name = "lev"
+# `lev` is taken on crates.io; the library is still imported as `lev`.
+name = "lev-rs"
 version = "0.5.1"
 edition = "2021"
+# `u64::carrying_add` in the AArch64 kernels, which every target compiles.
+rust-version = "1.91"
+description = "An extremely fast Levenshtein distance and similarity ratio, also available for Python."
+authors = ["Markus Bilz <github@markusbilz.com>"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/KarelZe/lev"
+homepage = "https://karelze.github.io/lev/"
+documentation = "https://docs.rs/lev-rs"
+keywords = ["levenshtein", "edit-distance", "string", "similarity", "fuzzy"]
+categories = ["algorithms", "text-processing"]
+# Keep the published crate to the sources; benchmarks, profiles and docs stay in git.
+include = ["/src/**/*.rs", "/build.rs", "/LICENSE", "/README.md"]
 
 [lib]
 # The name of the native library.
 name = "lev"
-# "cdylib" is necessary to produce a shared library for Python to import from.
-# "rlib" enables `cargo test` against the same crate.
-crate-type = ["cdylib", "rlib"]
+# maturin passes `--crate-type cdylib` itself, so Rust users only build an rlib.
+
+[features]
+# The `_lev` Python extension module; enabled by maturin (see pyproject.toml).
+python = ["dep:pyo3", "dep:pyo3-build-config"]
 
 [dependencies]
-pyo3 = { version = "0.28.3", features = ["extension-module"] }
+pyo3 = { version = "0.28.3", features = ["extension-module"], optional = true }
 
 [build-dependencies]
-pyo3-build-config = "0.28.3"
+pyo3-build-config = { version = "0.28.3", optional = true }
 
 [profile.release]
 lto = "fat"

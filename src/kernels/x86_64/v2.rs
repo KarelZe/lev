@@ -19,13 +19,14 @@
 //!
 //! [`py`] exposes the copy's `#[pyfunction]` wrappers; PyO3's generated
 //! argument-extraction code stays outside `#[target_feature]` and calls
-//! [`distance`] and [`ratio`] here.
+//! [`distance`] and [`ratio`] here.  The Rust API calls [`distance_views`]
+//! and [`indel_views`].
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "python"))]
 use pyo3::{types::PyString, Borrowed};
 
 #[cfg(target_arch = "x86_64")]
-use crate::{CodeUnit, Isa, Kernel, LargeCtx};
+use crate::{compute, CodeUnit, Isa, Kernel, LargeCtx, Lcs, Lev, UniView};
 
 /// The x86-64-v2 copy of the hot path.
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
@@ -50,13 +51,13 @@ pub(crate) fn detected() -> bool {
         && std::is_x86_feature_detected!("cmpxchg16b")
 }
 
-/// PyO3 wrappers for [`V2`], registered by `crate::_lev` when [`detected`] holds.
-#[cfg(target_arch = "x86_64")]
+/// PyO3 wrappers for [`V2`], registered by `crate::python::_lev` when [`detected`] holds.
+#[cfg(all(target_arch = "x86_64", feature = "python"))]
 pub(crate) mod py {
     use pyo3::prelude::*;
     use pyo3::types::PyString;
 
-    crate::entry_points!(super::distance, super::ratio);
+    crate::python::entry_points!(super::distance, super::ratio);
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -65,8 +66,9 @@ impl Isa for V2 {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", feature = "python"))]
 v2! {
-    /// [`crate::distance`] in this copy.
+    /// The Python `distance` in this copy.
     ///
     /// # Safety
     ///
@@ -75,10 +77,10 @@ v2! {
         s1: Borrowed<'_, '_, PyString>,
         s2: Borrowed<'_, '_, PyString>,
     ) -> usize {
-        crate::distance_in::<V2>(s1, s2)
+        crate::python::distance_in::<V2>(s1, s2)
     }
 
-    /// [`crate::ratio`] in this copy.
+    /// The Python `ratio` in this copy.
     ///
     /// # Safety
     ///
@@ -87,7 +89,29 @@ v2! {
         s1: Borrowed<'_, '_, PyString>,
         s2: Borrowed<'_, '_, PyString>,
     ) -> f64 {
-        crate::ratio_in::<V2>(s1, s2)
+        crate::python::ratio_in::<V2>(s1, s2)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+v2! {
+    /// The Levenshtein distance of [`crate::distance`] in this copy.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support x86-64-v2 target features, and the views must
+    /// satisfy the contract of [`crate::compute`].
+    pub(crate) unsafe fn distance_views(v1: &UniView, v2: &UniView) -> usize {
+        compute::<Lev<V2>>(v1, v2)
+    }
+
+    /// The indel distance behind [`crate::ratio`] in this copy.
+    ///
+    /// # Safety
+    ///
+    /// See [`distance_views`].
+    pub(crate) unsafe fn indel_views(v1: &UniView, v2: &UniView) -> usize {
+        compute::<Lcs<V2>>(v1, v2)
     }
 
     /// [`crate::hyrro_64_tiny`] in this copy.
