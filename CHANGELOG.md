@@ -2,6 +2,13 @@
 
 - build: move dev and docs to project dependencies🔧 (#160)
 
+## [0.5.2](https://github.com/KarelZe/lev/compare/0.5.1...0.5.2) (2026-10-30)
+
+
+### Performance
+
+* affix early-exit, adaptive hash sizing, and banded loop peeling ⚡ ([#241](https://github.com/KarelZe/lev/issues/241)) ([8782bb7](https://github.com/KarelZe/lev/commit/8782bb74144bf51f56507fbe952a8285b3877c8e))
+
 ## [0.5.1](https://github.com/KarelZe/lev/compare/0.5.0...0.5.1) (2026-10-27)
 
 
