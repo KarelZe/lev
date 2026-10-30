@@ -184,10 +184,18 @@ impl<'a> Units<'a> {
         if s.is_ascii() {
             return Units::Ascii(s.as_bytes());
         }
+        // `collect` from `Chars` would start at a quarter of the UTF-8 length
+        // and grow; the UTF-8 length bounds the char count, so one
+        // allocation suffices.
+        fn transcode<T>(s: &str, unit: impl Fn(char) -> T) -> Vec<T> {
+            let mut units = Vec::with_capacity(s.len());
+            units.extend(s.chars().map(unit));
+            units
+        }
         match s.chars().max().map_or(0, u32::from) {
-            0..=0xFF => Units::Latin1(s.chars().map(|c| c as u8).collect()),
-            0x100..=0xFFFF => Units::Ucs2(s.chars().map(|c| c as u16).collect()),
-            _ => Units::Ucs4(s.chars().map(u32::from).collect()),
+            0..=0xFF => Units::Latin1(transcode(s, |c| c as u8)),
+            0x100..=0xFFFF => Units::Ucs2(transcode(s, |c| c as u16)),
+            _ => Units::Ucs4(transcode(s, u32::from)),
         }
     }
 
