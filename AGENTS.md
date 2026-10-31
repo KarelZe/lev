@@ -65,6 +65,9 @@ a test in `kernels/tests.rs` against the portable form or the DP oracle.
 - Compare against other libraries: `uv run scripts/benchmark.py`
 - Compare across string lengths: `uv run scripts/benchmark_by_length.py`
 - Compare across released versions: `uv run scripts/benchmark_by_version.py`
+- Compare against other Rust crates (criterion, separate crate in `benches/compare`):
+  `(cd benches/compare && cargo bench)`, then `uv run scripts/benchmark_rust.py`
+  for the Markdown table and plots
 - For performance-critical changes, run `benchmark.py` before and after,
   then diff `benchmark_results.json`.
 

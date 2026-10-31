@@ -97,6 +97,28 @@ A short customer support message with a few natural typos.
   <img alt="Realistic text benchmark" src="https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_realistic_light.svg">
 </picture>
 
+### Rust Crates
+
+The `lev-rs` crate is compared against [rapidfuzz](https://crates.io/crates/rapidfuzz), [strsim](https://crates.io/crates/strsim), [triple_accel](https://crates.io/crates/triple_accel), [stringmetrics](https://crates.io/crates/stringmetrics), [edit-distance](https://crates.io/crates/edit-distance), [levenshtein](https://crates.io/crates/levenshtein), and [textdistance](https://crates.io/crates/textdistance) with [criterion](https://crates.io/crates/criterion), on the same string pairs as above. Each cell is the median time of one `distance(a, b)` call (lower is better), *Mixed* the time per pair over 1,000 different short pairs.
+
+| crate | ASCII | Latin-1 | CJK | Emoji | Realistic | Mixed (per pair) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| **`lev`** | **252 ns** | **470 ns** | **779 ns** | **909 ns** | **799 ns** | **87 ns** |
+| `rapidfuzz` | 985 ns | 1,140 ns | 1,291 ns | 1,559 ns | 2,613 ns | 222 ns |
+| `strsim` | 9,626 ns | 9,742 ns | 13.3 µs | 16.2 µs | 45.2 µs | 1,602 ns |
+| `stringmetrics` | 10.5 µs | 14.0 µs | 12.2 µs | 19.1 µs | 59.5 µs | 1,648 ns |
+| `levenshtein` | 11.2 µs | 11.1 µs | 12.6 µs | 14.8 µs | 55.7 µs | 1,709 ns |
+| `textdistance` | 11.4 µs | 11.4 µs | 11.5 µs | 11.5 µs | 55.2 µs | 1,730 ns |
+| `edit-distance` | 13.6 µs | 13.7 µs | 14.4 µs | 16.2 µs | 68.7 µs | 1,995 ns |
+| `triple_accel` | 29.6 µs | n/a | n/a | n/a | 148.0 µs | 4,622 ns |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_rust_length_dark.svg">
+  <img alt="Rust benchmark across string lengths" src="https://raw.githubusercontent.com/KarelZe/lev/main/docs/assets/benchmark_rust_length_light.svg">
+</picture>
+
+> Measured on an Apple M2 Pro with rustc 1.95.0. `triple_accel` compares bytes, so it only runs on pure-ASCII pairs, and vectorizes on x86-64 only. See the [docs](https://karelze.github.io/lev/#rust-crates) for details.
+
 ### Benchmark Scripts
 
 Reproduce benchmarks locally using the provided scripts:
@@ -110,6 +132,9 @@ uv run scripts/benchmark_by_length.py
 
 # Benchmark speedup across released versions:
 uv run scripts/benchmark_by_version.py
+
+# Compare against other Rust crates:
+(cd benches/compare && cargo bench) && uv run scripts/benchmark_rust.py
 ```
 
 ## Contact

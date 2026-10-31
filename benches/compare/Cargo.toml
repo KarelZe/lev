@@ -1,0 +1,30 @@
+# Compares `lev` against other Levenshtein crates with criterion.
+# A separate crate, so the competitors never become dependencies of `lev-rs`.
+# Run from this directory: `cargo bench`; see docs/index.md for details.
+[package]
+name = "lev-compare"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dev-dependencies]
+criterion = { version = "0.7", default-features = false, features = [
+  "cargo_bench_support",
+] }
+edit-distance = "2.2.2"
+lev-rs = { path = "../.." }
+levenshtein = "1.0.5"
+rapidfuzz = "0.5.0"
+stringmetrics = "2.2.2"
+strsim = "0.11.1"
+textdistance = "1.1.1"
+triple_accel = "0.4.0"
+
+[[bench]]
+name = "compare"
+harness = false
+
+# Same release settings as `lev-rs`, so every crate gets fat LTO.
+[profile.bench]
+lto = "fat"
+codegen-units = 1
