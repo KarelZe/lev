@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "lev-rs"
 authors = [{ name = "Markus Bilz", email = "github@markusbilz.com" }]
 description = "An extremely fast Python library for Levenshtein distance and an LCS-based similarity ratio, written in Rust 🦀."
-readme = "python/README.md"
+readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 dynamic = ["version"]

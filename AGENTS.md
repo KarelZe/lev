@@ -103,9 +103,9 @@ a test in `kernels/tests.rs` against the portable form or the DP oracle.
 - `tests/` — pytest suite
 - `scripts/` — build and benchmark scripts
 - `docs/` — Zensical documentation source
-- `README.md` — GitHub landing page; `python/README.md` is the PyPI page and
-  `src/README.md` the crates.io page (its examples run as doctests). Keep
-  Python content out of the crate README and Rust content out of the PyPI one.
+- `README.md` — GitHub and PyPI page, Python-first with a short Rust section;
+  `src/README.md` is the crates.io page (its examples run as doctests). Keep
+  Python content out of the crate README; link to it with absolute URLs.
 
 ## PR Guidelines
 - Keep diffs small and focused
