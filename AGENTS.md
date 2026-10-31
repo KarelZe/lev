@@ -65,6 +65,9 @@ a test in `kernels/tests.rs` against the portable form or the DP oracle.
 - Compare against other libraries: `uv run scripts/benchmark.py`
 - Compare across string lengths: `uv run scripts/benchmark_by_length.py`
 - Compare across released versions: `uv run scripts/benchmark_by_version.py`
+- Compare against other Rust crates (criterion, separate crate in `benches/compare`):
+  `(cd benches/compare && cargo bench)`, then `uv run scripts/benchmark_rust.py`
+  for the Markdown table and plots
 - For performance-critical changes, run `benchmark.py` before and after,
   then diff `benchmark_results.json`.
 
@@ -100,11 +103,14 @@ a test in `kernels/tests.rs` against the portable form or the DP oracle.
 - `tests/` — pytest suite
 - `scripts/` — build and benchmark scripts
 - `docs/` — Zensical documentation source
+- `README.md` — GitHub and PyPI page, Python-first with a short Rust section;
+  `src/README.md` is the crates.io page (its examples run as doctests). Keep
+  Python content out of the crate README; link to it with absolute URLs.
 
 ## PR Guidelines
 - Keep diffs small and focused
 - Add or update tests for changed code paths
-- Update `docs/` and `README.md` when behavior or API changes
+- Update `docs/` and the READMEs when behavior or API changes
 
 ## Permissions
 

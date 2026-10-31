@@ -3004,3 +3004,8 @@ mod tests {
         }
     }
 }
+
+// Compiles the examples in the crate's README, which is its crates.io page.
+#[cfg(doctest)]
+#[doc = include_str!("README.md")]
+struct ReadmeDoctests;
