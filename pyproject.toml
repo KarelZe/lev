@@ -42,7 +42,7 @@ dev = [
   { include-group = "test" },
   { include-group = "docs" },
   "maturin>=1.15.0,<2.0",
-  "prek>=0.5.5",
+  "prek>=0.5.7",
   "ruff",
 ]
 
