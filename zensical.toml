@@ -49,11 +49,20 @@ toggle.name = "Switch to dark mode"
 provider = "umami"
 property = "8e64b217-2297-4cec-9006-60314a629b93"
 
+# Version selector, fed by the `versions.json` that mike deploys next to the versions.
+[project.extra.version]
+provider = "mike"
+default = "latest"
+
 [[project.extra.social]]
 icon = "fontawesome/brands/github"
 link = "https://github.com/KarelZe/lev"
 
 [project.plugins.search]
+
+# Versioned docs, deployed with mike (see `.github/workflows/docs.yml`).
+[project.plugins.mike]
+canonical_version = "latest"
 
 [project.plugins.mkdocstrings.handlers.python.options]
 docstring_style = "google"

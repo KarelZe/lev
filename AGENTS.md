@@ -70,6 +70,8 @@ a test in `kernels/tests.rs` against the portable form or the DP oracle.
 
 ## Documentation
 - Serve locally: `uv run zensical serve`, then access http://localhost:8000
+- The docs are versioned with [mike](https://github.com/squidfunk/mike): CI deploys `dev` on pushes to main and
+  `<major>.<minor>` with the `latest` alias on releases (`.github/workflows/docs.yml`).
 
 ## Code Style
 - Python: `ruff format .` and `ruff check . --fix`

@@ -37,7 +37,7 @@ dependencies = []
 
 [dependency-groups]
 test = ["pytest", "pytest-codspeed>=5.0.3", "rapidfuzz>=3.14.5"]
-docs = ["zensical", "mkdocstrings[python]"]
+docs = ["zensical", "mkdocstrings[python]", "mike"]
 dev = [
   { include-group = "test" },
   { include-group = "docs" },
@@ -66,6 +66,10 @@ strip = true
 
 [tool.uv]
 exclude-newer = "7 days"
+
+[tool.uv.sources]
+# Zensical's fork of mike for versioned docs. It isn't published on PyPI.
+mike = { git = "https://github.com/squidfunk/mike.git", rev = "2d4ad799442f4592db8ad53b179bfb33db8c69ac" }
 
 [tool.ruff]
 

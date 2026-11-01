@@ -4,7 +4,7 @@ name: release
 # bumps Cargo.toml and CHANGELOG.md from the conventional commits since the
 # last release. Merging that PR tags the release and creates the GitHub
 # Release; the jobs below then build the wheels and publish them to PyPI,
-# and publish the crate to crates.io.
+# publish the crate to crates.io and deploy the versioned docs.
 # Everything lives in one workflow because tags created with GITHUB_TOKEN
 # do not trigger other workflows.
 on:
@@ -357,3 +357,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.version.outputs.tag }}
+
+  # Deploys the docs of the release as <major>.<minor> with the `latest` alias.
+  # Only for new releases: rebuilding an older tag by hand must not move `latest`.
+  # To deploy the docs of a tag by hand, run the docs workflow with the tag.
+  docs:
+    name: Deploy versioned docs
+    needs: [release-please, version]
+    if: needs.release-please.outputs.created == 'true'
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/docs.yml
+    with:
+      tag: ${{ needs.version.outputs.tag }}

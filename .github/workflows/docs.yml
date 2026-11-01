@@ -1,21 +1,53 @@
 name: docs
 
+# Versioned docs with mike: every version lives in a folder on the gh-pages
+# branch, next to the versions.json that feeds the version selector.
+# - Pushes to main deploy the `dev` version.
+# - Releases deploy `<major>.<minor>` with the `latest` alias, which the site
+#   root redirects to. The release workflow calls this workflow with the tag,
+#   because tags created with GITHUB_TOKEN don't trigger other workflows.
+# The gh-pages branch is then published to GitHub Pages as an artifact.
 on:
   push:
     branches: [main]
   workflow_dispatch:
-
-concurrency:
-  group: pages
-  cancel-in-progress: false
+    inputs:
+      tag:
+        description: "Release tag to deploy as <major>.<minor> and latest (e.g. 0.6.0); empty deploys main as dev"
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to deploy as <major>.<minor> and latest"
+        required: true
+        type: string
 
 jobs:
-  build:
+  deploy:
+    name: Deploy ${{ inputs.tag || 'dev' }} to gh-pages
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
+    # Deployments commit to gh-pages, so they must not run concurrently.
+    concurrency:
+      group: gh-pages
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          # mike pushes to gh-pages with the checkout's credentials.
+          persist-credentials: true
+
+      - name: Fetch gh-pages
+        # Fails before the first deployment, when there is no gh-pages branch yet.
+        run: git fetch origin gh-pages --depth=1 || true
+
+      - name: Configure git for mike
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
@@ -27,22 +59,46 @@ jobs:
       - name: Build extension and install docs dependencies
         run: uv sync --frozen --no-default-groups --group docs
 
-      - name: Build docs
+      # mike builds without --strict, so build once with it to catch warnings.
+      - name: Check docs
         run: uv run --frozen --no-sync zensical build --strict
 
-      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
-        with:
-          path: site/
+      - name: Deploy dev
+        if: ${{ !inputs.tag }}
+        run: uv run --frozen --no-sync mike deploy --push dev
 
-  deploy:
-    needs: build
+      - name: Deploy release
+        if: ${{ inputs.tag }}
+        run: |
+          uv run --frozen --no-sync mike deploy --push --update-aliases --title "${TAG}" "${TAG%.*}" latest
+          uv run --frozen --no-sync mike set-default --push latest
+        env:
+          TAG: ${{ inputs.tag }}
+
+  pages:
+    name: Publish gh-pages
+    needs: deploy
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pages: write
       id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: gh-pages
+          persist-credentials: false
+
+      # Resolves the symlinked aliases like `latest`.
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: .
+
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
