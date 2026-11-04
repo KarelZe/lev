@@ -3,7 +3,7 @@
 
 use super::aarch64::{self, apple, neoverse};
 use super::x86_64::{self, bmi1};
-use super::{myers_step, portable, EDGE_ROW0};
+use super::{band_limit, myers_step, portable, EDGE_ROW0};
 use crate::tests::{lcg, mutate, naive, naive_indel, rand_string};
 use crate::{compute_sorted, compute_sorted_mixed, compute_u8, Baseline, Isa, LargeCtx, Lcs, Lev};
 
@@ -439,6 +439,217 @@ fn small_ub_v2_matches_baseline() {
                     small_ub::<Baseline, _>(&a32, &b32),
                     "u32 len={len}"
                 );
+            }
+        }
+    }
+}
+
+/// The band of `words` words ([`portable::small_band`] or
+/// [`portable::small_band2`]) of the byte pattern `a` against `b` (`a` no
+/// longer), on a direct table of 256 rows; `Err` holds the give-up column.
+fn small_band_u8(words: usize, a: &[u8], b: &[u8]) -> Result<usize, usize> {
+    let w = a.len().div_ceil(64);
+    let mut data = vec![0u64; 256 * w];
+    for (i, &c) in a.iter().enumerate() {
+        data[c as usize * w + i / 64] |= 1 << (i % 64);
+    }
+    let row = |c: u8| c as usize;
+    // SAFETY: every byte has a row in the 256-row table.
+    let got = unsafe {
+        match words {
+            1 => portable::small_band(&data, w, a.len(), b, row),
+            _ => portable::small_band2(&data, w, a.len(), b, row),
+        }
+    };
+    got.map_err(|(j, _)| j)
+}
+
+fn naive_u8(a: &[u8], b: &[u8]) -> usize {
+    let (ac, bc): (Vec<char>, Vec<char>) = (
+        a.iter().map(|&c| c as char).collect(),
+        b.iter().map(|&c| c as char).collect(),
+    );
+    naive(&ac, &bc)
+}
+
+/// The largest distance the band of `words` words certifies for
+/// `n - m = s`.
+fn small_band_limit(words: usize, s: usize) -> usize {
+    band_limit(64 * words, s)
+}
+
+/// `a` with `subs` substitutions by `sub` at evenly spaced positions and
+/// `ins` copies of `ins_c` inserted in front, so that the distance is
+/// exactly `ins + subs` when neither byte occurs in `a`.
+fn spread_edits(a: &[u8], subs: usize, sub: u8, ins: usize, ins_c: u8) -> Vec<u8> {
+    let mut b = a.to_vec();
+    for t in 0..subs {
+        b[(2 * t + 1) * a.len() / (2 * subs)] = sub;
+    }
+    let mut out = vec![ins_c; ins];
+    out.extend_from_slice(&b);
+    out
+}
+
+/// Pattern lengths and length differences each band is tested on: every
+/// width up to 12 words the band takes, and differences at both ends of
+/// its range.
+const BAND_CASES: [(usize, &[usize], &[usize]); 2] = [
+    (
+        1,
+        &[65, 100, 128, 129, 300, 512, 513, 704, 705],
+        &[0, 1, 2, 31, 62, 63],
+    ),
+    (
+        2,
+        &[129, 192, 256, 512, 513, 704, 705],
+        &[0, 1, 2, 63, 64, 126, 127],
+    ),
+];
+
+/// Each band must agree with the oracle whenever it returns a distance,
+/// refuse every distance past its limit, and certify those within it for
+/// near-identical pairs (insertions plus at most two substitutions, which
+/// never put the diagonal ending in (m, n) ahead of its pace).
+#[test]
+fn small_band_matches_oracle() {
+    let mut state = 0x5A11_BA4D_0F0F_1234_u64;
+    let alpha = &b"abcdefgh"[..];
+    for (words, ms, ss) in BAND_CASES {
+        for &m in ms {
+            for &s in ss {
+                let a = rand_string(&mut state, m, alpha).into_bytes();
+                let limit = small_band_limit(words, s);
+                // Random substitutions on top of `s` random insertions.
+                for &subs in &[0usize, 2, 12, 60, 150] {
+                    let mut b = a.clone();
+                    for _ in 0..subs {
+                        let i = lcg(&mut state) % b.len();
+                        b[i] = alpha[lcg(&mut state) % alpha.len()];
+                    }
+                    for _ in 0..s {
+                        let i = lcg(&mut state) % (b.len() + 1);
+                        b.insert(i, alpha[lcg(&mut state) % alpha.len()]);
+                    }
+                    let d = naive_u8(&a, &b);
+                    let got = small_band_u8(words, &a, &b);
+                    let msg = format!("words={words} m={m} s={s} subs={subs} d={d}");
+                    if d > limit {
+                        assert!(got.is_err(), "{msg}");
+                    } else if subs <= 2 {
+                        assert_eq!(got, Ok(d), "{msg}");
+                    } else if let Ok(x) = got {
+                        assert_eq!(x, d, "{msg}");
+                    }
+                }
+                // Unrelated text.
+                let b = rand_string(&mut state, m + s, alpha).into_bytes();
+                let (d, got) = (naive_u8(&a, &b), small_band_u8(words, &a, &b));
+                if d > limit {
+                    assert!(got.is_err(), "random words={words} m={m} s={s} d={d}");
+                } else if let Ok(x) = got {
+                    assert_eq!(x, d, "random words={words} m={m} s={s}");
+                }
+            }
+        }
+    }
+}
+
+/// Each band certifies distances up to its limit and no further: `s`
+/// insertions in front and evenly spaced substitutions by a byte absent
+/// from the pattern give a distance of exactly `limit` (certified) and
+/// `limit + 1` (refused, at the last column at the latest).  The texts are
+/// long enough for that pace to stay below one edit per four columns.
+#[test]
+fn small_band_certifies_up_to_its_limit() {
+    let mut state = 0xCE27_1F1E_D00D_0001_u64;
+    let alpha = &b"abcdefgh"[..];
+    for (words, ms, ss) in [
+        (
+            1,
+            &[300usize, 600, 705][..],
+            &[0usize, 1, 2, 31, 62, 63][..],
+        ),
+        (2, &[600, 705], &[0, 1, 2, 63, 64, 126, 127]),
+    ] {
+        for &m in ms {
+            let a = rand_string(&mut state, m, alpha).into_bytes();
+            for &s in ss {
+                let limit = small_band_limit(words, s);
+                let msg = format!("words={words} m={m} s={s}");
+                let b = spread_edits(&a, limit - s, b'Z', s, b'Y');
+                assert_eq!(naive_u8(&a, &b), limit, "{msg}");
+                assert_eq!(small_band_u8(words, &a, &b), Ok(limit), "{msg} at limit");
+                let b = spread_edits(&a, limit - s + 1, b'Z', s, b'Y');
+                assert_eq!(naive_u8(&a, &b), limit + 1, "{msg}");
+                assert!(small_band_u8(words, &a, &b).is_err(), "{msg} past limit");
+            }
+        }
+    }
+}
+
+/// Each band gives up at its first check on unrelated texts, and only at
+/// the last column when all edits sit at the end of the text.
+#[test]
+fn small_band_gives_up_where_expected() {
+    let mut state = 0x1A57_C011_0000_0001_u64;
+    for (words, n) in [(1, 512usize), (2, 704)] {
+        let limit = small_band_limit(words, 0);
+        let (a, b) = (vec![b'a'; 256], vec![b'b'; 256]);
+        assert_eq!(small_band_u8(words, &a, &b), Err(4), "words={words}");
+        let a = rand_string(&mut state, n, b"abcdefgh").into_bytes();
+        // `limit + 1` substitutions at the very end.
+        let mut b = a.clone();
+        b[n - limit - 1..].fill(b'Z');
+        assert_eq!(naive_u8(&a, &b), limit + 1);
+        assert_eq!(small_band_u8(words, &a, &b), Err(n), "words={words}");
+        // `limit` there: certified at the last column.
+        b[n - limit - 1] = a[n - limit - 1];
+        assert_eq!(small_band_u8(words, &a, &b), Ok(limit), "words={words}");
+    }
+}
+
+/// The pipeline around the bands on every string kind and mixed kinds,
+/// for both metrics: patterns at the word boundaries the bands are tried
+/// on (and one past their last), length differences at and past each
+/// band's range, and near-identical, near-miss and heavily edited pairs.
+/// The first and last chars differ, so affix stripping keeps the lengths.
+#[test]
+fn small_band_pipeline_matches_oracle() {
+    let mut state = 0xBA4D_0000_C0B1_0001_u64;
+    let alphabets: [&[char]; 3] = [
+        &['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'],
+        &['a', 'é', 'ü', 'ø', 'å', 'ß'],
+        &['日', '本', 'a', '語', '😀', 'あ'],
+    ];
+    for alpha in alphabets {
+        let pick = |state: &mut u64| alpha[lcg(state) % alpha.len()];
+        for &m in &[65usize, 128, 129, 192, 256, 512, 513, 704, 705] {
+            for &s in &[0usize, 2, 63, 64, 100, 127, 128] {
+                for &subs in &[3usize, 30, 90] {
+                    let core: Vec<char> = (0..m - 2).map(|_| pick(&mut state)).collect();
+                    let mut b = core.clone();
+                    for _ in 0..subs {
+                        let i = lcg(&mut state) % b.len();
+                        b[i] = pick(&mut state);
+                    }
+                    for _ in 0..s {
+                        let i = lcg(&mut state) % (b.len() + 1);
+                        b.insert(i, pick(&mut state));
+                    }
+                    let a: Vec<char> = [&['P'][..], &core, &['Q']].concat();
+                    let b: Vec<char> = [&['R'][..], &b, &['S']].concat();
+                    let expected = (naive(&a, &b), naive_indel(&a, &b));
+                    for got in copy_metrics::<Baseline>(&a, &b) {
+                        assert_eq!(got, expected, "Baseline m={m} s={s} subs={subs}");
+                    }
+                    #[cfg(target_arch = "x86_64")]
+                    if super::x86_64::v2::detected() {
+                        for got in copy_metrics::<super::x86_64::v2::V2>(&a, &b) {
+                            assert_eq!(got, expected, "V2 m={m} s={s} subs={subs}");
+                        }
+                    }
+                }
             }
         }
     }

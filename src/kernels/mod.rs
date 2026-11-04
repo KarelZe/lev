@@ -88,7 +88,46 @@ mod portable;
 mod tests;
 pub(crate) mod x86_64;
 
-use crate::{Isa, LargeCtx};
+use crate::{CodeUnit, Isa, LargeCtx};
+
+/// Text columns before the first give-up check of [`small_band`]; the
+/// checks then double up to [`SMALL_BAND_CHECK`].  Dissimilar pairs give
+/// up at the first: at 65-128 chars the full kernel costs only 1.5 times
+/// as much per column as the band.
+const SMALL_BAND_FIRST: usize = 4;
+
+/// Text columns between the later give-up checks of [`small_band`].
+const SMALL_BAND_CHECK: usize = 16;
+
+/// Edits by which [`small_band`] may run ahead of its pace before it gives
+/// up.
+const SMALL_BAND_SLACK: usize = 2;
+
+/// Text columns per edit of the fastest pace [`small_band`] keeps up with,
+/// whatever its certification limit.
+const SMALL_BAND_PACE: usize = 4;
+
+/// Whether a band of [`small_band`] or [`small_band2`] with certification
+/// limit `limit` gives up at text column `j` of `n` with `score`, the cell
+/// of diagonal `s = n - m` in column `j`, which bounds the band's result
+/// from below: when the result can no longer be certified, or when the
+/// edits beyond `s` run [`SMALL_BAND_SLACK`] ahead of the pace that ends
+/// at `limit`, or of one edit per [`SMALL_BAND_PACE`] columns on texts
+/// short enough for that to be slower.
+#[inline(always)]
+pub(crate) fn band_gives_up(score: usize, s: usize, limit: usize, j: usize, n: usize) -> bool {
+    let pace = ((limit - s) * j / n).min(j / SMALL_BAND_PACE);
+    score > limit || score > s + SMALL_BAND_SLACK + pace
+}
+
+/// Largest distance a band of `diagonals` (64 or 128) certifies when the
+/// text is `s` chars longer than the pattern: a path of cost d stays within
+/// `floor((d - s) / 2)` diagonals of `[0, s]` (Ukkonen), and the band reaches
+/// `floor((diagonals - 1 - s) / 2)` beyond it on either side.
+#[inline(always)]
+pub(crate) fn band_limit(diagonals: usize, s: usize) -> usize {
+    s + 2 * ((diagonals - 1 - s) / 2) + 1
+}
 
 /// Edge byte between stacked strips of a tall pattern (see
 /// [`aarch64::full`]): bit 0 is the carry of the column addition,
@@ -145,6 +184,52 @@ pub(crate) fn multiword<X: Isa, const W: usize, I: Iterator<Item = [u64; W]>>(
     return aarch64::neoverse::multiword::<W, I>(m, pm_iter, edges);
     #[cfg(not(target_arch = "aarch64"))]
     portable::multiword::<W, I>(m, pm_iter, edges)
+}
+
+/// Speculative Levenshtein distance of a pattern of `m` rows against `text`
+/// (`m <= n < m + 64`), over a band of 64 diagonals around the ones from
+/// `(0, 0)` to `(m, n)` in a single word, so each text column takes one
+/// step instead of one per pattern word.  The peq rows have stride `w`;
+/// text char `c` matches the row at `row(c) * w`.  Returns `Ok(distance)`
+/// when the band certifies it (at most [`band_limit`]`(64, n - m)`, 63 or
+/// 64 edits, see [`portable::small_band`]), else `Err((j, score))` with the
+/// text column where it gave up (see [`band_gives_up`]) and the score
+/// there, which it does early on pairs whose edits outpace that limit.
+/// Selects [`portable::small_band`] on every target.
+///
+/// # Safety
+///
+/// `row(c) * w + w <= data.len()` for every `c` in `text`.
+#[inline(always)]
+pub(crate) unsafe fn small_band<T: CodeUnit, R: Fn(T) -> usize>(
+    data: &[u64],
+    w: usize,
+    m: usize,
+    text: &[T],
+    row: R,
+) -> Result<usize, (usize, usize)> {
+    // SAFETY: forwarded caller contract.
+    unsafe { portable::small_band(data, w, m, text, row) }
+}
+
+/// [`small_band`] over 128 diagonals in two words (`m <= n < m + 128`,
+/// `w >= 2`): two steps per text column instead of one per pattern word,
+/// certifying up to [`band_limit`]`(128, n - m)`, 127 or 128 edits.
+/// Selects [`portable::small_band2`] on every target.
+///
+/// # Safety
+///
+/// `row(c) * w + w <= data.len()` for every `c` in `text`.
+#[inline(always)]
+pub(crate) unsafe fn small_band2<T: CodeUnit, R: Fn(T) -> usize>(
+    data: &[u64],
+    w: usize,
+    m: usize,
+    text: &[T],
+    row: R,
+) -> Result<usize, (usize, usize)> {
+    // SAFETY: forwarded caller contract.
+    unsafe { portable::small_band2(data, w, m, text, row) }
 }
 
 /// Full-matrix Levenshtein distance (fallback for `w > MAX_W`).  Selects

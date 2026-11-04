@@ -169,6 +169,41 @@ v2! {
         crate::hyrro_multiword_hash_body::<K, T1, T2>(short, long)
     }
 
+    /// [`crate::hash_tail`] in this copy.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support x86-64-v2 target features, and the arguments
+    /// must satisfy the contract of [`crate::hash_tail_body`].
+    pub(crate) unsafe fn hash_tail<K: Kernel, T2: CodeUnit>(
+        m: usize,
+        long: &[T2],
+        data: &[u64],
+        w: usize,
+        hash: &[u64],
+        hash_mask: usize,
+        n_keys: usize,
+    ) -> usize {
+        // SAFETY: forwarded contract.
+        unsafe { crate::hash_tail_body::<K, T2>(m, long, data, w, hash, hash_mask, n_keys) }
+    }
+
+    /// [`crate::hash_kernel`] in this copy.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support x86-64-v2 target features, and the arguments
+    /// must satisfy the contract of [`crate::hash_kernel_body`].
+    pub(crate) unsafe fn hash_kernel<K: Kernel, T2: CodeUnit, R: Fn(u64) -> usize, const W: usize>(
+        m: usize,
+        long: &[T2],
+        data: &[u64],
+        row_of: R,
+    ) -> usize {
+        // SAFETY: forwarded contract.
+        unsafe { crate::hash_kernel_body::<K, T2, R, W>(m, long, data, row_of) }
+    }
+
     /// [`crate::LargeCtx::banded`] in this copy.
     ///
     /// # Safety
