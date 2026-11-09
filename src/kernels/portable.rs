@@ -2,7 +2,30 @@
 //! every target that has no form of its own.
 
 use super::{band_gives_up, delta, EDGE_ROW0, SMALL_BAND_CHECK, SMALL_BAND_FIRST};
-use crate::{lcs_len, lcs_step, CodeUnit, LargeCtx};
+use crate::{lcs_len, lcs_step, CodeUnit, Kernel, LargeCtx};
+
+/// [`super::word_u8`] with the match masks in a direct peq table of
+/// `SLOTS` rows, zeroed and filled once per call.
+#[inline(always)]
+pub(crate) fn word_u8<K: Kernel, const SLOTS: usize>(pattern: &[u8], text: &[u8]) -> usize {
+    debug_assert!((1..=64).contains(&pattern.len()));
+    let mut peq = [0u64; SLOTS];
+    for (i, &c) in pattern.iter().enumerate() {
+        // SAFETY: caller guarantees c < SLOTS (128 or 256).
+        unsafe {
+            *peq.get_unchecked_mut(c as usize) |= 1u64 << i;
+        }
+    }
+    K::word(
+        pattern.len(),
+        text.len(),
+        text.iter().map(|&c| {
+            // SAFETY: When SLOTS == 128, input is verified ASCII (c < 128);
+            // when SLOTS == 256, any u8 is < 256.
+            unsafe { *peq.get_unchecked(c as usize) }
+        }),
+    )
+}
 
 /// One column of the single-word Levenshtein recurrence: returns the new
 /// `(vp, vn)`.

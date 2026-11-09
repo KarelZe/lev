@@ -1,6 +1,8 @@
 //! x86-64 kernels: forms that need only the baseline ISA here, one module per
-//! ISA feature ([`bmi1`]), and the x86-64-v2 copy of the hot path ([`v2`]).
+//! ISA feature ([`avx2`], [`bmi1`]), and the x86-64-v2 copy of the hot path
+//! ([`v2`]).
 
+pub(crate) mod avx2;
 pub(crate) mod bmi1;
 pub(crate) mod v2;
 

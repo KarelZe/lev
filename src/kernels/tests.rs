@@ -3,9 +3,120 @@
 
 use super::aarch64::{self, apple, neoverse};
 use super::x86_64::{self, bmi1};
-use super::{band_limit, myers_step, portable, EDGE_ROW0};
+use super::{band_limit, myers_step, portable, word_u8, EDGE_ROW0};
 use crate::tests::{lcg, mutate, naive, naive_indel, rand_string};
-use crate::{compute_sorted, compute_sorted_mixed, compute_u8, Baseline, Isa, LargeCtx, Lcs, Lev};
+use crate::{
+    compute_sorted, compute_sorted_mixed, compute_u8, Baseline, Isa, Kernel, LargeCtx, Lcs, Lev,
+    TINY_M,
+};
+
+/// Every form of [`word_u8`] must agree with the DP oracle for both
+/// metrics, on every target that can run it: every pattern length the
+/// kernel takes (17 to 64), texts shorter and longer than the pattern and
+/// on both sides of the dispatch's text limit, repeated characters, bytes
+/// at and above 0x80 (`vpcmpeqb` and `vpmovmskb` work on signed bytes), and
+/// NUL text bytes, which match a zero-padded pattern in the vector forms'
+/// registers.
+#[test]
+fn word_u8_forms_match_oracle() {
+    /// `(form, result)` of every form this target runs; the 128-row table
+    /// only for pure ASCII.
+    fn forms<K: Kernel>(p: &[u8], t: &[u8], ascii: bool) -> Vec<(&'static str, usize)> {
+        let mut out = vec![("portable 256", portable::word_u8::<K, 256>(p, t))];
+        if ascii {
+            out.push(("portable 128", portable::word_u8::<K, 128>(p, t)));
+            out.push(("dispatch 128", word_u8::<K, 128>(p, t)));
+        }
+        out.push(("dispatch 256", word_u8::<K, 256>(p, t)));
+        #[cfg(target_arch = "aarch64")]
+        out.push(("neon", aarch64::neon::word_u8::<K, 256>(p, t)));
+        #[cfg(target_arch = "aarch64")]
+        if ascii {
+            out.push(("neon 128", aarch64::neon::word_u8::<K, 128>(p, t)));
+        }
+        #[cfg(target_arch = "x86_64")]
+        if p.len() <= 32 && x86_64::v2::detected() && std::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 and the x86-64-v2 features were just detected,
+            // and the pattern has 17 to 32 bytes.
+            out.push(("avx2", unsafe { x86_64::avx2::word_u8::<K, 256>(p, t) }));
+            if ascii {
+                out.push(("avx2 128", unsafe { x86_64::avx2::word_u8::<K, 128>(p, t) }));
+            }
+        }
+        out
+    }
+    let mut state = 0x7AB1_E0F0_1234_5678_u64;
+    // (pattern alphabet, text alphabet): repeated chars, plain ASCII, high
+    // and NUL bytes on both sides, NUL bytes in the text only.
+    let alphabets: [(&[u8], &[u8]); 4] = [
+        (b"ab", b"ab"),
+        (b"abcdefghijklmnopqrstuvwxyz", b"abcdefghijklmnopqrstuvwxyz"),
+        (
+            &[0x00, 0x7F, 0x80, 0xC0, 0xE9, 0xFE, 0xFF, b'a'],
+            &[0x00, 0x7F, 0x80, 0xC0, 0xE9, 0xFE, 0xFF, b'a'],
+        ),
+        (b"abc", &[0x00, b'a', b'b', 0xFF]),
+    ];
+    let pick = |state: &mut u64, alpha: &[u8], len: usize| -> Vec<u8> {
+        (0..len).map(|_| alpha[lcg(state) % alpha.len()]).collect()
+    };
+    for (pa, ta) in alphabets {
+        let ascii = pa.iter().chain(ta).all(|&c| c < 0x80);
+        for m in TINY_M + 1..=64usize {
+            let p = pick(&mut state, pa, m);
+            let lens = [
+                0,
+                1,
+                m / 2,
+                m - 1,
+                m,
+                m + 1,
+                2 * m + 5,
+                8 * m,
+                8 * m + 1,
+                300,
+            ];
+            let mut texts: Vec<Vec<u8>> = lens.iter().map(|&n| pick(&mut state, ta, n)).collect();
+            // A similar text: a few edits of the pattern, from the text alphabet.
+            let mut sim = p.clone();
+            for _ in 0..1 + m / 10 {
+                let i = lcg(&mut state) % sim.len();
+                match lcg(&mut state) % 3 {
+                    0 => sim[i] = ta[lcg(&mut state) % ta.len()],
+                    1 => sim.insert(i, ta[lcg(&mut state) % ta.len()]),
+                    _ => {
+                        sim.remove(i);
+                    }
+                }
+            }
+            texts.push(sim);
+            texts.push(p.clone());
+            let pc: Vec<char> = p.iter().map(|&c| c as char).collect();
+            for t in &texts {
+                let tc: Vec<char> = t.iter().map(|&c| c as char).collect();
+                let (d, e) = (naive(&pc, &tc), naive_indel(&pc, &tc));
+                let msg = format!("m={m} n={} p={p:?} t={t:?}", t.len());
+                for (form, got) in forms::<Lev<Baseline>>(&p, t, ascii) {
+                    assert_eq!(got, d, "Lev {form} {msg}");
+                }
+                for (form, got) in forms::<Lcs<Baseline>>(&p, t, ascii) {
+                    assert_eq!(got, e, "Lcs {form} {msg}");
+                }
+                // The x86-64-v2 copy's dispatch, which selects the AVX2 form.
+                #[cfg(target_arch = "x86_64")]
+                if x86_64::v2::detected() {
+                    use x86_64::v2::V2;
+                    assert_eq!(word_u8::<Lev<V2>, 256>(&p, t), d, "Lev V2 {msg}");
+                    assert_eq!(word_u8::<Lcs<V2>, 256>(&p, t), e, "Lcs V2 {msg}");
+                    if ascii {
+                        assert_eq!(word_u8::<Lev<V2>, 128>(&p, t), d, "Lev V2 128 {msg}");
+                        assert_eq!(word_u8::<Lcs<V2>, 128>(&p, t), e, "Lcs V2 128 {msg}");
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// The and-not form must agree with Hyyrö's form and the oracle on every
 /// target, not only where it is selected: on real pairs for every width,

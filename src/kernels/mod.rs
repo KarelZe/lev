@@ -8,9 +8,9 @@
 //!   selected.
 //! - `<target_arch>/<feature>`: forms that need an ISA extension, named
 //!   after the `target_feature` that defines the form (e.g.
-//!   [`x86_64::bmi1`], whose forms also need POPCNT; later `x86_64::avx2`,
-//!   `aarch64::neon`).  Selected by runtime feature detection, or by
-//!   `cfg(target_feature)` where the target guarantees it.
+//!   [`x86_64::bmi1`], whose forms also need POPCNT, `x86_64::avx2` and
+//!   [`aarch64::neon`]).  Selected by runtime feature detection, or by
+//!   `cfg` where the target guarantees it.
 //! - `<target_arch>/<uarch>`: forms that use only the baseline ISA but are
 //!   scheduled for one core family, named after that family as LLVM's
 //!   `target-cpu` names it ([`aarch64::apple`], [`aarch64::neoverse`]).
@@ -34,7 +34,8 @@
 //! of it (`portable::multiword`, `aarch64::apple::multiword`,
 //! `x86_64::bmi1::multiword`), so the path states the target.  Code outside
 //! this module calls only the dispatchers here ([`myers_step`],
-//! [`multiword`], [`full`], [`lcs_full`]), which hold every selection rule.
+//! [`multiword`], [`word_u8`], [`full`], [`lcs_full`]), which hold every
+//! selection rule.
 //!
 //! # Selection
 //!
@@ -73,6 +74,12 @@
 //!   12-23% slower than the portable loop over all words.
 //! - [`full`] on x86-64 in strips of eight words of the AVX2 `multiword`: up
 //!   to 1.8 times slower than the portable loop.
+//! - `aarch64::neon::word_u8` for texts of any length: at 16 text
+//!   characters per pattern character `ratio` is 1-5% slower than the table
+//!   on Apple M2 (see [`TABLE_FREE_MAX_TEXT_PER_ROW`]).  With the pattern
+//!   copied into a padded stack buffer and loaded with `vld4q_u8`, which
+//!   costs a `memcpy` call and a store-to-load stall, `ratio` gained 5%
+//!   less on texts as long as the pattern.
 //!
 //! # Compilation and tests
 //!
@@ -88,7 +95,7 @@ mod portable;
 mod tests;
 pub(crate) mod x86_64;
 
-use crate::{CodeUnit, Isa, LargeCtx};
+use crate::{CodeUnit, Isa, Kernel, LargeCtx};
 
 /// Text columns before the first give-up check of [`small_band`]; the
 /// checks then double up to [`SMALL_BAND_CHECK`].  Dissimilar pairs give
@@ -134,6 +141,58 @@ pub(crate) fn band_limit(diagonals: usize, s: usize) -> usize {
 /// bits 1 and 2 the `+1`/`-1` horizontal delta leaving the strip's top row.
 /// Below row 0 the delta is `+1` and there is no carry.
 const EDGE_ROW0: u8 = 0b010;
+
+/// Longest text, per pattern character, that [`word_u8`] gives a vector
+/// form.  The vector forms save the table's setup once per call but spend
+/// more work per text character.  On Apple M2 the NEON form's LCS loop,
+/// whose chain is short, turns throughput-bound: it loses 1-5% at 16 text
+/// characters per pattern character and wins 2-15% at 4 to 8.  x86-64
+/// shares the limit untuned.
+#[cfg_attr(
+    not(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", target_vendor = "apple")
+    )),
+    allow(dead_code)
+)]
+const TABLE_FREE_MAX_TEXT_PER_ROW: usize = 8;
+
+/// Single-word kernel `K` for a byte pattern of 17 to 64 characters (the
+/// tiny path takes shorter ones) against a byte text.  `SLOTS` is the
+/// alphabet of the pair: 128 for pure ASCII, 256 for Latin-1.
+///
+/// For texts of up to [`TABLE_FREE_MAX_TEXT_PER_ROW`] characters per
+/// pattern character, selects a form that computes each text character's
+/// match mask by vector compares against the pattern held in registers:
+/// `aarch64::neon::word_u8` on Apple targets (by OS vendor, as for
+/// [`myers_step`]; other AArch64 cores are unmeasured, and Neoverse N1 and
+/// N2 have half the vector pipes of Apple's cores), and
+/// `x86_64::avx2::word_u8` for patterns of up to 32 characters in the
+/// x86-64-v2 copy `K::Isa` on CPUs with AVX2.  Otherwise selects
+/// [`portable::word_u8`], which looks the mask up in a peq table.
+#[inline(always)]
+pub(crate) fn word_u8<K: Kernel, const SLOTS: usize>(pattern: &[u8], text: &[u8]) -> usize {
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", target_vendor = "apple")
+    ))]
+    let short_text = text.len() <= TABLE_FREE_MAX_TEXT_PER_ROW * pattern.len();
+    #[cfg(target_arch = "x86_64")]
+    if short_text
+        && pattern.len() <= 32
+        && <K::Isa as Isa>::X86_64_V2
+        && std::is_x86_feature_detected!("avx2")
+    {
+        // SAFETY: the copy `K::Isa` has the x86-64-v2 features, AVX2 was
+        // just detected, and the pattern has 17 to 32 bytes.
+        return unsafe { x86_64::avx2::word_u8::<K, SLOTS>(pattern, text) };
+    }
+    #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+    if short_text {
+        return aarch64::neon::word_u8::<K, SLOTS>(pattern, text);
+    }
+    portable::word_u8::<K, SLOTS>(pattern, text)
+}
 
 /// One column of the single-word Levenshtein recurrence (see
 /// [`crate::hyrro_inner`]): returns the new `(vp, vn)`.  Selects

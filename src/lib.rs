@@ -58,6 +58,10 @@
 //      and gates into `mbleven` (Hyyrö 2018), evaluating candidate branch patterns
 //      in O(ub · n) time without building peq tables or allocating memory.
 //    - *Single-word* (`m ≤ 64`): one 64-bit word covers the entire pattern.
+//      UCS-1 patterns skip the peq table when the text has at most eight
+//      characters per pattern character: on AArch64 (NEON) and, up to 32
+//      characters, on x86-64 CPUs with AVX2, the match word comes from
+//      vector compares against the pattern held in registers.
 //    - *Multi-word* (`64 < m ≤ 512`): ⌈m/64⌉ words with carry propagation.
 //      UCS-1 uses a `[[u64; W]; 128 or 256]` stack peq (O(1) direct lookup, no heap).
 //      UCS-2/4 use stack-allocated open-addressing hash tables.
@@ -829,9 +833,9 @@ fn compute_u8<K: Kernel, const ASCII: bool>(a: &[u8], b: &[u8]) -> usize {
     }
     if a.len() <= 64 {
         if ASCII {
-            hyrro_64_u8::<K, 128>(a, b)
+            kernels::word_u8::<K, 128>(a, b)
         } else {
-            hyrro_64_u8::<K, 256>(a, b)
+            kernels::word_u8::<K, 256>(a, b)
         }
     } else {
         if ASCII {
@@ -1205,28 +1209,6 @@ fn direct_row<T: CodeUnit, const ROWS: usize>(c: T) -> usize {
     } else {
         c.as_u64().min(ROWS as u64 - 1) as usize
     }
-}
-
-/// Single-word variant for byte patterns (UCS-1).
-#[inline(always)]
-fn hyrro_64_u8<K: Kernel, const SLOTS: usize>(pattern: &[u8], text: &[u8]) -> usize {
-    debug_assert!((1..=64).contains(&pattern.len()));
-    let mut peq = [0u64; SLOTS];
-    for (i, &c) in pattern.iter().enumerate() {
-        // SAFETY: caller guarantees c < SLOTS (128 or 256).
-        unsafe {
-            *peq.get_unchecked_mut(c as usize) |= 1u64 << i;
-        }
-    }
-    K::word(
-        pattern.len(),
-        text.len(),
-        text.iter().map(|&c| {
-            // SAFETY: When SLOTS == 128, input is verified ASCII (c < 128);
-            // when SLOTS == 256, any u8 is < 256.
-            unsafe { *peq.get_unchecked(c as usize) }
-        }),
-    )
 }
 
 /// Single-word variant for UCS-2/4 and mixed kinds, with the peq table in a

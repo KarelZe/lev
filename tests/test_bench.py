@@ -132,6 +132,14 @@ _SHORT = [
     _pair(_ASCII, 32, None, seed=5, id="ascii-32-dis"),
     _pair(_UCS2, 32, 8, seed=7, id="ucs2-32"),
     _pair(_UCS4, 64, 16, seed=9, id="ucs4-64"),
+    # Byte patterns of 17-64 chars after affix stripping (single-word path).
+    _pair(_LATIN1, 24, 3, seed=103, id="latin1-24-d3"),
+    _pair(_LATIN1, 32, None, seed=13, id="latin1-32-dis"),
+    _pair(_ASCII, 48, 6, seed=31, id="ascii-48-d6"),
+    _pair(_LATIN1, 64, None, seed=17, id="latin1-64-dis"),
+    # A 24-char pattern against a 4x and a 16x longer text.
+    pytest.param(_rand_str(_ASCII, 24, seed=19), _rand_str(_ASCII, 96, seed=21), id="ascii-24-vs-96"),
+    pytest.param(_rand_str(_ASCII, 24, seed=23), _rand_str(_ASCII, 384, seed=25), id="ascii-24-vs-384"),
 ]
 
 _MEDIUM = [
