@@ -1399,6 +1399,10 @@ trait Kernel {
     /// Whether the mbleven fast path applies; it is Levenshtein-specific.
     const MBLEVEN: bool;
 
+    /// Whether the multi-word entry points first try
+    /// [`kernels::small_band`]; it is Levenshtein-specific.
+    const SMALL_BAND: bool;
+
     /// Single-word kernel (`m <= 64`).
     fn word<I: Iterator<Item = u64>>(m: usize, n: usize, pm_iter: I) -> usize;
 
@@ -1419,6 +1423,8 @@ impl<X: Isa> Kernel for Lev<X> {
     type Isa = X;
 
     const MBLEVEN: bool = true;
+
+    const SMALL_BAND: bool = true;
 
     #[inline(always)]
     fn word<I: Iterator<Item = u64>>(m: usize, n: usize, pm_iter: I) -> usize {
@@ -1456,6 +1462,8 @@ impl<X: Isa> Kernel for Lcs<X> {
 
     const MBLEVEN: bool = false;
 
+    const SMALL_BAND: bool = false;
+
     #[inline(always)]
     fn word<I: Iterator<Item = u64>>(m: usize, n: usize, pm_iter: I) -> usize {
         m + n - 2 * lcs_inner_64(pm_iter)
@@ -1483,6 +1491,63 @@ impl<X: Isa> Kernel for Lcs<X> {
 /// Widest pattern, in 64-bit words, handled by the const-width kernels with
 /// stack peq tables; longer patterns go through [`LargeCtx`].
 const MAX_W: usize = 8;
+
+/// Longest pattern for which the multi-word entry points first try the
+/// bands of [`small_bands`].  Below it [`LargeCtx::run`] cannot band (its
+/// blocks need `w >= 12`), so every pair would take all words per column.
+const SMALL_BAND_MAX_M: usize = 704;
+
+/// Narrowest pattern, in words, on which [`kernels::small_band2`] follows
+/// [`kernels::small_band`].  The give-up rule keeps a band from certifying
+/// more than about `n / 4` edits beyond the length difference, which the
+/// one-word band already covers up to 256 chars.
+const SMALL_BAND2_MIN_W: usize = 5;
+
+/// The speculative bands that kernel `K` tries on a pattern of `m > 64`
+/// rows in `w` words (peq rows of stride `w` in `data`, text char `c` in
+/// the row at `row(c) * w`) before the kernels of all words: the one-word
+/// band when the diagonals `0..=n - m` are less than 64 apart, then from
+/// [`SMALL_BAND2_MIN_W`] words on the two-word band when they are less
+/// than 128 apart.  The two-word band is skipped when the score at which
+/// the one-word band gave up would make it give up at the same column too
+/// (its cell there is at most the narrower band's, so this is a guess, as
+/// the give-up rule itself is).  Returns the distance when a band
+/// certifies it.
+///
+/// # Safety
+///
+/// `row(c) * w + w <= data.len()` for every `c` in `text`.
+#[inline(always)]
+unsafe fn small_bands<K: Kernel, T: CodeUnit, R: Fn(T) -> usize + Copy>(
+    data: &[u64],
+    w: usize,
+    m: usize,
+    text: &[T],
+    row: R,
+) -> Option<usize> {
+    let (n, mut gave_up) = (text.len(), None);
+    if !K::SMALL_BAND || m > SMALL_BAND_MAX_M {
+        return None;
+    }
+    let s = n - m;
+    if s < 64 {
+        // SAFETY: forwarded caller contract.
+        match unsafe { kernels::small_band(data, w, m, text, row) } {
+            Ok(d) => return Some(d),
+            Err(at) => gave_up = Some(at),
+        }
+    }
+    if w < SMALL_BAND2_MIN_W || s >= 128 {
+        return None;
+    }
+    if let Some((j, score)) = gave_up {
+        if kernels::band_gives_up(score, s, kernels::band_limit(128, s), j, n) {
+            return None;
+        }
+    }
+    // SAFETY: forwarded caller contract.
+    unsafe { kernels::small_band2(data, w, m, text, row) }.ok()
+}
 
 /// Multi-word entry point with a direct peq table of `ROWS` rows: UCS-1
 /// pairs (128 rows for pure ASCII, 256 for Latin-1) and mixed-kind pairs
@@ -1526,6 +1591,13 @@ fn hyrro_multiword_direct_body<K: Kernel, const ROWS: usize, T1: CodeUnit, T2: C
                         .get_unchecked_mut(i / 64) |= 1u64 << (i % 64);
                 }
             }
+            // SAFETY: direct_row < ROWS, the table's row count.
+            let band = unsafe {
+                small_bands::<K, _, _>(peq.as_flattened(), $W, m, long, direct_row::<T2, ROWS>)
+            };
+            if let Some(d) = band {
+                return d;
+            }
             K::words::<$W, _>(
                 m,
                 long.len(),
@@ -1547,6 +1619,11 @@ fn hyrro_multiword_direct_body<K: Kernel, const ROWS: usize, T1: CodeUnit, T2: C
             let mut peq = vec![0u64; ROWS * w];
             for (i, &c) in short.iter().enumerate() {
                 peq[direct_row::<_, ROWS>(c) * w + i / 64] |= 1u64 << (i % 64);
+            }
+            // SAFETY: direct_row < ROWS, the table's row count.
+            let band = unsafe { small_bands::<K, _, _>(&peq, w, m, long, direct_row::<T2, ROWS>) };
+            if let Some(d) = band {
+                return d;
             }
             K::large(&LargeCtx {
                 m,
@@ -1963,24 +2040,6 @@ fn hyrro_multiword_hash_body<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
     let n_keys = n_keys as usize;
     let hash = &*hash;
 
-    // Dense row of a code unit; `n_keys` for units absent from the pattern.
-    let row_of = |key: u64| -> usize {
-        let mut slot = hslot(key, hshift);
-        loop {
-            // SAFETY: `slot < hash_size == hash.len()`: `hslot` with
-            // `hshift = 64 - log2(hash_size)` keeps only the top `log2(hash_size)` bits,
-            // and each probe step is masked with `hash_mask = hash_size - 1`.
-            let entry = unsafe { *hash.get_unchecked(slot) };
-            if entry == EMPTY {
-                return n_keys;
-            }
-            if entry & 0xFFFF_FFFF == key {
-                return (entry >> 32) as usize;
-            }
-            slot = (slot + 1) & hash_mask;
-        }
-    };
-
     // Rows sized by the actual alphabet; the trailing row stays all-zero and
     // serves text chars that do not occur in the pattern.
     let (mut data_stack, mut data_heap) =
@@ -1992,16 +2051,19 @@ fn hyrro_multiword_hash_body<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
         data[ki * w + i / 64] |= 1u64 << (i % 64);
     }
 
+    if K::SMALL_BAND {
+        // SAFETY: `hash` holds the `n_keys` keys of the pattern, and `data`
+        // their rows plus the zero row.
+        return unsafe { hash_tail::<K, T2>(m, long, data, w, hash, hash_mask, n_keys) };
+    }
+
+    // Dense row of a code unit; `n_keys` for units absent from the pattern.
+    let row_of = |key: u64| -> usize { hash_row(hash, hshift, hash_mask, n_keys, key) };
+
     macro_rules! run {
         ($W:literal) => {{
-            let (rows, _) = data.as_chunks::<$W>();
-            K::words::<$W, _>(
-                m,
-                long.len(),
-                // SAFETY: row_of returns <= n_keys < rows.len().
-                long.iter()
-                    .map(|&c| unsafe { *rows.get_unchecked(row_of(c.as_u64())) }),
-            )
+            // SAFETY: row_of returns <= n_keys, and `data` holds n_keys + 1 rows.
+            unsafe { hash_kernel_body::<K, T2, _, $W>(m, long, data, &row_of) }
         }};
     }
     match w {
@@ -2023,6 +2085,149 @@ fn hyrro_multiword_hash_body<K: Kernel, T1: CodeUnit, T2: CodeUnit>(
             })
         }
     }
+}
+
+/// Dense row of code unit `key` in the pattern hash of
+/// [`hyrro_multiword_hash`]: `n_keys` for units absent from the pattern.
+#[inline(always)]
+fn hash_row(hash: &[u64], hshift: u32, hash_mask: usize, n_keys: usize, key: u64) -> usize {
+    let mut slot = hslot(key, hshift);
+    loop {
+        // SAFETY: `slot < hash_size == hash.len()`: `hslot` with
+        // `hshift = 64 - log2(hash_size)` keeps only the top `log2(hash_size)` bits,
+        // and each probe step is masked with `hash_mask = hash_size - 1`.
+        let entry = unsafe { *hash.get_unchecked(slot) };
+        if entry == u64::MAX {
+            return n_keys;
+        }
+        if entry & 0xFFFF_FFFF == key {
+            return (entry >> 32) as usize;
+        }
+        slot = (slot + 1) & hash_mask;
+    }
+}
+
+/// The rest of [`hyrro_multiword_hash`] once its tables are built, for the
+/// kernels that try [`kernels::small_band`] first: the band, then the
+/// kernel for all words.  Out of line, because with the call to the band
+/// after it, the table build kept the hash parameters on the stack.  Each
+/// copy of the hot path compiles its own (see [`Isa`]).
+///
+/// # Safety
+///
+/// See [`hash_tail_body`].
+#[inline(never)]
+unsafe fn hash_tail<K: Kernel, T2: CodeUnit>(
+    m: usize,
+    long: &[T2],
+    data: &[u64],
+    w: usize,
+    hash: &[u64],
+    hash_mask: usize,
+    n_keys: usize,
+) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    if K::Isa::X86_64_V2 {
+        // SAFETY: the CPU runs `K::Isa` (see `Isa`); forwarded contract.
+        return unsafe {
+            kernels::x86_64::v2::hash_tail::<K, T2>(m, long, data, w, hash, hash_mask, n_keys)
+        };
+    }
+    // SAFETY: forwarded contract.
+    unsafe { hash_tail_body::<K, T2>(m, long, data, w, hash, hash_mask, n_keys) }
+}
+
+/// The body of [`hash_tail`].
+///
+/// # Safety
+///
+/// `hash` is the pattern hash of [`hyrro_multiword_hash`] with `n_keys`
+/// keys and `hash_mask + 1` slots, and `data` holds `n_keys + 1` rows of
+/// `w` words.
+#[inline(always)]
+unsafe fn hash_tail_body<K: Kernel, T2: CodeUnit>(
+    m: usize,
+    long: &[T2],
+    data: &[u64],
+    w: usize,
+    hash: &[u64],
+    hash_mask: usize,
+    n_keys: usize,
+) -> usize {
+    let hshift = 64 - hash_mask.count_ones();
+    let row_of = move |key: u64| -> usize { hash_row(hash, hshift, hash_mask, n_keys, key) };
+    // SAFETY: row_of returns <= n_keys (caller contract).
+    let band = unsafe { small_bands::<K, _, _>(data, w, m, long, |c: T2| row_of(c.as_u64())) };
+    if let Some(d) = band {
+        return d;
+    }
+    // SAFETY (every const width): row_of returns <= n_keys (caller contract).
+    // The kernels of up to four words go out of line too, one per width:
+    // after the call to the band, they kept the hash parameters on the
+    // stack, which the wider ones spill anyway.
+    match w {
+        2 => unsafe { hash_kernel::<K, T2, _, 2>(m, long, data, row_of) },
+        3 => unsafe { hash_kernel::<K, T2, _, 3>(m, long, data, row_of) },
+        4 => unsafe { hash_kernel::<K, T2, _, 4>(m, long, data, row_of) },
+        5 => unsafe { hash_kernel_body::<K, T2, _, 5>(m, long, data, row_of) },
+        6 => unsafe { hash_kernel_body::<K, T2, _, 6>(m, long, data, row_of) },
+        7 => unsafe { hash_kernel_body::<K, T2, _, 7>(m, long, data, row_of) },
+        8 => unsafe { hash_kernel_body::<K, T2, _, 8>(m, long, data, row_of) },
+        _ => K::large(&LargeCtx {
+            m,
+            n: long.len(),
+            w,
+            data,
+            // SAFETY: the kernels only ask for j < n.
+            base_of: |j: usize| row_of(unsafe { long.get_unchecked(j) }.as_u64()) * w,
+        }),
+    }
+}
+
+/// [`hash_kernel_body`] out of line, for the kernels that try
+/// [`kernels::small_band`] first.  Each copy of the hot path compiles its
+/// own (see [`Isa`]).
+///
+/// # Safety
+///
+/// See [`hash_kernel_body`].
+#[inline(never)]
+unsafe fn hash_kernel<K: Kernel, T2: CodeUnit, R: Fn(u64) -> usize, const W: usize>(
+    m: usize,
+    long: &[T2],
+    data: &[u64],
+    row_of: R,
+) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    if K::Isa::X86_64_V2 {
+        // SAFETY: the CPU runs `K::Isa` (see `Isa`); forwarded contract.
+        return unsafe { kernels::x86_64::v2::hash_kernel::<K, T2, R, W>(m, long, data, row_of) };
+    }
+    // SAFETY: forwarded contract.
+    unsafe { hash_kernel_body::<K, T2, R, W>(m, long, data, row_of) }
+}
+
+/// The `W`-word kernel of [`hyrro_multiword_hash`] over its peq rows in
+/// `data`; text unit `c` takes row `row_of(c)`.
+///
+/// # Safety
+///
+/// `row_of(c) * W + W <= data.len()` for every `c` in `long`.
+#[inline(always)]
+unsafe fn hash_kernel_body<K: Kernel, T2: CodeUnit, R: Fn(u64) -> usize, const W: usize>(
+    m: usize,
+    long: &[T2],
+    data: &[u64],
+    row_of: R,
+) -> usize {
+    let (rows, _) = data.as_chunks::<W>();
+    K::words::<W, _>(
+        m,
+        long.len(),
+        // SAFETY: row_of(c) < rows.len() (caller contract).
+        long.iter()
+            .map(|&c| unsafe { *rows.get_unchecked(row_of(c.as_u64())) }),
+    )
 }
 
 // ---------------------------------------------------------------------------
