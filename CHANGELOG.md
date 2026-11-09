@@ -11,6 +11,14 @@
 * affix early-exit, adaptive hash sizing, and banded loop peeling ⚡ ([#241](https://github.com/KarelZe/lev/issues/241)) ([8782bb7](https://github.com/KarelZe/lev/commit/8782bb74144bf51f56507fbe952a8285b3877c8e))
 * preallocate transcoded code units in the Rust API ⚡ ([cea86df](https://github.com/KarelZe/lev/commit/cea86dfb65670128f194fbd5122463809d693ca2))
 
+## [0.6.1](https://github.com/KarelZe/lev/compare/0.6.0...0.6.1) (2026-11-09)
+
+
+### Performance
+
+* speculative bands for medium-length distance ⚡ ([#260](https://github.com/KarelZe/lev/issues/260)) ([24c841a](https://github.com/KarelZe/lev/commit/24c841a286ec73b6eeefd5ea19dfe5a69665935e))
+* table-free match masks for 17-64 char byte patterns ⚡ ([#266](https://github.com/KarelZe/lev/issues/266)) ([328e7ad](https://github.com/KarelZe/lev/commit/328e7ad30543ebaa9fadbd4e2a920b7cdcf95e8f))
+
 ## [0.5.1](https://github.com/KarelZe/lev/compare/0.5.0...0.5.1) (2026-10-27)
 
 
