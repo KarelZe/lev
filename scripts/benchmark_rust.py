@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import re
 import subprocess
@@ -47,6 +48,27 @@ KIND_LABELS = {
     "emoji": "Emoji",
     "realistic": "Realistic",
 }
+
+
+def _validate_safe_path(path: Path) -> Path:
+    """
+    Ensure the path is safely bounded within the repository to prevent path traversal.
+
+    Args:
+        path: Path to validate.
+
+    Returns:
+        Canonicalized Path safely inside the repository.
+
+    Raises:
+        ValueError: If path resolves outside the repository root.
+
+    """
+    resolved = path.resolve()
+    base = REPO_ROOT.resolve()
+    if not resolved.is_relative_to(base) or os.path.commonpath([str(base), str(resolved)]) != str(base):
+        raise ValueError(f"Path traversal detected: {path} must be inside {base}")
+    return resolved
 
 
 def load(criterion_dir: Path) -> dict[str, dict[str, dict[str, float]]]:
@@ -231,8 +253,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     machine = machine_info()
     payload = {"meta": {"machine": machine, "versions": crate_versions()}, "results": results}
-    args.save.write_text(json.dumps(payload, indent=2) + "\n")
-    print(f"wrote {args.save}\n")
+    save_path = _validate_safe_path(args.save)
+    save_path.write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"wrote {save_path}\n")
     print(kind_table(results))
 
     if args.plot and "length" in results:
