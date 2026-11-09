@@ -1,0 +1,11 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1424,7 +1424,7 @@
+
+     const MBLEVEN: bool = true;
+
+-    const SMALL_BAND: bool = true;
++    const SMALL_BAND: bool = false;
+
+     #[inline(always)]
+     fn word<I: Iterator<Item = u64>>(m: usize, n: usize, pm_iter: I) -> usize {

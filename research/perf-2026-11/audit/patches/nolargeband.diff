@@ -1,0 +1,20 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1853,7 +1853,7 @@
+     #[inline(always)]
+     fn run_body<X: Isa>(&self) -> usize {
+         let mut t = (self.n - self.m + 32).max(64);
+-        if band_blocks(t) * 3 > self.w {
++        if true || band_blocks(t) * 3 > self.w {
+             return kernels::full(self);
+         }
+         let bases: Vec<usize> = (0..self.n).map(&self.base_of).collect();
+@@ -1931,7 +1931,7 @@
+     fn lcs_run<X: Isa>(&self) -> usize {
+         let slack = self.n - self.m;
+         let mut t = 64;
+-        if lcs_band_words(slack, t) * 3 > self.w {
++        if true || lcs_band_words(slack, t) * 3 > self.w {
+             return kernels::lcs_full::<X, _>(self);
+         }
+         let bases: Vec<usize> = (0..self.n).map(&self.base_of).collect();
