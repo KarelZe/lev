@@ -6,6 +6,7 @@ use crate::kernels::EDGE_ROW0;
 use crate::{lcs_multiword_kernel, Baseline, LargeCtx};
 
 pub(super) mod apple;
+pub(super) mod neon;
 pub(super) mod neoverse;
 
 /// Words per strip of [`full`] and [`lcs_full`]: a strip's state stays in
