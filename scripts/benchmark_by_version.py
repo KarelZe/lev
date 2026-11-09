@@ -138,6 +138,7 @@ SEMVER_REGEX = re.compile(r"^\d+(\.\d+)*$")
 
 CHILD_RUNNER_CODE = """
 import json
+import platform
 import sys
 import timeit
 import lev
@@ -166,6 +167,7 @@ for name, cfg in regimes_input.items():
 
 print(json.dumps({
     "version": getattr(lev, "__version__", None),
+    "python": f"{platform.python_implementation()} {platform.python_version()}",
     "regimes": results,
 }))
 """
@@ -349,6 +351,7 @@ def measure_version(
             "times_us": times_us.tolist(),
             "distance": reg_res["dist"],
             "reported_version": reported_version,
+            "python": data["python"],
         }
 
     return out
@@ -403,7 +406,8 @@ def run_benchmarks(
             "versions": list(versions),
             "regimes": list(regimes),
             "regimes_meta": regimes_meta,
-            "machine": machine_info(),
+            # The timings run in uv's child interpreter, not in this script's.
+            "machine": {**machine_info(), "python": results[regimes[0]][versions[-1]]["python"]},
         },
         "results": results,
     }
