@@ -1,0 +1,18 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1931,13 +1931,13 @@
+     fn lcs_run<X: Isa>(&self) -> usize {
+         let slack = self.n - self.m;
+         let mut t = 64;
+-        if lcs_band_words(slack, t) * 3 > self.w {
++        if lcs_band_words(slack, t) * 5 > self.w {
+             return kernels::lcs_full::<X, _>(self);
+         }
+         let bases: Vec<usize> = (0..self.n).map(&self.base_of).collect();
+         let ctx = self.with_bases(&bases);
+         let mut s = vec![0u64; self.w];
+-        while lcs_band_words(slack, t) * 3 <= self.w {
++        while lcs_band_words(slack, t) * 5 <= self.w {
+             match ctx.lcs_banded(t, &mut s) {
+                 Ok(l) => return l,
+                 Err(j) => t = next_band(t, j, self.n),

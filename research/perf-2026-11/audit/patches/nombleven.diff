@@ -1,0 +1,9 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1423,5 +1423,5 @@
+     type Isa = X;
+
+-    const MBLEVEN: bool = true;
++    const MBLEVEN: bool = false;
+
+     const SMALL_BAND: bool = true;

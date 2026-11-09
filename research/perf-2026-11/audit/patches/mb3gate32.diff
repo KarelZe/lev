@@ -1,0 +1,29 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -827,7 +827,7 @@
+         return hyrro_64_tiny::<K, _, _>(a, b);
+     }
+     if K::MBLEVEN {
+-        if let Some(ub) = small_ub::<K::Isa, _>(a, b) {
++        if let Some(ub) = small_ub::<K::Isa, _>(a, b).filter(|&ub| ub < MBLEVEN_MAX || a.len() > 32 || b.len() - a.len() >= 2) {
+             return mbleven_in::<K::Isa, _, _>(a, b, ub);
+         }
+     }
+@@ -1155,7 +1155,7 @@
+         return hyrro_64_tiny::<K, _, _>(a, b);
+     }
+     if K::MBLEVEN {
+-        if let Some(ub) = small_ub::<K::Isa, _>(a, b) {
++        if let Some(ub) = small_ub::<K::Isa, _>(a, b).filter(|&ub| ub < MBLEVEN_MAX || a.len() > 32 || b.len() - a.len() >= 2) {
+             return mbleven_in::<K::Isa, _, _>(a, b, ub);
+         }
+     }
+@@ -1180,7 +1180,7 @@
+         return hyrro_64_tiny::<K, _, _>(a, b);
+     }
+     if K::MBLEVEN {
+-        if let Some(ub) = small_ub_mixed(a, b) {
++        if let Some(ub) = small_ub_mixed(a, b).filter(|&ub| ub < MBLEVEN_MAX || a.len() > 32 || b.len() - a.len() >= 2) {
+             return mbleven_in::<K::Isa, _, _>(a, b, ub);
+         }
+     }

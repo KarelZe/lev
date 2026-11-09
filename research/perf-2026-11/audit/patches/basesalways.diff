@@ -1,0 +1,32 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1853,11 +1853,11 @@
+     #[inline(always)]
+     fn run_body<X: Isa>(&self) -> usize {
+         let mut t = (self.n - self.m + 32).max(64);
+-        if band_blocks(t) * 3 > self.w {
+-            return kernels::full(self);
+-        }
+         let bases: Vec<usize> = (0..self.n).map(&self.base_of).collect();
+         let ctx = self.with_bases(&bases);
++        if band_blocks(t) * 3 > self.w {
++            return kernels::full(&ctx);
++        }
+         let (mut pv, mut mv) = (vec![0u64; self.w], vec![0u64; self.w]);
+         while band_blocks(t) * 3 <= self.w {
+             match ctx.banded::<X>(t, &mut pv, &mut mv) {
+@@ -1931,11 +1931,11 @@
+     fn lcs_run<X: Isa>(&self) -> usize {
+         let slack = self.n - self.m;
+         let mut t = 64;
+-        if lcs_band_words(slack, t) * 3 > self.w {
+-            return kernels::lcs_full::<X, _>(self);
+-        }
+         let bases: Vec<usize> = (0..self.n).map(&self.base_of).collect();
+         let ctx = self.with_bases(&bases);
++        if lcs_band_words(slack, t) * 3 > self.w {
++            return kernels::lcs_full::<X, _>(&ctx);
++        }
+         let mut s = vec![0u64; self.w];
+         while lcs_band_words(slack, t) * 3 <= self.w {
+             match ctx.lcs_banded(t, &mut s) {

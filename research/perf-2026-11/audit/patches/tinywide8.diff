@@ -1,0 +1,20 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1151,7 +1151,7 @@
+     if a.is_empty() {
+         return b.len();
+     }
+-    if a.len() <= TINY_M {
++    if a.len() <= 8 {
+         return hyrro_64_tiny::<K, _, _>(a, b);
+     }
+     if K::MBLEVEN {
+@@ -1176,7 +1176,7 @@
+     if a.is_empty() {
+         return b.len();
+     }
+-    if a.len() <= TINY_M {
++    if a.len() <= if std::mem::size_of::<T1>() == 1 { TINY_M } else { 8 } {
+         return hyrro_64_tiny::<K, _, _>(a, b);
+     }
+     if K::MBLEVEN {

@@ -1,0 +1,10 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -637,6 +637,7 @@
+ fn hyrro_64_tiny_body<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[T2]) -> usize {
+     debug_assert!((1..=TINY_M).contains(&pattern.len()));
+     if std::mem::size_of::<T1>() == 1 {
++        #[cfg(not(target_arch = "aarch64"))]
+         if pattern.len() <= 8 {
+             return tiny_swar::<K, _, _>(pattern, text);
+         }
