@@ -34,7 +34,7 @@ lev.ratio("", "")  # 1.0
 
 See the [API Reference](https://karelze.github.io/lev/api/) for details.
 
-### Rust
+## Rust
 
 `lev` is also published as the [`lev-rs`](https://crates.io/crates/lev-rs) crate:
 
@@ -42,12 +42,7 @@ See the [API Reference](https://karelze.github.io/lev/api/) for details.
 cargo add lev-rs
 ```
 
-```rust
-assert_eq!(lev::distance("kitten", "sitting"), 3);
-assert_eq!(lev::ratio("abc", "xyz"), 0.0);
-```
-
-The crate requires Rust 1.91 or newer. See [docs.rs](https://docs.rs/lev-rs) for details.
+See the [crate README](https://github.com/KarelZe/lev/blob/main/src/README.md) for usage and benchmarks against other Rust crates.
 
 ## Benchmarks
 
