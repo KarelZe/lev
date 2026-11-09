@@ -68,6 +68,7 @@ DEFAULT_VERSIONS: tuple[str, ...] = (
     "0.2.4",
     "0.2.6",
     "0.5.0",
+    "0.6.1",
     "main",
 )
 
