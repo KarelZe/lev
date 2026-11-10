@@ -1212,12 +1212,17 @@ fn direct_row<T: CodeUnit, const ROWS: usize>(c: T) -> usize {
 }
 
 /// Single-word variant for UCS-2/4 and mixed kinds, with the peq table in a
-/// stack-allocated open-addressing hash of `SLOTS` entries.
+/// stack-allocated open-addressing hash of 128 slots.
+///
+/// The table keeps 128 slots for every pattern length.  64 slots for
+/// patterns of up to 32 units (#241) halve the zeroing but fill up to half
+/// the table, and the longer probe chains of text units absent from the
+/// pattern branch unpredictably: on batches of distinct CJK and emoji pairs
+/// of 17-40 units, 128 slots run 17-27% faster on Apple M2.  A single
+/// repeated pair hides this, because the branch predictor learns its probes.
 #[inline(always)]
-fn hyrro_64_hash_slots<K: Kernel, const SLOTS: usize, T1: CodeUnit, T2: CodeUnit>(
-    pattern: &[T1],
-    text: &[T2],
-) -> usize {
+fn hyrro_64_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[T2]) -> usize {
+    const SLOTS: usize = 128;
     let m = pattern.len();
     // At most half the slots fill, so every probe chain ends at an empty slot
     // within a few steps; a full table would make a lookup of an absent key
@@ -1271,21 +1276,6 @@ fn hyrro_64_hash_slots<K: Kernel, const SLOTS: usize, T1: CodeUnit, T2: CodeUnit
             }
         }),
     )
-}
-
-/// Single-word variant for UCS-2/4 and mixed kinds, with the peq table in a
-/// stack-allocated open-addressing hash. Adapts table size between 64 and 128
-/// slots based on pattern length to cut stack zeroing overhead when `m <= 32`.
-#[inline(always)]
-fn hyrro_64_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[T2]) -> usize {
-    let m = pattern.len();
-    debug_assert!((1..=64).contains(&m));
-
-    if m <= 32 {
-        hyrro_64_hash_slots::<K, 64, T1, T2>(pattern, text)
-    } else {
-        hyrro_64_hash_slots::<K, 128, T1, T2>(pattern, text)
-    }
 }
 
 // ---------------------------------------------------------------------------
