@@ -1692,9 +1692,11 @@ fn banded_step(eq: u64, hin: i32, pv: u64, mv: u64) -> ((u64, u64), (u64, u64)) 
 
 impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
     /// Copy of `self` that reads row offsets from `bases`, one per text char.
-    /// Resolving rows once pays off when the band passes sweep the text
-    /// several times; `bases` costs a word per text char, so only build it
-    /// for those.
+    /// Resolving rows once pays off whenever the text is swept more than
+    /// once: by the band passes, and by the full kernels' strips (8 words
+    /// each on AArch64, 4 for the LCS strips with BMI1), where a UCS-2/4 row
+    /// costs a hash probe per char and sweep.  `bases` costs a word per text
+    /// char.
     fn with_bases<'b>(&'b self, bases: &'b [usize]) -> LargeCtx<'b, impl Fn(usize) -> usize + 'b> {
         debug_assert_eq!(bases.len(), self.n);
         LargeCtx {
@@ -1853,11 +1855,11 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
     #[inline(always)]
     fn run_body<X: Isa>(&self) -> usize {
         let mut t = (self.n - self.m + 32).max(64);
-        if band_blocks(t) * 3 > self.w {
-            return kernels::full(self);
-        }
         let bases: Vec<usize> = (0..self.n).map(&self.base_of).collect();
         let ctx = self.with_bases(&bases);
+        if band_blocks(t) * 3 > self.w {
+            return kernels::full(&ctx);
+        }
         let (mut pv, mut mv) = (vec![0u64; self.w], vec![0u64; self.w]);
         while band_blocks(t) * 3 <= self.w {
             match ctx.banded::<X>(t, &mut pv, &mut mv) {
@@ -1931,11 +1933,11 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
     fn lcs_run<X: Isa>(&self) -> usize {
         let slack = self.n - self.m;
         let mut t = 64;
-        if lcs_band_words(slack, t) * 3 > self.w {
-            return kernels::lcs_full::<X, _>(self);
-        }
         let bases: Vec<usize> = (0..self.n).map(&self.base_of).collect();
         let ctx = self.with_bases(&bases);
+        if lcs_band_words(slack, t) * 3 > self.w {
+            return kernels::lcs_full::<X, _>(&ctx);
+        }
         let mut s = vec![0u64; self.w];
         while lcs_band_words(slack, t) * 3 <= self.w {
             match ctx.lcs_banded(t, &mut s) {
@@ -3040,6 +3042,26 @@ mod tests {
         // Levenshtein-over-sum normalization.
         assert!(r("abc", "xyz").abs() < 1e-12);
         assert!(r("a", "b").abs() < 1e-12);
+    }
+
+    /// CJK patterns of 513-704 units are too narrow for the first band
+    /// (`band_blocks(t) * 3 > w`), so they go straight to the full kernels,
+    /// which then read the rows resolved once into `bases`.
+    #[test]
+    fn full_matrix_ucs2_without_band_matches_oracle() {
+        let mut state = 0x0A3B_A5E5_0000_0001_u64;
+        let alpha: Vec<char> = (0x4E00..0x4E40).filter_map(char::from_u32).collect();
+        for &(m, n) in &[(513usize, 513usize), (600, 650), (704, 704), (520, 2100)] {
+            let a: String = (0..m)
+                .map(|_| alpha[lcg(&mut state) % alpha.len()])
+                .collect();
+            let b: String = (0..n)
+                .map(|_| alpha[lcg(&mut state) % alpha.len()])
+                .collect();
+            let (ac, bc): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+            assert_eq!(levenshtein(&a, &b), naive(&ac, &bc), "m={m} n={n}");
+            assert_eq!(indel(&a, &b), naive_indel(&ac, &bc), "indel m={m} n={n}");
+        }
     }
 
     /// The LCS kernels must agree with the DP across every length regime:
