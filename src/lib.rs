@@ -1650,8 +1650,10 @@ fn next_band(t: usize, j: usize, n: usize) -> usize {
     (t * n / j * 5 / 4).max(2 * t)
 }
 
-/// Number of 64-row blocks a Levenshtein band of half-width `t` can touch in
-/// one column.
+/// Number of 64-row blocks the rows `[j - t, j + t]` can touch in one
+/// column, which gates the bands of [`LargeCtx::run_body`].  It bounds the
+/// blocks of [`LargeCtx::banded_body`], whose band spans at most `t + 1`
+/// rows, from above.
 #[inline(always)]
 fn band_blocks(t: usize) -> usize {
     2 * t / 64 + 2
@@ -1732,9 +1734,13 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
         unsafe { *self.data.get_unchecked(base + k) }
     }
 
-    /// Ukkonen band of half-width `t` over Myers' blocked recurrence: blocks
-    /// exchange only the horizontal delta `hin`/`hout` (Edlib's formulation),
-    /// so per column only blocks intersecting rows `[j - t, j + t]` run.
+    /// Ukkonen band certifying distances `<= t` over Myers' blocked
+    /// recurrence: blocks exchange only the horizontal delta `hin`/`hout`
+    /// (Edlib's formulation), so per column only blocks intersecting rows
+    /// `[j - s - h, j + h]` run, with `s = n - m` and `h = (t - s) / 2`.  A
+    /// path through diagonal `j - i = δ` costs at least `|δ| + |s - δ|`, so
+    /// paths of cost `<= t` keep to the diagonals `[-h, s + h]` (Ukkonen
+    /// 1985, as in [`kernels::band_limit`]).
     ///
     /// Out-of-band boundaries are pessimistic (`hin = +1` below a dropped
     /// block; `+1`-per-row extension above entering blocks), so every computed
@@ -1764,9 +1770,13 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
         debug_assert!(n >= m);
         debug_assert!(t >= n - m);
         let (pv, mv) = (&mut pv[..w], &mut mv[..w]);
+        // The band holds rows `[j - above, j + below]` of column j, with
+        // `below = h` and `above = s + h`.
+        let below = (t - (n - m)) / 2;
+        let above = n - m + below;
         // Lowest row covered when `k` is the last live block.
         let bottom = |k: usize| (64 * (k + 1)).min(m);
-        let mut last = (t / 64).min(w - 1);
+        let mut last = (below / 64).min(w - 1);
         let mut first = 0usize;
         pv[..=last].fill(!0);
         mv[..=last].fill(0);
@@ -1775,7 +1785,7 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
 
         for j in 1..=n {
             let base = (self.base_of)(j - 1);
-            let needed = ((j + t - 1) / 64).min(w - 1);
+            let needed = ((j + below - 1) / 64).min(w - 1);
             if needed > last {
                 pv[last + 1..=needed].fill(!0);
                 mv[last + 1..=needed].fill(0);
@@ -1783,8 +1793,8 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
                 last = needed;
                 top_bit = (bottom(last) - 1) & 63;
             }
-            if j > t + 1 {
-                first = ((j - t - 1) / 64).min(last);
+            if j > above + 1 {
+                first = ((j - above - 1) / 64).min(last);
             }
             let mut hin: i32 = 1;
             debug_assert!(first <= last && last < w);
@@ -1812,17 +1822,23 @@ impl<F: Fn(usize) -> usize> LargeCtx<'_, F> {
                 *pv.get_unchecked_mut(last) = pv_n;
                 *mv.get_unchecked_mut(last) = mv_n;
             }
-            // `score` never underestimates D[bottom(last)][j], and finishing
-            // from there takes at least `score - excess` edits (D never
-            // decreases along diagonal steps); once that exceeds `t` this band
-            // can no longer prove a result, so bail out and let the caller
-            // widen or fall back.
+            // Once this band can no longer prove a result, bail out and let
+            // the caller widen or fall back.  With b = bottom(last) and
+            // e = excess, the test never fires when the distance d is <= t:
+            // the optimal path then stays in the band, so its last cell
+            // (r, j) in this column is exact, with r <= min(j + below, m) <= b.
+            // Vertical deltas are at most 1, so score <= D[r][j] + (b - r),
+            // and finishing from row r takes at least |(m - r) - (n - j)| =
+            // |(b - r) - e| edits, so D[r][j] <= d - |(b - r) - e|.  Hence
+            // score <= d + max(e, 0) <= t + max(e, 0).
             let excess = (n - j) as isize - (m - bottom(last)) as isize;
             if score - excess.max(0) > t as isize {
                 return Err(j);
             }
         }
         debug_assert_eq!(last, w - 1);
+        // `score` is now the computed D[m][n] >= d.  If it is <= t, so is d,
+        // the optimal path stays in the band and `score` is exact.
         if score as usize <= t {
             Ok(score as usize)
         } else {
@@ -2879,6 +2895,151 @@ mod tests {
         let b: String = bc.iter().collect();
         let ac: Vec<char> = a.chars().collect();
         assert_eq!(levenshtein(&a, &b), naive(&ac, &bc));
+    }
+
+    /// A pass of [`LargeCtx::banded`] per parameter in `ts` and copy of the
+    /// hot path the CPU runs, each from the state the pass before left.
+    /// Checks [`LargeCtx::run`] against the distance `d` on the way.
+    fn banded_passes(
+        s: &[u8],
+        l: &[u8],
+        ts: &[usize],
+        d: usize,
+    ) -> Vec<(usize, Result<usize, usize>)> {
+        let w = s.len().div_ceil(64);
+        let mut data = vec![0u64; 256 * w];
+        for (i, &c) in s.iter().enumerate() {
+            data[c as usize * w + i / 64] |= 1 << (i % 64);
+        }
+        let ctx = LargeCtx {
+            m: s.len(),
+            n: l.len(),
+            w,
+            data: &data,
+            base_of: |j: usize| l[j] as usize * w,
+        };
+        assert_eq!(ctx.run::<Baseline>(), d, "run m={} n={}", s.len(), l.len());
+        let (mut pv, mut mv) = (
+            vec![0xA5A5_A5A5_A5A5_A5A5; w],
+            vec![0x5A5A_5A5A_5A5A_5A5A; w],
+        );
+        let mut out = Vec::new();
+        for &t in ts {
+            out.push((t, ctx.banded::<Baseline>(t, &mut pv, &mut mv)));
+            #[cfg(target_arch = "x86_64")]
+            if kernels::x86_64::v2::detected() {
+                out.push((
+                    t,
+                    ctx.banded::<kernels::x86_64::v2::V2>(t, &mut pv, &mut mv),
+                ));
+            }
+        }
+        out
+    }
+
+    fn naive_bytes(a: &[u8], b: &[u8]) -> usize {
+        let (ac, bc): (Vec<char>, Vec<char>) = (
+            a.iter().map(|&c| c as char).collect(),
+            b.iter().map(|&c| c as char).collect(),
+        );
+        naive(&ac, &bc)
+    }
+
+    /// The band rows `[j - s - h, j + h]` at their edges: `t = s` and
+    /// `t = s + 1` (both parities of `t - s`), `t` around the distance, band
+    /// edges on and next to 64-row block boundaries, and optimal paths that
+    /// run along the bottom edge (deletions first) or the top edge
+    /// (insertions first) of the band.  A pass must certify exactly the pairs
+    /// with `d <= t`, with the oracle's distance, and give up on the others.
+    #[test]
+    fn banded_band_edges_match_oracle() {
+        let mut state = 0x7167_6874_6261_6E64_u64;
+        let lower = b"abcdefghijklmnopqrstuvwxyz";
+        // Inserted chars match nothing in the pattern.
+        let digits = b"0123456789";
+        // (short, long, whether d = 2k + s + subs is known)
+        let mut pairs: Vec<(Vec<u8>, Vec<u8>, Option<usize>)> = Vec::new();
+        for &m in &[577usize, 641, 703, 769, 1000] {
+            for alpha in [&b"ab"[..], &b"acgt"[..], &lower[..]] {
+                let a = rand_string(&mut state, m, alpha).into_bytes();
+                // s = 0, substitutions and balanced indels.
+                let mut b = a.clone();
+                for _ in 0..40 {
+                    let i = lcg(&mut state) % m;
+                    b[i] = alpha[lcg(&mut state) % alpha.len()];
+                }
+                pairs.push((a.clone(), b, None));
+                let b = mutate(&mut state, std::str::from_utf8(&a).unwrap(), 50, alpha);
+                let b = b.into_bytes();
+                pairs.push(if b.len() < a.len() {
+                    (b, a.clone(), None)
+                } else {
+                    (a.clone(), b, None)
+                });
+            }
+            let a = rand_string(&mut state, m, lower).into_bytes();
+            for &(k, s, subs) in &[
+                (0, 1, 0),
+                (1, 0, 0),
+                (63, 0, 0),
+                (64, 0, 1),
+                (65, 1, 0),
+                (63, 64, 1),
+                (64, 37, 0),
+                (127, 2, 1),
+                (128, 100, 0),
+            ] {
+                let ins: Vec<u8> = (0..k + s).map(|_| digits[lcg(&mut state) % 10]).collect();
+                let mut down = a[..100].to_vec();
+                down.extend_from_slice(&a[100 + k..m - 50]);
+                down.extend_from_slice(&ins);
+                down.extend_from_slice(&a[m - 50..]);
+                let mut up = a[..100].to_vec();
+                up.extend_from_slice(&ins);
+                up.extend_from_slice(&a[100..m - 50 - k]);
+                up.extend_from_slice(&a[m - 50..]);
+                for mut b in [down, up] {
+                    if subs == 1 {
+                        b[m / 2] = b'#';
+                    }
+                    pairs.push((a.clone(), b, Some(2 * k + s + subs)));
+                }
+            }
+            // Unrelated strings: every narrow pass gives up early.
+            let b = rand_string(&mut state, m + 30, lower).into_bytes();
+            pairs.push((a.clone(), b, None));
+        }
+
+        for (short, long, known) in &pairs {
+            let (m, n) = (short.len(), long.len());
+            assert!(m <= n);
+            let s = n - m;
+            let d = naive_bytes(short, long);
+            if let Some(k) = known {
+                assert_eq!(d, *k, "m={m} n={n}: the path does not run along the edge");
+            }
+            let mut ts = vec![s, s + 1, s + 2, s + 3, d.saturating_sub(1), d, d + 1, d + 2];
+            ts.push((s + 32).max(64));
+            for h in [63, 64, 65, 127, 128] {
+                ts.extend([s + 2 * h, s + 2 * h + 1]);
+            }
+            ts.retain(|&t| t >= s);
+            ts.sort_unstable();
+            ts.dedup();
+            for (t, got) in banded_passes(short, long, &ts, d) {
+                if d <= t {
+                    assert_eq!(got, Ok(d), "m={m} n={n} t={t} d={d}");
+                } else {
+                    assert!(matches!(got, Err(j) if j <= n), "m={m} n={n} t={t} d={d}");
+                }
+            }
+        }
+        // A pass on unrelated strings gives up long before the last column.
+        let (short, long, _) = pairs.last().unwrap();
+        let d = naive_bytes(short, long);
+        for (_, got) in banded_passes(short, long, &[64], d) {
+            assert!(matches!(got, Err(j) if j < long.len() / 4), "{got:?}");
+        }
     }
 
     #[test]
