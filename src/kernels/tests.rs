@@ -720,6 +720,84 @@ fn small_band_gives_up_where_expected() {
     }
 }
 
+/// Each band on every length difference it takes (`s` from 0 to 63, and to
+/// 127 for two words): certified at its limit and refused one edit past it
+/// (the pairs of [`small_band_certifies_up_to_its_limit`], whose distance
+/// holds by construction), exact on near-identical pairs, and given up on
+/// unrelated texts.
+#[test]
+fn small_band_every_length_difference() {
+    let mut state = 0x5EEB_A4D5_0000_0001_u64;
+    let alpha = &b"abcdefgh"[..];
+    for (words, long, short) in [
+        (1, &[300usize, 600, 705][..], &[65usize, 100, 128, 129][..]),
+        (2, &[600, 705], &[129, 192]),
+    ] {
+        for s in 0..64 * words {
+            let limit = small_band_limit(words, s);
+            let m = long[s % long.len()];
+            let msg = format!("words={words} m={m} s={s}");
+            let a = rand_string(&mut state, m, alpha).into_bytes();
+            let b = spread_edits(&a, limit - s, b'Z', s, b'Y');
+            assert_eq!(small_band_u8(words, &a, &b), Ok(limit), "{msg} at limit");
+            let b = spread_edits(&a, limit - s + 1, b'Z', s, b'Y');
+            assert!(small_band_u8(words, &a, &b).is_err(), "{msg} past limit");
+
+            let m = short[s % short.len()];
+            let msg = format!("words={words} m={m} s={s}");
+            let a = rand_string(&mut state, m, alpha).into_bytes();
+            let mut b = a.clone();
+            for _ in 0..(s % 3).min(limit - s) {
+                let i = lcg(&mut state) % b.len();
+                b[i] = alpha[lcg(&mut state) % alpha.len()];
+            }
+            for _ in 0..s {
+                let i = lcg(&mut state) % (b.len() + 1);
+                b.insert(i, alpha[lcg(&mut state) % alpha.len()]);
+            }
+            assert_eq!(small_band_u8(words, &a, &b), Ok(naive_u8(&a, &b)), "{msg}");
+            let (a, b) = (vec![b'a'; m], vec![b'b'; m + s]);
+            assert!(small_band_u8(words, &a, &b).is_err(), "{msg} unrelated");
+        }
+    }
+}
+
+/// [`portable::band_deltas`] must equal the form it replaced,
+/// `(mh | !(xvs | ph), ph & xvs)` with `ph = vn | !x`, on every input.
+/// Both are bitwise, so four words whose bits run through the 16
+/// combinations of the inputs cover every case; columns of random states
+/// check them with `x` and `mh` taken from the step.
+#[test]
+fn band_deltas_match_reference_form() {
+    fn reference(x: u64, mh: u64, xvs: u64, vn: u64) -> (u64, u64) {
+        let ph = vn | !x;
+        (mh | !(xvs | ph), ph & xvs)
+    }
+    let (x, mh, xvs, vn) = (
+        0xAAAA_AAAA_AAAA_AAAA_u64,
+        0xCCCC_CCCC_CCCC_CCCC,
+        0xF0F0_F0F0_F0F0_F0F0,
+        0xFF00_FF00_FF00_FF00,
+    );
+    assert_eq!(
+        portable::band_deltas(x, mh, xvs, vn),
+        reference(x, mh, xvs, vn)
+    );
+    let mut state = 0xDE17_A5BA_4D00_0001_u64;
+    // Three 31-bit draws, overlapping to cover all 64 bits.
+    let mut next = || (0..3).fold(0u64, |acc, _| acc << 21 ^ lcg(&mut state) as u64);
+    for _ in 0..100_000 {
+        let (eq, vp) = (next(), next());
+        let vn = next() & !vp;
+        let sum = (eq & vp).wrapping_add(vp);
+        let (x, mh, xvs) = (sum | vp | eq, vp & (eq | !sum), (eq | vn) >> 1);
+        assert_eq!(
+            portable::band_deltas(x, mh, xvs, vn),
+            reference(x, mh, xvs, vn)
+        );
+    }
+}
+
 /// The pipeline around the bands on every string kind and mixed kinds,
 /// for both metrics: patterns at the word boundaries the bands are tried
 /// on (and one past their last), length differences at and past each

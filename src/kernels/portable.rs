@@ -75,6 +75,23 @@ pub(crate) fn multiword<const W: usize, I: Iterator<Item = [u64; W]>>(
     delta(vp, vn, m)
 }
 
+/// The vertical deltas `(vp, vn)` that a column of [`small_band`] leaves,
+/// from `x = sum | vp | eq` and `mh` of its step, its vertical inputs moved
+/// up a bit (`xvs`), and the `vn` it started from.
+///
+/// With `ph = vn | !x` they are `mh | !(xvs | ph)` and `ph & xvs`.  `x` is
+/// the last input to be ready (it waits for the column addition), so the
+/// form here gives it one op before `vp` instead of three: `xvs | vn` is
+/// ready while the addition runs.  On AArch64 the chain from `vp` to `vp`
+/// is then and, add, orr, bic, orr (5 cycles, against 6 with `ph`).  The
+/// x86-64 baseline the band compiles for has no and-not, so `!` costs an
+/// op: there the chain falls from 8 cycles to 6, as `mh` and the new `vn`
+/// each still wait for a `not` after the addition (5 with BMI1).
+#[inline(always)]
+pub(crate) fn band_deltas(x: u64, mh: u64, xvs: u64, vn: u64) -> (u64, u64) {
+    (mh | (x & !(xvs | vn)), (vn | !x) & xvs)
+}
+
 /// [`super::small_band`]: the band's 64 diagonals in one word, whose
 /// window slides one pattern row down per text column.
 ///
@@ -133,13 +150,12 @@ pub(crate) unsafe fn small_band<T: CodeUnit, R: Fn(T) -> usize>(
                 // overflow at `k = 0`.
                 let eq = lo.wrapping_shr(k as u32) | (hi << 1).wrapping_shl(!(k as u32));
                 let sum = (eq & vp).wrapping_add(vp);
-                let ph = vn | !(sum | (vp | eq));
+                let x = sum | (vp | eq);
                 let mh = vp & (eq | !sum);
                 let xv = eq | vn;
                 let xvs = xv >> 1;
                 free += (xv & 1) as usize;
-                vp = mh | !(xvs | ph);
-                vn = ph & xvs;
+                (vp, vn) = band_deltas(x, mh, xvs, vn);
             }
         };
     }
@@ -198,6 +214,15 @@ pub(crate) unsafe fn small_band<T: CodeUnit, R: Fn(T) -> usize>(
 /// which pulls bit 0 of word 1 into bit 63 of word 0; every other step is
 /// bitwise.  The match masks of a column are bits of three adjacent peq
 /// words, funnel-shifted into two.
+///
+/// The step keeps the `ph` form that [`band_deltas`] replaces in
+/// [`small_band`].  The carry into word 1 and the bit word 1 moves into
+/// `xvs0` link the two words' chains, so that form would shorten the chain
+/// only to about 5.5 cycles per column on Apple cores (from 6) and 7.5 on
+/// x86-64 (from 8), for one more op per word in a loop whose 40-65
+/// instructions per column already about fill the ALUs at that pace.  On
+/// Neoverse it would lengthen the chain, putting the 3-cycle `extr` that
+/// moves bit 0 of word 1 into `xvs0` on it.
 ///
 /// # Safety
 ///
