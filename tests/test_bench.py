@@ -240,8 +240,8 @@ _LONG = [
 # differ in one gate, pools of 1 to 16384 pairs): the ratios of the hash,
 # TINY_M and mbleven gates settle once a pool holds about 100k chars of short
 # strings. Wide (UCS-2/4) strings of up to 40 chars need 4096 pairs (the
-# TINY_M ratio went 0.83 at 4 pairs, 1.51 at 1024, 1.95 at 4096, 2.02 at
-# 8192), byte strings 1024, 65-704-char pairs 256. Long pairs run thousands
+# TINY_M distance ratio went 0.94 at 4 pairs, 1.51 at 1024, 1.95 at 4096,
+# 2.02 at 8192), byte strings 1024, 65-704-char pairs 256. Long pairs run thousands
 # of branches per call, and their pools stay small to bound the batch time.
 _POOL_WIDE = 4096  # UCS-2/4 strings of up to 64 chars
 _POOL_BYTES = 1024  # byte strings of up to 64 chars, and short-vs-long pairs
