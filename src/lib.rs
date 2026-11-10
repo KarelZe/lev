@@ -827,7 +827,9 @@ fn compute_u8<K: Kernel, const ASCII: bool>(a: &[u8], b: &[u8]) -> usize {
         return hyrro_64_tiny::<K, _, _>(a, b);
     }
     if K::MBLEVEN {
-        if let Some(ub) = small_ub::<K::Isa, _>(a, b) {
+        if let Some(ub) =
+            small_ub::<K::Isa, _>(a, b).filter(|&ub| mbleven_pays(ub, a.len(), b.len()))
+        {
             return mbleven_in::<K::Isa, _, _>(a, b, ub);
         }
     }
@@ -857,6 +859,25 @@ pub(crate) const MBLEVEN_MAX: usize = 3;
 /// hamming scan; beyond this the banded kernels already handle
 /// near-identical strings well.
 pub(crate) const MBLEVEN_MAX_LEN: usize = 512;
+
+/// Shortest pattern that [`mbleven_pays`] keeps on mbleven at
+/// `ub = MBLEVEN_MAX` with a length difference of at most 1.
+const MBLEVEN_UB3_MIN_M: usize = 33;
+
+/// Whether [`mbleven`] beats the bit-parallel kernel for the gate bound `ub`
+/// on a pattern of `m` units and a text of `n >= m` units.
+///
+/// At `ub = MBLEVEN_MAX` with a length difference of at most 1, mbleven tries
+/// 7 or 6 edit-op sequences, each rescanning the strings, while a pattern of
+/// up to 32 units runs the single-word kernel without data-dependent
+/// branches.  On batches of distinct pairs of 17-32 units the kernel is
+/// 17-42% faster there on Apple M2; leaving patterns of up to 64 units to it
+/// as well loses up to 2.4x.  A length difference of 2 or 3 leaves mbleven 3
+/// sequences or 1.
+#[inline(always)]
+fn mbleven_pays(ub: usize, m: usize, n: usize) -> bool {
+    ub < MBLEVEN_MAX || m >= MBLEVEN_UB3_MIN_M || n - m >= 2
+}
 
 /// Gate for the mbleven fast path (same-kind slices): `Some(ub)` when
 /// `length difference + aligned mismatches <= MBLEVEN_MAX`.
@@ -1155,7 +1176,9 @@ fn compute_sorted<K: Kernel, T: CodeUnit>(a: &[T], b: &[T]) -> usize {
         return hyrro_64_tiny::<K, _, _>(a, b);
     }
     if K::MBLEVEN {
-        if let Some(ub) = small_ub::<K::Isa, _>(a, b) {
+        if let Some(ub) =
+            small_ub::<K::Isa, _>(a, b).filter(|&ub| mbleven_pays(ub, a.len(), b.len()))
+        {
             return mbleven_in::<K::Isa, _, _>(a, b, ub);
         }
     }
@@ -1180,7 +1203,7 @@ fn compute_sorted_mixed<K: Kernel, T1: CodeUnit, T2: CodeUnit>(a: &[T1], b: &[T2
         return hyrro_64_tiny::<K, _, _>(a, b);
     }
     if K::MBLEVEN {
-        if let Some(ub) = small_ub_mixed(a, b) {
+        if let Some(ub) = small_ub_mixed(a, b).filter(|&ub| mbleven_pays(ub, a.len(), b.len())) {
             return mbleven_in::<K::Isa, _, _>(a, b, ub);
         }
     }
@@ -2328,6 +2351,42 @@ mod tests {
             }
         }
         assert!(hits > 100_000, "gate should trigger often here: {hits}");
+    }
+
+    /// Pairs at the gate bound `ub = MBLEVEN_MAX` around the pattern length
+    /// and length difference where [`mbleven_pays`] switches to the kernel:
+    /// 0-2 appended units plus substitutions up to the bound, at both ends
+    /// first so that affix stripping keeps the whole pattern, over byte,
+    /// UCS-2 and mixed kinds.
+    #[test]
+    fn mbleven_ub3_boundary_matches_oracle() {
+        assert!(!mbleven_pays(3, 32, 33) && mbleven_pays(3, 33, 33) && mbleven_pays(3, 32, 34));
+        assert!(mbleven_pays(2, 17, 17));
+        let kinds: [(&[char], char); 3] = [
+            (&['a', 'b', 'c'], 'x'),
+            (&['日', '本', '語'], 'あ'),
+            (&['a', 'b'], '\u{2019}'),
+        ];
+        let units = |s: &[char]| s.iter().map(|&c| c as u32).collect::<Vec<u32>>();
+        for (ab, sub) in kinds {
+            for m in 17..=40usize {
+                for extra in 0..=2usize {
+                    let a: Vec<char> = (0..m).map(|i| ab[(i * 7 + i / 3) % ab.len()]).collect();
+                    let mut b = a.clone();
+                    for p in [0, m - 1, m / 2].into_iter().take(MBLEVEN_MAX - extra) {
+                        b[p] = sub;
+                    }
+                    b.extend(std::iter::repeat_n(sub, extra));
+                    assert_eq!(
+                        small_ub_mixed(&units(&a), &units(&b)),
+                        Some(MBLEVEN_MAX),
+                        "m={m} extra={extra}"
+                    );
+                    let (sa, sb): (String, String) = (a.iter().collect(), b.iter().collect());
+                    check(&sa, &sb, naive(&a, &b));
+                }
+            }
+        }
     }
 
     /// Integration: random small-edit pairs (which exercise the small_ub gate
