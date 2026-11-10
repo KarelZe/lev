@@ -5,10 +5,12 @@ Each round starts one subprocess per build, in alternating order, which
 times every case of `tests/test_bench.py` (best of `--repeat` batches).
 Alternating builds on one machine cancels most of the drift of shared CI
 runners; the report gives the median ns per call over rounds, its IQR, and
-the B/A ratio of medians.
+the B/A ratio of medians, with separate geometric means for the single-pair
+and the varied (`varied-*`) cases. Judge gate changes on the varied cases:
+a single repeated pair lets the branch predictor learn its branches.
 
 Usage:
-    python scripts/ab_benchmark.py --a <dir> --b <dir> [--rounds 7] [--summary out.md]
+    python scripts/ab_benchmark.py --a <dir> --b <dir> [--rounds 7] [--filter varied-] [--summary out.md]
 
 `<dir>` holds an installed `lev` package, e.g. from
 `pip install --no-deps --target <dir> <wheel>`.
@@ -31,9 +33,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 _NOISE = 0.03
 
 
-def _child(build_dir: str, repeat: int) -> dict[str, float]:
+def _child(build_dir: str, repeat: int, filters: list[str]) -> dict[str, float]:
     """
-    Time every benchmark case with the lev found in `build_dir`.
+    Time every benchmark case (or those whose name contains one of `filters`) with the lev found in `build_dir`.
 
     Returns:
         dict[str, float]: best ns per call, keyed by "function:case".
@@ -47,8 +49,10 @@ def _child(build_dir: str, repeat: int) -> dict[str, float]:
 
     assert Path(lev.__file__).resolve().is_relative_to(Path(build_dir).resolve()), lev.__file__
     out = {}
-    for fn in (lev.distance, lev.ratio):
-        for case in test_bench._CASES:
+    for fn, cases in ((lev.distance, test_bench._DISTANCE_CASES), (lev.ratio, test_bench._RATIO_CASES)):
+        for case in cases:
+            if filters and not any(f in case.id for f in filters):
+                continue
             s1, s2, n = case.values
             best = min(timeit.repeat(lambda: test_bench._run_batch(fn, s1, s2, n), number=1, repeat=repeat))
             out[f"{fn.__name__}:{case.id}"] = best / n * 1e9
@@ -82,13 +86,16 @@ def main() -> int:
     parser.add_argument("--b", required=True, help="directory with the candidate lev build")
     parser.add_argument("--rounds", type=int, default=7, help="subprocess pairs (default: 7)")
     parser.add_argument("--repeat", type=int, default=15, help="batches per case and process (default: 15)")
+    parser.add_argument(
+        "--filter", action="append", default=[], help="only cases whose name contains this (repeatable, e.g. varied-)"
+    )
     parser.add_argument("--summary", type=Path, help="also append the report to this file")
     parser.add_argument("--json", type=Path, help="write raw per-round timings to this file")
     parser.add_argument("--child", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args.child:
-        print(json.dumps(_child(args.child, args.repeat)))
+        print(json.dumps(_child(args.child, args.repeat, args.filter)))
         return 0
 
     runs: dict[str, list[dict[str, float]]] = {"a": [], "b": []}
@@ -96,6 +103,7 @@ def main() -> int:
         order = ("a", "b") if r % 2 == 0 else ("b", "a")
         for side in order:
             cmd = [sys.executable, __file__, "--a", args.a, "--b", args.b, "--repeat", str(args.repeat)]
+            cmd += [f"--filter={f}" for f in args.filter]
             out = subprocess.run([*cmd, "--child", getattr(args, side)], capture_output=True, text=True, check=True)
             runs[side].append(json.loads(out.stdout))
 
@@ -108,18 +116,18 @@ def main() -> int:
         "| case | A | B | B/A | |",
         "|---|---:|---:|---:|---|",
     ]
-    ratios = []
+    ratios: dict[str, list[float]] = {"single-pair": [], "varied": []}
     for key in runs["a"][0]:
         qa = _quartiles([d[key] for d in runs["a"]])
         qb = _quartiles([d[key] for d in runs["b"]])
         ratio = qb[1] / qa[1]
-        ratios.append(ratio)
+        ratios["varied" if "varied-" in key else "single-pair"].append(ratio)
         flag = "faster" if ratio < 1 - _NOISE else ("**slower**" if ratio > 1 + _NOISE else "")
         lines.append(
             f"| `{key}` | {qa[1]:.1f} ({qa[2] - qa[0]:.1f}) | {qb[1]:.1f} ({qb[2] - qb[0]:.1f}) | {ratio:.3f} | {flag} |"
         )
-    geo = statistics.geometric_mean(ratios)
-    lines[3:3] = [f"Geometric mean B/A over {len(ratios)} cases: **{geo:.3f}**.", ""]
+    geo = [f"{kind} cases ({len(rs)}): **{statistics.geometric_mean(rs):.3f}**" for kind, rs in ratios.items() if rs]
+    lines[3:3] = [f"Geometric mean B/A, {'; '.join(geo)}.", ""]
     report = "\n".join(lines) + "\n"
     print(report)
     if args.summary:
