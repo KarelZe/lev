@@ -31,6 +31,9 @@ measured on the same hardware, kept only if it wins.
    or `sudo nice -n -20` where reasonable. Report median + IQR, not mean.
 4. If the change is under 3% or within noise on every kind, REVERT.
    Do not commit tuning that only wins in one microbenchmark.
+   Judge gate changes (which path a pair takes) on the `varied-*` cases of
+   `tests/test_bench.py` (`scripts/ab_benchmark.py --filter varied-`):
+   the repeated single-pair cases let the branch predictor learn the pair.
 5. Verify correctness against the property tests and a diff test vs.
    rapidfuzz / edlib on random inputs before keeping any win.
 6. Check codegen for the hot loop with `cargo asm` (or `--emit=asm`) when
