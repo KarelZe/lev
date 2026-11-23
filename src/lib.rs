@@ -2330,6 +2330,30 @@ mod tests {
         assert!(hits > 100_000, "gate should trigger often here: {hits}");
     }
 
+    /// Exhaustive pipeline check: every pair of strings over {a, b, c} up to
+    /// length 6 must match the DP oracles through the full `levenshtein` and
+    /// `indel` dispatch. Random tests sample short inputs sparsely, so this is
+    /// the correctness gate for kernel and gate variants on the short paths.
+    #[test]
+    fn small_pairs_match_oracle_exhaustive() {
+        let mut strings = vec![String::new()];
+        let mut level = vec![String::new()];
+        for _ in 0..6 {
+            level = level
+                .iter()
+                .flat_map(|s| ['a', 'b', 'c'].map(|c| format!("{s}{c}")))
+                .collect();
+            strings.extend(level.iter().cloned());
+        }
+        let chars: Vec<Vec<char>> = strings.iter().map(|s| s.chars().collect()).collect();
+        for (a, ac) in strings.iter().zip(&chars) {
+            for (b, bc) in strings.iter().zip(&chars) {
+                assert_eq!(levenshtein(a, b), naive(ac, bc), "({a:?}, {b:?})");
+                assert_eq!(indel(a, b), naive_indel(ac, bc), "indel ({a:?}, {b:?})");
+            }
+        }
+    }
+
     /// Integration: random small-edit pairs (which exercise the small_ub gate
     /// through compute) agree with the oracle across lengths and alphabets.
     #[test]
