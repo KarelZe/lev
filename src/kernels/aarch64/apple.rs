@@ -8,8 +8,10 @@ use crate::kernels::{delta, EDGE_ROW0};
 ///
 /// Uses the identity `ph_s = !((X << 1) & !(vn << 1))` and
 /// `!(xv | ph_s) = (X << 1) & !(xv | (vn << 1))` to remove the `| 1` constant
-/// off the critical path, executing in 15 unshifted single-cycle ALU instructions
-/// across 5-6 cycles per column without shifted-operand penalties on Apple M cores.
+/// off the critical path: 15 unshifted single-cycle ALU instructions with a
+/// loop-carried chain of 6 (`and`, `add`, `orr`, `lsl`, `bic`, `orr`/`bic`).
+/// A form with a chain of 5 and 18 instructions did not pay off on an M2 Pro
+/// (see `experiments/results.jsonl`).
 #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
 #[inline(always)]
 pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
