@@ -1,0 +1,19 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1530,14 +1530,14 @@
+         return None;
+     }
+     let s = n - m;
+-    if s < 64 {
++    if s < 32 {
+         // SAFETY: forwarded caller contract.
+         match unsafe { kernels::small_band(data, w, m, text, row) } {
+             Ok(d) => return Some(d),
+             Err(at) => gave_up = Some(at),
+         }
+     }
+-    if w < SMALL_BAND2_MIN_W || s >= 128 {
++    if w < SMALL_BAND2_MIN_W || s >= 96 {
+         return None;
+     }
+     if let Some((j, score)) = gave_up {

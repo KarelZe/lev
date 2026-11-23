@@ -1,0 +1,11 @@
+--- a/src/kernels/mod.rs
++++ b/src/kernels/mod.rs
+@@ -203,7 +203,7 @@
+ #[inline(always)]
+ pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
+     #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+-    return aarch64::apple::myers_step(eq, vp, vn);
++    return aarch64::neoverse::myers_step(eq, vp, vn);
+     #[cfg(all(target_arch = "aarch64", not(target_vendor = "apple")))]
+     return aarch64::neoverse::myers_step(eq, vp, vn);
+     #[cfg(target_arch = "x86_64")]

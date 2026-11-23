@@ -1,0 +1,11 @@
+--- a/src/kernels/mod.rs
++++ b/src/kernels/mod.rs
+@@ -188,7 +188,7 @@
+         return unsafe { x86_64::avx2::word_u8::<K, SLOTS>(pattern, text) };
+     }
+     #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+-    if short_text {
++    if short_text && false {
+         return aarch64::neon::word_u8::<K, SLOTS>(pattern, text);
+     }
+     portable::word_u8::<K, SLOTS>(pattern, text)
