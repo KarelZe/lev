@@ -21,6 +21,7 @@ language = "en"
 custom_dir = "docs/overrides"
 
 features = [
+  "content.action.copy",
   "content.code.copy",
   "content.code.annotate",
   "navigation.instant",
@@ -54,6 +55,16 @@ icon = "fontawesome/brands/github"
 link = "https://github.com/KarelZe/lev"
 
 [project.plugins.search]
+
+# llms.txt index plus Markdown copies of each page, for coding agents.
+[project.plugins.llmstxt]
+full_output = "llms-full.txt"
+
+[project.plugins.llmstxt.sections]
+"Getting started" = [{ "index.md" = "Installation, usage and benchmarks" }]
+"API reference" = [
+  { "api.md" = "Signatures and docstrings of `distance` and `ratio`" },
+]
 
 [project.plugins.mkdocstrings.handlers.python.options]
 docstring_style = "google"
