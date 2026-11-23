@@ -7,7 +7,11 @@ repo_url = "https://github.com/KarelZe/lev"
 repo_name = "KarelZe/lev"
 edit_uri = "edit/main/docs/"
 
-nav = [{ Home = "index.md" }, { "API Reference" = "api.md" }]
+nav = [
+  { Home = "index.md" },
+  { "API Reference" = "api.md" },
+  { Rust = "rust.md" },
+]
 
 # MathJax, for the formulas typeset via `pymdownx.arithmatex` below.
 extra_javascript = [
