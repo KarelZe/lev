@@ -764,7 +764,7 @@ fn tiny_n<K: Kernel, const N: usize, T1: CodeUnit, T2: CodeUnit>(
     text: &[T2],
 ) -> usize {
     let pattern: [u64; N] = std::array::from_fn(|i| pattern[i].as_u64());
-    K::word(
+    K::word_few_ops(
         N,
         text.len(),
         text.iter().map(|&c| {
@@ -798,7 +798,7 @@ fn tiny_swar<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[T2])
         .fold(0u64, |acc, &p| (acc << 8) | p.as_u64());
     // Lanes >= m hold zero bytes and would match NUL; mask them off.
     let valid = u64::MAX >> (64 - m);
-    K::word(
+    K::word_few_ops(
         m,
         text.len(),
         text.iter().map(|&c| {
@@ -1307,10 +1307,28 @@ fn hyrro_64_hash<K: Kernel, T1: CodeUnit, T2: CodeUnit>(pattern: &[T1], text: &[
 /// pattern rows.
 #[inline(always)]
 fn hyrro_inner<I: Iterator<Item = u64>>(m: usize, n: usize, pm_iter: I) -> usize {
+    hyrro_loop(m, n, pm_iter, kernels::myers_step)
+}
+
+/// [`hyrro_inner`] with [`kernels::myers_step_few_ops`], for loops that
+/// compute each match mask with integer ops.
+#[inline(always)]
+fn hyrro_inner_few_ops<I: Iterator<Item = u64>>(m: usize, n: usize, pm_iter: I) -> usize {
+    hyrro_loop(m, n, pm_iter, kernels::myers_step_few_ops)
+}
+
+/// The loop of [`hyrro_inner`] with the column step `step`.
+#[inline(always)]
+fn hyrro_loop<I: Iterator<Item = u64>>(
+    m: usize,
+    n: usize,
+    pm_iter: I,
+    step: impl Fn(u64, u64, u64) -> (u64, u64),
+) -> usize {
     debug_assert!((1..=64).contains(&m));
     let (mut vp, mut vn) = (!0u64, 0u64);
     for eq in pm_iter {
-        (vp, vn) = kernels::myers_step(eq, vp, vn);
+        (vp, vn) = step(eq, vp, vn);
     }
     let rows = u64::MAX >> (64 - m);
     n + (vp & rows).count_ones() as usize - (vn & rows).count_ones() as usize
@@ -1406,6 +1424,13 @@ trait Kernel {
     /// Single-word kernel (`m <= 64`).
     fn word<I: Iterator<Item = u64>>(m: usize, n: usize, pm_iter: I) -> usize;
 
+    /// [`Kernel::word`] for loops that compute each match mask with integer
+    /// ops ([`tiny_swar`], [`tiny_n`]); see [`kernels::myers_step_few_ops`].
+    #[inline(always)]
+    fn word_few_ops<I: Iterator<Item = u64>>(m: usize, n: usize, pm_iter: I) -> usize {
+        Self::word(m, n, pm_iter)
+    }
+
     /// Multi-word kernel (`64 < m <= 64 * MAX_W`), unrolled over
     /// `W = ceil(m / 64)`.
     fn words<const W: usize, I: Iterator<Item = [u64; W]>>(m: usize, n: usize, pm_iter: I)
@@ -1429,6 +1454,11 @@ impl<X: Isa> Kernel for Lev<X> {
     #[inline(always)]
     fn word<I: Iterator<Item = u64>>(m: usize, n: usize, pm_iter: I) -> usize {
         hyrro_inner(m, n, pm_iter)
+    }
+
+    #[inline(always)]
+    fn word_few_ops<I: Iterator<Item = u64>>(m: usize, n: usize, pm_iter: I) -> usize {
+        hyrro_inner_few_ops(m, n, pm_iter)
     }
 
     #[inline(always)]

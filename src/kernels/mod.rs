@@ -212,6 +212,22 @@ pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
     portable::myers_step(eq, vp, vn)
 }
 
+/// [`myers_step`] for loops that compute each match mask with integer ops
+/// (`tiny_swar`, `tiny_n`): selects [`aarch64::apple::myers_step_chain6`]
+/// on Apple targets, [`myers_step`] elsewhere.  The Apple
+/// [`aarch64::apple::myers_step`] has a shorter chain but 3 more integer
+/// ops, which compete with the mask computation: on an M2 Pro it is 5-7%
+/// slower in `tiny_n` and up to 4% in `tiny_swar`, but faster where the
+/// mask is loaded or computed on the vector units (see
+/// `experiments/results.jsonl`).
+#[inline(always)]
+pub(crate) fn myers_step_few_ops(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
+    #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+    return aarch64::apple::myers_step_chain6(eq, vp, vn);
+    #[cfg(not(all(target_arch = "aarch64", target_vendor = "apple")))]
+    myers_step(eq, vp, vn)
+}
+
 /// Multi-word Levenshtein kernel over `m` pattern rows in `W` words.
 /// Returns the sum of the vertical deltas of these rows in the last text
 /// column, i.e. their contribution to the distance on top of `D(0, n) = n`

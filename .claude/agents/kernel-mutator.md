@@ -33,6 +33,11 @@ Steps:
      the `analysis` of `myers_step-apple-chain5` in `experiments/results.jsonl`.
    - Keep the probe's blocks in the file, including the losers, so the
      orchestrator can rerun the whole table.
+   - The table-`eq` column predicts loops whose match mask is a load. Loops
+     that compute the mask with integer ops (`tiny_swar`, `tiny_n`) take
+     `kernels::myers_step_few_ops`, where extra ops cost more than a shorter
+     chain saves (see `myers_step-apple-chain5-ge` in `results.jsonl`).
+     Report the op count so the orchestrator knows which loops to measure.
 4. Implement the one best variant in lev. Keep the kernel's name and
    signature, put a new form where AGENTS.md says forms live, and change only
    the dispatcher in `src/kernels/mod.rs` to select it. Keep the replaced
