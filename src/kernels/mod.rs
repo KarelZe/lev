@@ -97,28 +97,6 @@ pub(crate) mod x86_64;
 
 use crate::{CodeUnit, Isa, Kernel, LargeCtx};
 
-/// `x`, opaque to LLVM on AArch64 and x86-64: an empty `asm!` stops it from
-/// fusing the ops on either side into a form with a longer chain or more
-/// ops.  The identity elsewhere.
-#[inline(always)]
-pub(crate) fn opaque(x: u64) -> u64 {
-    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    {
-        let mut x = x;
-        // SAFETY: an empty template; the register is passed through.
-        unsafe {
-            std::arch::asm!(
-                "/* {0} */",
-                inout(reg) x,
-                options(pure, nomem, nostack, preserves_flags),
-            );
-        }
-        x
-    }
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-    x
-}
-
 /// Text columns before the first give-up check of [`small_band`]; the
 /// checks then double up to [`SMALL_BAND_CHECK`].  Dissimilar pairs give
 /// up at the first: at 65-128 chars the full kernel costs only 1.5 times
@@ -235,14 +213,13 @@ pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
 }
 
 /// [`myers_step`] for loops that compute each match mask with integer ops
-/// (`tiny_swar`, `tiny_n`): selects the chain-6 form of each target,
-/// [`aarch64::apple::myers_step_chain6`],
-/// [`aarch64::neoverse::myers_step_chain6`] or
-/// [`x86_64::myers_step_chain6`], and [`portable::myers_step`] elsewhere.
-/// The chain-5 forms that [`myers_step`] selects take 1-3 more integer ops,
-/// which compete with the mask computation: on an M2 Pro the Apple form is
-/// 5-7% slower in `tiny_n` and up to 4% in `tiny_swar`, but faster where the
-/// mask is loaded or computed on the vector units (see
+/// (`tiny_swar`, `tiny_n`): selects the chain-6 form of the AArch64 targets,
+/// [`aarch64::apple::myers_step_chain6`] or
+/// [`aarch64::neoverse::myers_step_chain6`], and [`myers_step`] elsewhere.
+/// The chain-5 forms that [`myers_step`] selects on AArch64 take up to 3 more
+/// integer ops, which compete with the mask computation: on an M2 Pro the
+/// Apple form is 5-7% slower in `tiny_n` and up to 4% in `tiny_swar`, but
+/// faster where the mask is loaded or computed on the vector units (see
 /// `experiments/results.jsonl`).
 #[inline(always)]
 pub(crate) fn myers_step_few_ops(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
@@ -250,10 +227,8 @@ pub(crate) fn myers_step_few_ops(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
     return aarch64::apple::myers_step_chain6(eq, vp, vn);
     #[cfg(all(target_arch = "aarch64", not(target_vendor = "apple")))]
     return aarch64::neoverse::myers_step_chain6(eq, vp, vn);
-    #[cfg(target_arch = "x86_64")]
-    return x86_64::myers_step_chain6(eq, vp, vn);
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-    portable::myers_step(eq, vp, vn)
+    #[cfg(not(target_arch = "aarch64"))]
+    myers_step(eq, vp, vn)
 }
 
 /// Multi-word Levenshtein kernel over `m` pattern rows in `W` words.

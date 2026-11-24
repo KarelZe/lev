@@ -6,10 +6,31 @@
 //!
 //! Both kernels are plain Rust, compiled and tested on every target.  Where
 //! LLVM would undo the schedule, a value passes through [`opaque`], which
-//! only hides it from the optimizer on AArch64 and x86-64 and is the
-//! identity elsewhere.
+//! only hides it from the optimizer on AArch64 and is the identity
+//! elsewhere.
 
-use crate::kernels::{delta, opaque, EDGE_ROW0};
+use crate::kernels::{delta, EDGE_ROW0};
+
+/// `x`, opaque to LLVM on AArch64: an empty `asm!` stops it from fusing
+/// the ops on either side into a form that is slower on Neoverse.
+#[inline(always)]
+fn opaque(x: u64) -> u64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let mut x = x;
+        // SAFETY: an empty template; the register is passed through.
+        unsafe {
+            std::arch::asm!(
+                "/* {0} */",
+                inout(reg) x,
+                options(pure, nomem, nostack, preserves_flags),
+            );
+        }
+        x
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    x
+}
 
 /// [`crate::kernels::portable::myers_step`] scheduled for Arm Neoverse cores,
 /// with a loop-carried chain of 5 ops for `vp'` and 4 for `vn'`.

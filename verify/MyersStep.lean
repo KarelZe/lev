@@ -47,7 +47,7 @@ def neoverse (eq vp vn : W) : W × W :=
   let a := xs &&& ~~~m
   ((mh <<< 1) ||| a, xv &&& ~~~s)
 
-/-- `x86_64::bmi1::myers_step_andn_chain6`. -/
+/-- `x86_64::bmi1::myers_step_andn`. -/
 def andn (eq vp vn : W) : W × W :=
   let sum := (eq &&& vp) + vp
   let x := sum ||| (vp ||| eq)
@@ -113,19 +113,6 @@ def neoverseChain5 (eq vp vn : W) : W × W :=
   let y := d &&& ~~~(sum <<< 1)
   (y ^^^ ~~~na, xn ||| gs)
 
-/-- `x86_64::bmi1::myers_step_andn`: chain 5, negations as `!a & b`. -/
-def andnChain5 (eq vp vn : W) : W × W :=
-  let xv := eq ||| vn
-  let e := eq <<< 1
-  let p := vp <<< 1
-  let n := vn <<< 1
-  let t := e &&& p
-  let s := t + p
-  let na := ~~~t &&& (xv ||| n)
-  let z := (xv ^^^ p) ||| (xv <<< 1) ||| s
-  let gs := ~~~s &&& (~~~(e ||| p) &&& xv)
-  (na ^^^ z, (xv &&& n) ||| gs)
-
 /-- One word of `portable::multiword` (Hyyrö's form) with no carry in and
 the row-0 edge shifted in (`prev_hp = 1`, `prev_hn = 0`). -/
 def hyyro (eq vp vn : W) : W × W :=
@@ -161,11 +148,6 @@ theorem appleChain5_eq (eq vp vn : W) (h : vp &&& vn = 0) :
 theorem neoverseChain5_eq (eq vp vn : W) (h : vp &&& vn = 0) :
     neoverseChain5 eq vp vn = ref eq vp vn := by
   simp only [neoverseChain5, ref, Prod.mk.injEq]
-  bv_decide
-
-theorem andnChain5_eq (eq vp vn : W) (h : vp &&& vn = 0) :
-    andnChain5 eq vp vn = ref eq vp vn := by
-  simp only [andnChain5, ref, Prod.mk.injEq]
   bv_decide
 
 theorem hyyro_eq (eq vp vn : W) (h : vp &&& vn = 0) :
