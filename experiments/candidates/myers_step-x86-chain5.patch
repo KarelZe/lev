@@ -1,0 +1,256 @@
+diff --git a/src/kernels/aarch64/neoverse.rs b/src/kernels/aarch64/neoverse.rs
+index 3325535..38dedfe 100644
+--- a/src/kernels/aarch64/neoverse.rs
++++ b/src/kernels/aarch64/neoverse.rs
+@@ -6,31 +6,10 @@
+ //!
+ //! Both kernels are plain Rust, compiled and tested on every target.  Where
+ //! LLVM would undo the schedule, a value passes through [`opaque`], which
+-//! only hides it from the optimizer on AArch64 and is the identity
+-//! elsewhere.
++//! only hides it from the optimizer on AArch64 and x86-64 and is the
++//! identity elsewhere.
+
+-use crate::kernels::{delta, EDGE_ROW0};
+-
+-/// `x`, opaque to LLVM on AArch64: an empty `asm!` stops it from fusing
+-/// the ops on either side into a form that is slower on Neoverse.
+-#[inline(always)]
+-fn opaque(x: u64) -> u64 {
+-    #[cfg(target_arch = "aarch64")]
+-    {
+-        let mut x = x;
+-        // SAFETY: an empty template; the register is passed through.
+-        unsafe {
+-            std::arch::asm!(
+-                "/* {0} */",
+-                inout(reg) x,
+-                options(pure, nomem, nostack, preserves_flags),
+-            );
+-        }
+-        x
+-    }
+-    #[cfg(not(target_arch = "aarch64"))]
+-    x
+-}
++use crate::kernels::{delta, opaque, EDGE_ROW0};
+
+ /// [`crate::kernels::portable::myers_step`] scheduled for Arm Neoverse cores,
+ /// with a loop-carried chain of 5 ops for `vp'` and 4 for `vn'`.
+diff --git a/src/kernels/mod.rs b/src/kernels/mod.rs
+index d959cec..87dd009 100644
+--- a/src/kernels/mod.rs
++++ b/src/kernels/mod.rs
+@@ -97,6 +97,28 @@ pub(crate) mod x86_64;
+
+ use crate::{CodeUnit, Isa, Kernel, LargeCtx};
+
++/// `x`, opaque to LLVM on AArch64 and x86-64: an empty `asm!` stops it from
++/// fusing the ops on either side into a form with a longer chain or more
++/// ops.  The identity elsewhere.
++#[inline(always)]
++pub(crate) fn opaque(x: u64) -> u64 {
++    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
++    {
++        let mut x = x;
++        // SAFETY: an empty template; the register is passed through.
++        unsafe {
++            std::arch::asm!(
++                "/* {0} */",
++                inout(reg) x,
++                options(pure, nomem, nostack, preserves_flags),
++            );
++        }
++        x
++    }
++    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
++    x
++}
++
+ /// Text columns before the first give-up check of [`small_band`]; the
+ /// checks then double up to [`SMALL_BAND_CHECK`].  Dissimilar pairs give
+ /// up at the first: at 65-128 chars the full kernel costs only 1.5 times
+@@ -213,13 +235,14 @@ pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
+ }
+
+ /// [`myers_step`] for loops that compute each match mask with integer ops
+-/// (`tiny_swar`, `tiny_n`): selects the chain-6 form of the AArch64 targets,
+-/// [`aarch64::apple::myers_step_chain6`] or
+-/// [`aarch64::neoverse::myers_step_chain6`], and [`myers_step`] elsewhere.
+-/// The chain-5 forms that [`myers_step`] selects on AArch64 take up to 3 more
+-/// integer ops, which compete with the mask computation: on an M2 Pro the
+-/// Apple form is 5-7% slower in `tiny_n` and up to 4% in `tiny_swar`, but
+-/// faster where the mask is loaded or computed on the vector units (see
++/// (`tiny_swar`, `tiny_n`): selects the chain-6 form of each target,
++/// [`aarch64::apple::myers_step_chain6`],
++/// [`aarch64::neoverse::myers_step_chain6`] or
++/// [`x86_64::myers_step_chain6`], and [`portable::myers_step`] elsewhere.
++/// The chain-5 forms that [`myers_step`] selects take 1-3 more integer ops,
++/// which compete with the mask computation: on an M2 Pro the Apple form is
++/// 5-7% slower in `tiny_n` and up to 4% in `tiny_swar`, but faster where the
++/// mask is loaded or computed on the vector units (see
+ /// `experiments/results.jsonl`).
+ #[inline(always)]
+ pub(crate) fn myers_step_few_ops(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
+@@ -227,8 +250,10 @@ pub(crate) fn myers_step_few_ops(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
+     return aarch64::apple::myers_step_chain6(eq, vp, vn);
+     #[cfg(all(target_arch = "aarch64", not(target_vendor = "apple")))]
+     return aarch64::neoverse::myers_step_chain6(eq, vp, vn);
+-    #[cfg(not(target_arch = "aarch64"))]
+-    myers_step(eq, vp, vn)
++    #[cfg(target_arch = "x86_64")]
++    return x86_64::myers_step_chain6(eq, vp, vn);
++    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
++    portable::myers_step(eq, vp, vn)
+ }
+
+ /// Multi-word Levenshtein kernel over `m` pattern rows in `W` words.
+diff --git a/src/kernels/tests.rs b/src/kernels/tests.rs
+index 68c8adf..cc4b809 100644
+--- a/src/kernels/tests.rs
++++ b/src/kernels/tests.rs
+@@ -355,6 +355,11 @@ fn myers_step_matches_portable() {
+             expected,
+             "neoverse chain6"
+         );
++        assert_eq!(
++            bmi1::myers_step_andn_chain6(eq, vp, vn),
++            expected,
++            "bmi1 andn chain6"
++        );
+         assert_eq!(x86_64::myers_step(eq, vp, vn), expected, "x86_64");
+         #[cfg(target_arch = "x86_64")]
+         if std::is_x86_feature_detected!("bmi1") {
+diff --git a/src/kernels/x86_64/bmi1.rs b/src/kernels/x86_64/bmi1.rs
+index 6158e93..ec9c688 100644
+--- a/src/kernels/x86_64/bmi1.rs
++++ b/src/kernels/x86_64/bmi1.rs
+@@ -7,7 +7,7 @@
+ //! scores into hardware popcounts, and SSE4.1 changes the code that loads
+ //! the rows.
+
+-use crate::kernels::delta;
++use crate::kernels::{delta, opaque};
+ #[cfg(target_arch = "x86_64")]
+ use crate::{lcs_multiword_kernel, LargeCtx};
+
+@@ -26,14 +26,41 @@ pub(crate) unsafe fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
+ }
+
+ /// Plain-Rust form of [`myers_step`] taking advantage of and-not (`!a & b`),
+-/// which compiles to `andn` when BMI1 is enabled.
++/// which compiles to `andn` when BMI1 is enabled, with a loop-carried chain
++/// of 5 ops.
++///
++/// The algebra of [`crate::kernels::aarch64::apple::myers_step`]
++/// (`S = sum << 1`, each output a two-op select on `S`), with the negations
++/// moved where x86-64 has no `orn`/`eon`: `vp' = !A ^ (!D | S)` instead of
++/// `A ^ (D & !S)`, with `!A = !(E & P) & (xv | N)` and
++/// `!D = (xv ^ P) | (xv << 1)`, and `vn' = (xv & N) | (!S & G)` with
++/// `G = !(E | P) & xv` (`E = eq << 1`, `P = vp << 1`, `N = vn << 1`).
++/// 18 ops against 15 for [`myers_step_andn_chain6`].  Two values pass
++/// through [`opaque`] to keep LLVM from lengthening the chain.
++#[inline(always)]
++pub(crate) fn myers_step_andn(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
++    let xv = eq | vn;
++    // `p` opaque: else LLVM forms `s` with a scaled `lea` (2 cycles on
++    // some cores) on the chain.
++    let (e, p, n) = (eq << 1, opaque(vp << 1), vn << 1);
++    let t = e & p;
++    let s = t.wrapping_add(p);
++    let na = !t & (xv | n);
++    let z = (xv ^ p) | (xv << 1) | s;
++    // `g` opaque: else LLVM factors `xv` out of `vn'` as
++    // `xv & (n | !(e | p | s))`, two ops after `s` instead of one.
++    let g = opaque(!(e | p) & xv);
++    (na ^ z, (xv & n) | (!s & g))
++}
++
++/// The chain-6 form of [`myers_step_andn`], 15 ops.
+ ///
+ /// Uses the identities `!ph_s = (X << 1) & !(vn << 1)` and
+ /// `!(xv | ph_s) = (X << 1) & !(xv | (vn << 1))` with `X = sum | vp | eq`
+ /// (from PR #221), removing the `| 1` constant off the critical recurrence
+ /// path.
+ #[inline(always)]
+-pub(crate) fn myers_step_andn(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
++pub(crate) fn myers_step_andn_chain6(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
+     let sum = (eq & vp).wrapping_add(vp);
+     let x = sum | (vp | eq);
+     let mh = vp & !(sum & !eq);
+diff --git a/src/kernels/x86_64/mod.rs b/src/kernels/x86_64/mod.rs
+index 8f4059c..1e40800 100644
+--- a/src/kernels/x86_64/mod.rs
++++ b/src/kernels/x86_64/mod.rs
+@@ -6,13 +6,21 @@ pub(crate) mod avx2;
+ pub(crate) mod bmi1;
+ pub(crate) mod v2;
+
+-/// [`crate::kernels::portable::myers_step`] for x86-64: uses the identities
+-/// `!ph_s = (X << 1) & !(vn << 1)` and `!(xv | ph_s) = (X << 1) & !(xv | (vn << 1))`
+-/// with `X = sum | vp | eq` to eliminate the `| 1` constant off the critical
+-/// recurrence path and express negations as `!a & b`.  On CPUs with BMI1,
+-/// each `!a & b` compiles directly to `andn`.
++/// [`crate::kernels::portable::myers_step`] for x86-64, with a loop-carried
++/// chain of 5 ops and its negations expressed as `!a & b`
++/// ([`bmi1::myers_step_andn`]).  On CPUs with BMI1, each `!a & b` compiles
++/// directly to `andn`.
+ #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+ #[inline(always)]
+ pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
+     bmi1::myers_step_andn(eq, vp, vn)
+ }
++
++/// [`myers_step`] in fewer ops with a chain of 6
++/// ([`bmi1::myers_step_andn_chain6`]), for loops that compute the match
++/// masks with integer ops (see [`crate::kernels::myers_step_few_ops`]).
++#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
++#[inline(always)]
++pub(crate) fn myers_step_chain6(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
++    bmi1::myers_step_andn_chain6(eq, vp, vn)
++}
+diff --git a/verify/MyersStep.lean b/verify/MyersStep.lean
+index d7daacd..d9564a5 100644
+--- a/verify/MyersStep.lean
++++ b/verify/MyersStep.lean
+@@ -47,7 +47,7 @@ def neoverse (eq vp vn : W) : W × W :=
+   let a := xs &&& ~~~m
+   ((mh <<< 1) ||| a, xv &&& ~~~s)
+
+-/-- `x86_64::bmi1::myers_step_andn`. -/
++/-- `x86_64::bmi1::myers_step_andn_chain6`. -/
+ def andn (eq vp vn : W) : W × W :=
+   let sum := (eq &&& vp) + vp
+   let x := sum ||| (vp ||| eq)
+@@ -113,6 +113,19 @@ def neoverseChain5 (eq vp vn : W) : W × W :=
+   let y := d &&& ~~~(sum <<< 1)
+   (y ^^^ ~~~na, xn ||| gs)
+
++/-- `x86_64::bmi1::myers_step_andn`: chain 5, negations as `!a & b`. -/
++def andnChain5 (eq vp vn : W) : W × W :=
++  let xv := eq ||| vn
++  let e := eq <<< 1
++  let p := vp <<< 1
++  let n := vn <<< 1
++  let t := e &&& p
++  let s := t + p
++  let na := ~~~t &&& (xv ||| n)
++  let z := (xv ^^^ p) ||| (xv <<< 1) ||| s
++  let gs := ~~~s &&& (~~~(e ||| p) &&& xv)
++  (na ^^^ z, (xv &&& n) ||| gs)
++
+ /-- One word of `portable::multiword` (Hyyrö's form) with no carry in and
+ the row-0 edge shifted in (`prev_hp = 1`, `prev_hn = 0`). -/
+ def hyyro (eq vp vn : W) : W × W :=
+@@ -150,6 +163,11 @@ theorem neoverseChain5_eq (eq vp vn : W) (h : vp &&& vn = 0) :
+   simp only [neoverseChain5, ref, Prod.mk.injEq]
+   bv_decide
+
++theorem andnChain5_eq (eq vp vn : W) (h : vp &&& vn = 0) :
++    andnChain5 eq vp vn = ref eq vp vn := by
++  simp only [andnChain5, ref, Prod.mk.injEq]
++  bv_decide
++
+ theorem hyyro_eq (eq vp vn : W) (h : vp &&& vn = 0) :
+     hyyro eq vp vn = ref eq vp vn := by
+   simp only [hyyro, ref, Prod.mk.injEq]

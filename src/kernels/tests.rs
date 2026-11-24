@@ -3,7 +3,7 @@
 
 use super::aarch64::{self, apple, neoverse};
 use super::x86_64::{self, bmi1};
-use super::{band_limit, myers_step, portable, word_u8, EDGE_ROW0};
+use super::{band_limit, myers_step, myers_step_few_ops, portable, word_u8, EDGE_ROW0};
 use crate::tests::{lcg, mutate, naive, naive_indel, rand_string};
 use crate::{
     compute_sorted, compute_sorted_mixed, compute_u8, Baseline, Isa, Kernel, LargeCtx, Lcs, Lev,
@@ -347,8 +347,14 @@ fn myers_step_matches_portable() {
     for (eq, vp, vn) in states {
         let expected = portable::myers_step(eq, vp, vn);
         assert_eq!(myers_step(eq, vp, vn), expected);
+        assert_eq!(myers_step_few_ops(eq, vp, vn), expected, "few ops");
         assert_eq!(neoverse::myers_step(eq, vp, vn), expected, "neoverse");
         assert_eq!(bmi1::myers_step_andn(eq, vp, vn), expected, "bmi1 andn");
+        assert_eq!(
+            neoverse::myers_step_chain6(eq, vp, vn),
+            expected,
+            "neoverse chain6"
+        );
         assert_eq!(x86_64::myers_step(eq, vp, vn), expected, "x86_64");
         #[cfg(target_arch = "x86_64")]
         if std::is_x86_feature_detected!("bmi1") {
@@ -356,6 +362,46 @@ fn myers_step_matches_portable() {
         }
         #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
         assert_eq!(apple::myers_step(eq, vp, vn), expected, "apple");
+        #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+        assert_eq!(
+            apple::myers_step_chain6(eq, vp, vn),
+            expected,
+            "apple chain6"
+        );
+    }
+}
+
+/// The Apple step, whose asm reuses registers, against the portable one on
+/// every reachable state of the low 7 bits, with the upper bits of each
+/// word all clear or all set, so the addition's carry enters, ripples
+/// through and leaves the low bits.
+#[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+#[test]
+fn apple_myers_step_matches_portable_on_low_bits() {
+    let low = (1u64 << 7) - 1;
+    for fill in 0..8 {
+        let high = |bit: u32| if fill >> bit & 1 != 0 { !low } else { 0 };
+        let (eq_high, vp_high) = (high(0), high(1));
+        let vn_high = high(2) & !vp_high;
+        for eq in 0..=low {
+            for vp in 0..=low {
+                // Every `vn` with `vp & vn == 0`: the submasks of `!vp`.
+                let free = low & !vp;
+                let mut vn = free;
+                loop {
+                    let (e, p, n) = (eq | eq_high, vp | vp_high, vn | vn_high);
+                    assert_eq!(
+                        apple::myers_step(e, p, n),
+                        portable::myers_step(e, p, n),
+                        "eq={e:#x} vp={p:#x} vn={n:#x}"
+                    );
+                    if vn == 0 {
+                        break;
+                    }
+                    vn = (vn - 1) & free;
+                }
+            }
+        }
     }
 }
 

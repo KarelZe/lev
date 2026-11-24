@@ -32,7 +32,42 @@ fn opaque(x: u64) -> u64 {
     x
 }
 
-/// [`crate::kernels::portable::myers_step`] scheduled for Arm Neoverse cores.
+/// [`crate::kernels::portable::myers_step`] scheduled for Arm Neoverse cores,
+/// with a loop-carried chain of 5 ops for `vp'` and 4 for `vn'`.
+///
+/// The algebra of [`super::apple::myers_step`] (`S = sum << 1`, each output
+/// a two-op select on `S`), with every shift folded into a single-cycle
+/// shifted operand:
+///
+/// - `vp' = y ^ !nA` with `y = D & !(sum << 1)`, `D = (xv ^ !(vp << 1)) &
+///   !(xv << 1)` and `nA = !A = (xv | (vn << 1)) & !((eq & vp) << 1)`;
+/// - `vn' = (xv & (vn << 1)) | (G & !(sum << 1))` with
+///   `G = xv & !((eq | vp) << 1)`.
+///
+/// 14 ops (one more than [`myers_step_chain6`]), 8 of them with a shifted
+/// operand.  Loops that compute the match masks with integer ops take
+/// [`myers_step_chain6`] (see [`crate::kernels::myers_step_few_ops`]).
+#[cfg_attr(
+    not(all(target_arch = "aarch64", not(target_vendor = "apple"))),
+    allow(dead_code)
+)]
+#[inline(always)]
+pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
+    let xv = eq | vn;
+    let u = eq & vp;
+    let sum = u.wrapping_add(vp);
+    let m = xv | (vn << 1);
+    let xe = xv ^ !(vp << 1);
+    let g = xv & !((eq | vp) << 1);
+    let xn = xv & (vn << 1);
+    let na = m & !(u << 1);
+    let d = xe & !(xv << 1);
+    let gs = g & !(sum << 1);
+    let y = d & !(sum << 1);
+    (y ^ !na, xn | gs)
+}
+
+/// The chain-6 form of [`myers_step`] for Neoverse cores, 13 ops.
 ///
 /// Uses the identities `!ph_s = (X << 1) & !(vn << 1)` and
 /// `!(xv | ph_s) = (X << 1) & !(xv | (vn << 1))` with `X = sum | vp | eq`
@@ -46,7 +81,7 @@ fn opaque(x: u64) -> u64 {
     allow(dead_code)
 )]
 #[inline(always)]
-pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
+pub(crate) fn myers_step_chain6(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
     let sum = (eq & vp).wrapping_add(vp);
     let x = sum | vp | eq;
     let mh = vp & (eq | !sum);
