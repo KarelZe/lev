@@ -1,0 +1,12 @@
+# Latency probe for the Apple `myers_step` blocks (AArch64 only), kept out of
+# the lev-rs crate. Run from this directory:
+#   cargo run --release            # per-op latency and both blocks
+#   cargo run --release --bin chain  # chain alone vs. chain with fan-out
+[package]
+name = "latprobe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[profile.release]
+opt-level = 3

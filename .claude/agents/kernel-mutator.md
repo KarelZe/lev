@@ -25,7 +25,12 @@ Steps:
 4. For `myers_step` variants, count the latency of the loop-carried path:
    the longest chain of dependent ops from the inputs `vp`/`vn` to the
    outputs `vp`/`vn` (`eq` is loaded, not carried). Report it next to the
-   current form's count. Fewer total ops is not the goal.
+   current form's count. Fewer total ops is not the goal, and on Apple cores
+   the chain alone does not predict speed either: off-chain ops that read
+   chain values delay the critical ops (see the `analysis` of
+   `myers_step-apple-chain5` in `experiments/results.jsonl`). Also report
+   how many off-chain ops read a chain value. The orchestrator scores the
+   block with `experiments/latprobe` (cycles per column).
 5. Prove correctness with `cargo test`. These tests must pass:
    `small_pairs_match_oracle_exhaustive`, `myers_step_matches_portable`,
    `multiword_forms_match_oracle`, `large_kernels_match_oracle`. Add a test
