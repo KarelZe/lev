@@ -20,7 +20,8 @@ To gate a new candidate: add a `def`, add a theorem in the same shape, run
 holds. A refuted theorem prints a counterexample.
 
 AArch64 asm in Lean terms: `orn d, a, b` is `a ||| ~~~b`, `bic d, a, b` is
-`a &&& ~~~b`, `lsl d, a, #1` is `a <<< 1`.
+`a &&& ~~~b`, `eor d, a, b` is `a ^^^ b`, `eon d, a, b` is `a ^^^ ~~~b`,
+`lsl d, a, #1` is `a <<< 1`.
 -/
 
 abbrev W := BitVec 64
@@ -59,7 +60,7 @@ def andn (eq vp vn : W) : W × W :=
   let a := ~~~m &&& xs
   ((mh <<< 1) ||| a, ~~~s &&& xv)
 
-/-- `aarch64::apple::myers_step`, transcribed from its asm block. -/
+/-- `aarch64::apple::myers_step_chain6`, transcribed from its asm block. -/
 def apple (eq vp vn : W) : W × W :=
   let sum := eq &&& vp
   let u := eq ||| vp
@@ -75,6 +76,27 @@ def apple (eq vp vn : W) : W × W :=
   let s := xs &&& ~~~vns
   let a := xs &&& ~~~m
   (mhs ||| a, xv &&& ~~~s)
+
+/-- `aarch64::apple::myers_step`, transcribed from its asm block, one `let`
+per instruction (the asm reuses registers; the names here are the values). -/
+def appleChain5 (eq vp vn : W) : W × W :=
+  let e := eq <<< 1
+  let xv := eq ||| vn
+  let p := vp <<< 1
+  let n := vn <<< 1
+  let t := e &&& p
+  let s := t + p
+  let xe := xv ^^^ ~~~p
+  let pe := p ||| e
+  let en := e ||| n
+  let d := xe &&& ~~~en
+  let o := n ||| ~~~pe
+  let f0 := xv &&& o
+  let m := xv ||| n
+  let q1 := t ||| ~~~m
+  let y := d &&& ~~~s
+  let sn := s &&& ~~~n
+  (q1 ^^^ y, f0 &&& ~~~sn)
 
 /-- One word of `portable::multiword` (Hyyrö's form) with no carry in and
 the row-0 edge shifted in (`prev_hp = 1`, `prev_hn = 0`). -/
@@ -101,6 +123,11 @@ theorem andn_eq (eq vp vn : W) (h : vp &&& vn = 0) :
 theorem apple_eq (eq vp vn : W) (h : vp &&& vn = 0) :
     apple eq vp vn = ref eq vp vn := by
   simp only [apple, ref, Prod.mk.injEq]
+  bv_decide
+
+theorem appleChain5_eq (eq vp vn : W) (h : vp &&& vn = 0) :
+    appleChain5 eq vp vn = ref eq vp vn := by
+  simp only [appleChain5, ref, Prod.mk.injEq]
   bv_decide
 
 theorem hyyro_eq (eq vp vn : W) (h : vp &&& vn = 0) :

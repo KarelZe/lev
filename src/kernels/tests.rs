@@ -356,6 +356,46 @@ fn myers_step_matches_portable() {
         }
         #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
         assert_eq!(apple::myers_step(eq, vp, vn), expected, "apple");
+        #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+        assert_eq!(
+            apple::myers_step_chain6(eq, vp, vn),
+            expected,
+            "apple chain6"
+        );
+    }
+}
+
+/// The Apple step, whose asm reuses registers, against the portable one on
+/// every reachable state of the low 7 bits, with the upper bits of each
+/// word all clear or all set, so the addition's carry enters, ripples
+/// through and leaves the low bits.
+#[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+#[test]
+fn apple_myers_step_matches_portable_on_low_bits() {
+    let low = (1u64 << 7) - 1;
+    for fill in 0..8 {
+        let high = |bit: u32| if fill >> bit & 1 != 0 { !low } else { 0 };
+        let (eq_high, vp_high) = (high(0), high(1));
+        let vn_high = high(2) & !vp_high;
+        for eq in 0..=low {
+            for vp in 0..=low {
+                // Every `vn` with `vp & vn == 0`: the submasks of `!vp`.
+                let free = low & !vp;
+                let mut vn = free;
+                loop {
+                    let (e, p, n) = (eq | eq_high, vp | vp_high, vn | vn_high);
+                    assert_eq!(
+                        apple::myers_step(e, p, n),
+                        portable::myers_step(e, p, n),
+                        "eq={e:#x} vp={p:#x} vn={n:#x}"
+                    );
+                    if vn == 0 {
+                        break;
+                    }
+                    vn = (vn - 1) & free;
+                }
+            }
+        }
     }
 }
 

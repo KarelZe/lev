@@ -4,17 +4,75 @@
 
 use crate::kernels::{delta, EDGE_ROW0};
 
-/// [`crate::kernels::portable::myers_step`] with its schedule pinned.
+/// [`crate::kernels::portable::myers_step`] with a loop-carried chain of 5
+/// single-cycle ops (`lsl`, `and`, `add`, `bic`, `eor` or `bic`), one
+/// fewer than [`myers_step_chain6`].
+///
+/// The shift moves before the addition: with `E = eq << 1`, `P = vp << 1`
+/// and `N = vn << 1`, `S = (E & P) + P` is `sum << 1`, ready after three
+/// ops.  Each output is then a select on `S` between values that are ready
+/// by then, two ops after `S` (`P & N == 0` from `vp & vn == 0`):
+///
+/// - `vp' = S ? Q1 : Q1 ^ D = Q1 ^ (D & !S)`, with
+///   `Q1 = (E & P) | !(xv | N)` and `D = (xv ^ !P) & !(E | N)`;
+/// - `vn' = xv & (N | !(S | P | E)) = f0 & !(S & !N)`, with
+///   `f0 = xv & (N | !(P | E))`.
+///
+/// 18 unshifted ALU instructions, three more than [`myers_step_chain6`]: at
+/// about six integer ops per cycle the column stays bound by the chain.
+/// Each register is reused once its value is dead, so the block takes 7
+/// registers (15 for [`myers_step_chain6`]).
+#[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+#[inline(always)]
+pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
+    let (mut vp, mut vn) = (vp, vn);
+    // SAFETY: register-only arithmetic.  Every register is overwritten only
+    // after the last read of the value it holds; `vp`/`vn` end up holding
+    // the outputs, which keeps loop-carried copies out of the loop.
+    unsafe {
+        std::arch::asm!(
+            "lsl  {e}, {eq}, #1",    // E = eq << 1
+            "orr  {eq}, {eq}, {vn}", // xv = eq | vn
+            "lsl  {p}, {vp}, #1",    // P = vp << 1
+            "lsl  {n}, {vn}, #1",    // N = vn << 1
+            "and  {t}, {e}, {p}",    // t = E & P
+            "add  {vn}, {t}, {p}",   // S = t + P
+            "eon  {vp}, {eq}, {p}",  // xe = xv ^ !P
+            "orr  {p}, {p}, {e}",    // PE = P | E
+            "orr  {e}, {e}, {n}",    // EN = E | N
+            "bic  {vp}, {vp}, {e}",  // D = xe & !EN
+            "orn  {p}, {n}, {p}",    // o = N | !PE
+            "and  {p}, {eq}, {p}",   // f0 = xv & o
+            "orr  {e}, {eq}, {n}",   // m = xv | N
+            "orn  {t}, {t}, {e}",    // Q1 = t | !m
+            "bic  {vp}, {vp}, {vn}", // y = D & !S
+            "bic  {vn}, {vn}, {n}",  // sn = S & !N
+            "eor  {vp}, {t}, {vp}",  // vp' = Q1 ^ y
+            "bic  {vn}, {p}, {vn}",  // vn' = f0 & !sn
+            eq = inout(reg) eq => _,
+            vp = inout(reg) vp,
+            vn = inout(reg) vn,
+            e = out(reg) _,
+            p = out(reg) _,
+            n = out(reg) _,
+            t = out(reg) _,
+            options(pure, nomem, nostack, preserves_flags),
+        );
+    }
+    (vp, vn)
+}
+
+/// The previous Apple form of [`crate::kernels::portable::myers_step`], kept
+/// to compare against [`myers_step`].
 ///
 /// Uses the identity `ph_s = !((X << 1) & !(vn << 1))` and
 /// `!(xv | ph_s) = (X << 1) & !(xv | (vn << 1))` to remove the `| 1` constant
 /// off the critical path: 15 unshifted single-cycle ALU instructions with a
 /// loop-carried chain of 6 (`and`, `add`, `orr`, `lsl`, `bic`, `orr`/`bic`).
-/// A form with a chain of 5 and 18 instructions did not pay off on an M2 Pro
-/// (see `experiments/results.jsonl`).
 #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+#[cfg_attr(not(test), allow(dead_code))]
 #[inline(always)]
-pub(crate) fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
+pub(crate) fn myers_step_chain6(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
     let (mut vp, mut vn) = (vp, vn);
     // SAFETY: register-only arithmetic.  `vp`/`vn` are overwritten in place
     // after their last read, which keeps loop-carried copies out of the loop.
