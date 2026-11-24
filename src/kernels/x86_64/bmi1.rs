@@ -7,7 +7,7 @@
 //! scores into hardware popcounts, and SSE4.1 changes the code that loads
 //! the rows.
 
-use crate::kernels::delta;
+use crate::kernels::{delta, opaque};
 #[cfg(target_arch = "x86_64")]
 use crate::{lcs_multiword_kernel, LargeCtx};
 
@@ -26,14 +26,41 @@ pub(crate) unsafe fn myers_step(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
 }
 
 /// Plain-Rust form of [`myers_step`] taking advantage of and-not (`!a & b`),
-/// which compiles to `andn` when BMI1 is enabled.
+/// which compiles to `andn` when BMI1 is enabled, with a loop-carried chain
+/// of 5 ops.
+///
+/// The algebra of [`crate::kernels::aarch64::apple::myers_step`]
+/// (`S = sum << 1`, each output a two-op select on `S`), with the negations
+/// moved where x86-64 has no `orn`/`eon`: `vp' = !A ^ (!D | S)` instead of
+/// `A ^ (D & !S)`, with `!A = !(E & P) & (xv | N)` and
+/// `!D = (xv ^ P) | (xv << 1)`, and `vn' = (xv & N) | (!S & G)` with
+/// `G = !(E | P) & xv` (`E = eq << 1`, `P = vp << 1`, `N = vn << 1`).
+/// 18 ops against 15 for [`myers_step_andn_chain6`].  Two values pass
+/// through [`opaque`] to keep LLVM from lengthening the chain.
+#[inline(always)]
+pub(crate) fn myers_step_andn(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
+    let xv = eq | vn;
+    // `p` opaque: else LLVM forms `s` with a scaled `lea` (2 cycles on
+    // some cores) on the chain.
+    let (e, p, n) = (eq << 1, opaque(vp << 1), vn << 1);
+    let t = e & p;
+    let s = t.wrapping_add(p);
+    let na = !t & (xv | n);
+    let z = (xv ^ p) | (xv << 1) | s;
+    // `g` opaque: else LLVM factors `xv` out of `vn'` as
+    // `xv & (n | !(e | p | s))`, two ops after `s` instead of one.
+    let g = opaque(!(e | p) & xv);
+    (na ^ z, (xv & n) | (!s & g))
+}
+
+/// The chain-6 form of [`myers_step_andn`], 15 ops.
 ///
 /// Uses the identities `!ph_s = (X << 1) & !(vn << 1)` and
 /// `!(xv | ph_s) = (X << 1) & !(xv | (vn << 1))` with `X = sum | vp | eq`
 /// (from PR #221), removing the `| 1` constant off the critical recurrence
 /// path.
 #[inline(always)]
-pub(crate) fn myers_step_andn(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
+pub(crate) fn myers_step_andn_chain6(eq: u64, vp: u64, vn: u64) -> (u64, u64) {
     let sum = (eq & vp).wrapping_add(vp);
     let x = sum | (vp | eq);
     let mh = vp & !(sum & !eq);

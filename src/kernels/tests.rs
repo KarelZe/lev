@@ -350,6 +350,16 @@ fn myers_step_matches_portable() {
         assert_eq!(myers_step_few_ops(eq, vp, vn), expected, "few ops");
         assert_eq!(neoverse::myers_step(eq, vp, vn), expected, "neoverse");
         assert_eq!(bmi1::myers_step_andn(eq, vp, vn), expected, "bmi1 andn");
+        assert_eq!(
+            neoverse::myers_step_chain6(eq, vp, vn),
+            expected,
+            "neoverse chain6"
+        );
+        assert_eq!(
+            bmi1::myers_step_andn_chain6(eq, vp, vn),
+            expected,
+            "bmi1 andn chain6"
+        );
         assert_eq!(x86_64::myers_step(eq, vp, vn), expected, "x86_64");
         #[cfg(target_arch = "x86_64")]
         if std::is_x86_feature_detected!("bmi1") {
